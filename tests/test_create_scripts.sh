@@ -173,6 +173,38 @@ test_generated_script_sets_correct_constants() {
     grep -q '^PARALLEL=3$' "$s" || return 1
 }
 
+test_create_scripts_sanitizes_ipv6_filenames() {
+    # Bracketed IPv6 hostnames produce filenames containing `[`, `]`, `:`
+    # which break globs and FAT/Windows-mounted shares. Phase 3 sanitizes
+    # the filename (replacing those chars with `_`) while preserving the
+    # original hostname inside the script body.
+    write_and_init '[fe80::1]' '[fe80::2]'
+    run_orch create-scripts
+    assert_status 0 "$RUN_RC" "create-scripts should accept bracketed IPv6" || return 1
+    local scripts_dir="$IPERF_DIR/scripts"
+    # Sanitized filenames: : / [ ] become _.
+    assert_file_exists "$scripts_dir/run__fe80__1_.sh" "missing sanitized script for [fe80::1]" || return 1
+    assert_file_exists "$scripts_dir/run__fe80__2_.sh" "missing sanitized script for [fe80::2]" || return 1
+    # Each script should contain its own SOURCE= unsanitized.
+    grep -qF 'SOURCE="[fe80::1]"' "$scripts_dir/run__fe80__1_.sh" || {
+        echo "[fe80::1] should appear as SOURCE in run__fe80__1_.sh" >&2
+        return 1
+    }
+    grep -qF 'SOURCE="[fe80::2]"' "$scripts_dir/run__fe80__2_.sh" || {
+        echo "[fe80::2] should appear as SOURCE in run__fe80__2_.sh" >&2
+        return 1
+    }
+    # Exactly one of the two pair endpoints is the client (parity rule);
+    # whichever one it is, its TARGETS array must contain the other
+    # peer's original (unsanitized) hostname.
+    if ! grep -hqF '"[fe80::1]"' "$scripts_dir"/run__fe80__*.sh \
+       || ! grep -hqF '"[fe80::2]"' "$scripts_dir"/run__fe80__*.sh; then
+        echo "expected both peers' raw hostnames to appear across the two scripts" >&2
+        cat "$scripts_dir"/run__fe80__*.sh >&2
+        return 1
+    fi
+}
+
 test_create_scripts_sets_pipeline_state() {
     write_and_init h0 h1 h2
     run_orch create-scripts >/dev/null 2>&1
@@ -205,6 +237,7 @@ run_test test_generated_script_does_not_target_self
 run_test test_generated_script_uses_full_duplex_and_csv_output
 run_test test_generated_script_writes_pair_header
 run_test test_generated_script_sets_correct_constants
+run_test test_create_scripts_sanitizes_ipv6_filenames
 run_test test_create_scripts_sets_pipeline_state
 run_test test_generated_scripts_handle_synchronized_start
 
