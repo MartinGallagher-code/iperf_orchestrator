@@ -522,8 +522,17 @@ cmd_status() {
 # --ask-password. Echoes the password to stdout. Exits if the configured
 # source is unusable.
 _resolve_ssh_password() {
+    # Resolves the SSH password from one of the configured sources and
+    # writes it into the global _IPERF_ORCH_PW. Returns non-zero on
+    # any failure (missing/empty file, missing/empty env var, empty
+    # interactive input). The caller MUST check the return code and
+    # die() on failure -- die()'s exit cannot be relied on here
+    # because earlier callers were invoking us via $() and the exit
+    # only killed the subshell, leaving an empty password to leak
+    # through to expect.
+    _IPERF_ORCH_PW=""
     if [ -n "$SSH_PASSWORD_FILE" ]; then
-        [ -f "$SSH_PASSWORD_FILE" ] || die "password file not found: $SSH_PASSWORD_FILE"
+        [ -f "$SSH_PASSWORD_FILE" ] || { err "password file not found: $SSH_PASSWORD_FILE"; return 1; }
         local perms=""
         perms=$(stat -c '%a' "$SSH_PASSWORD_FILE" 2>/dev/null || stat -f '%A' "$SSH_PASSWORD_FILE" 2>/dev/null || echo "")
         case "$perms" in
@@ -532,14 +541,14 @@ _resolve_ssh_password() {
         esac
         local pw
         IFS= read -r pw < "$SSH_PASSWORD_FILE" || true
-        [ -n "$pw" ] || die "password file $SSH_PASSWORD_FILE is empty"
-        printf '%s' "$pw"
+        [ -n "$pw" ] || { err "password file $SSH_PASSWORD_FILE is empty"; return 1; }
+        _IPERF_ORCH_PW="$pw"
         return 0
     fi
     if [ -n "$SSH_PASSWORD_ENV" ]; then
         local val="${!SSH_PASSWORD_ENV:-}"
-        [ -n "$val" ] || die "env var \$$SSH_PASSWORD_ENV is empty or unset"
-        printf '%s' "$val"
+        [ -n "$val" ] || { err "env var \$$SSH_PASSWORD_ENV is empty or unset"; return 1; }
+        _IPERF_ORCH_PW="$val"
         return 0
     fi
     if [ "$SSH_ASK_PASSWORD" = "yes" ]; then
@@ -547,10 +556,12 @@ _resolve_ssh_password() {
         printf "SSH password (used for all hosts): " >&2
         IFS= read -rs pw < /dev/tty
         printf '\n' >&2
-        [ -n "$pw" ] || die "empty password"
-        printf '%s' "$pw"
+        [ -n "$pw" ] || { err "empty password"; return 1; }
+        _IPERF_ORCH_PW="$pw"
         return 0
     fi
+    err "no password source configured"
+    return 1
 }
 
 # Drive ssh-copy-id to a single host using `expect`. Reads the password from
@@ -607,6 +618,11 @@ _worker_ssh_copy_id() {
 }
 
 cmd_ssh_setup() {
+    # Up-front: server list must exist. The interactive path below
+    # would otherwise silently no-op (read_servers' die fires inside a
+    # $() subshell) and falsely set SSH_KEYS_DISTRIBUTED=yes.
+    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
+
     # Make sure we have a key
     local key="$HOME/.ssh/id_ed25519"
     if [ ! -f "$key" ] && [ ! -f "$HOME/.ssh/id_rsa" ]; then
@@ -625,7 +641,8 @@ cmd_ssh_setup() {
         # Export so subshells (parallel workers -> expect) inherit it.
         # Resolved once and reused for every host.
         export _IPERF_ORCH_PW
-        _IPERF_ORCH_PW=$(_resolve_ssh_password)
+        _resolve_ssh_password \
+            || die "could not resolve SSH password (see above)"
         use_expect=1
     fi
 
