@@ -122,6 +122,17 @@ test_status_with_no_init() {
     assert_contains "$RUN_OUT" "no list yet" "should report missing server list" || return 1
 }
 
+test_status_shows_next_hint() {
+    local src="$TEST_TMPDIR/srv.txt"
+    printf 'h1\nh2\n' > "$src"
+    run_orch init "$src" >/dev/null
+    run_orch status
+    assert_status 0 "$RUN_RC" || return 1
+    # After init, the next pending step should be ssh-setup.
+    assert_contains "$RUN_OUT" "Next:" "status should print 'Next:' hint" || return 1
+    assert_contains "$RUN_OUT" "ssh-setup" "next hint should point at ssh-setup" || return 1
+}
+
 test_status_after_init_shows_pipeline_steps() {
     local src="$TEST_TMPDIR/srv.txt"
     printf 'h1\nh2\n' > "$src"
@@ -145,6 +156,7 @@ run_test test_init_rejects_path_entries
 run_test test_init_warns_on_too_few_hosts
 run_test test_init_accepts_bracketed_ipv6
 run_test test_status_with_no_init
+run_test test_status_shows_next_hint
 run_test test_status_after_init_shows_pipeline_steps
 
 report_tests

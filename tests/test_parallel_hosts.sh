@@ -138,6 +138,43 @@ test_parallel_hosts_emits_live_progress_on_stderr() {
     }
 }
 
+test_parallel_hosts_retries_on_failure() {
+    write_servers a b
+    export IPERF_PROGRESS=0
+    export IPERF_RETRIES=2
+    source_orch
+    # Worker fails the first time for each host, succeeds the second time.
+    export RETRY_STATE_DIR="$TEST_TMPDIR/retry-state"
+    mkdir -p "$RETRY_STATE_DIR"
+    _worker_flaky() {
+        local host="$1"
+        local f="$RETRY_STATE_DIR/$host.count"
+        local n=0
+        [ -f "$f" ] && n=$(cat "$f")
+        n=$((n + 1))
+        echo "$n" > "$f"
+        if [ "$n" -lt 2 ]; then
+            return 1
+        fi
+        return 0
+    }
+    parallel_hosts _worker_flaky >/dev/null 2>&1
+    # Both hosts should have ended up successful after their retry.
+    if [ "${#PARALLEL_FAILED[@]}" -ne 0 ]; then
+        echo "expected 0 failures after retry, got ${#PARALLEL_FAILED[@]}: ${PARALLEL_FAILED[*]}" >&2
+        return 1
+    fi
+    # Each host's worker should have been called exactly twice.
+    local count_a count_b
+    count_a=$(cat "$RETRY_STATE_DIR/a.count")
+    count_b=$(cat "$RETRY_STATE_DIR/b.count")
+    if [ "$count_a" != "2" ] || [ "$count_b" != "2" ]; then
+        echo "expected 2 calls per host, got a=$count_a b=$count_b" >&2
+        return 1
+    fi
+    unset IPERF_RETRIES
+}
+
 test_parallel_hosts_progress_disabled_via_env() {
     write_servers a b c
     export IPERF_JOBS=8
@@ -173,6 +210,7 @@ run_test test_parallel_hosts_captures_worker_output_in_order
 run_test test_parallel_hosts_empty_list_is_noop
 run_test test_parallel_hosts_emits_live_progress_on_stderr
 run_test test_parallel_hosts_progress_disabled_via_env
+run_test test_parallel_hosts_retries_on_failure
 run_test test_parallel_hosts_no_failures_leaves_empty_array
 
 report_tests

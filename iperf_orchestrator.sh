@@ -67,6 +67,17 @@ SSH_PASSWORD_FILE="${SSH_PASSWORD_FILE:-}"
 SSH_PASSWORD_ENV="${SSH_PASSWORD_ENV:-}"
 SSH_ASK_PASSWORD="${SSH_ASK_PASSWORD:-no}"
 
+# Number of retry attempts after a worker fails inside parallel_hosts.
+# 0 = no retries (current behavior). Useful for flaky SSH on big fleets.
+IPERF_RETRIES="${IPERF_RETRIES:-0}"
+
+# Verbosity: 0 = quiet (errors and warnings only),
+#            1 = normal (default),
+#            2 = verbose (also prints every ssh/scp invocation).
+# --dry-run prints SSH/SCP commands without running them.
+IPERF_VERBOSITY="${IPERF_VERBOSITY:-1}"
+IPERF_DRY_RUN="${IPERF_DRY_RUN:-0}"
+
 START_DELAY="${START_DELAY:-30}"           # seconds in future for synchronized start
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -74,15 +85,22 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 #------------------------------------------------------------------------------
 # CLI flag pre-pass
 #
-# Consumes flags from "$@" and leaves only the subcommand + its positional
-# args behind. Flags accept both "--key value" and "--key=value" forms.
-# Anything after a literal "--" is passed through verbatim.
+# Consumes GLOBAL flags up until the subcommand and leaves the subcommand
+# plus its arguments behind. Once the first positional (the subcommand)
+# is seen, everything after it is forwarded to the subcommand verbatim --
+# including subcommand-specific flags like `cleanup --yes` or
+# `all --keep-going`. Anything after a literal "--" is also passed through.
+# Both "--key value" and "--key=value" forms are accepted for global flags.
 #------------------------------------------------------------------------------
 _flag_die() { echo "iperf-orchestrator: $*" >&2; exit 2; }
 _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
 
 _PARSED=()
+_saw_subcommand=0
 while [ $# -gt 0 ]; do
+    if [ "$_saw_subcommand" = "1" ]; then
+        _PARSED+=("$1"); shift; continue
+    fi
     case "$1" in
         --port)          _flag_need "$1" "${2:-}"; IPERF_PORT="$2"; shift 2 ;;
         --port=*)        IPERF_PORT="${1#*=}"; shift ;;
@@ -107,14 +125,19 @@ while [ $# -gt 0 ]; do
         --password-env)    _flag_need "$1" "${2:-}"; SSH_PASSWORD_ENV="$2"; shift 2 ;;
         --password-env=*)  SSH_PASSWORD_ENV="${1#*=}"; shift ;;
         --ask-password)    SSH_ASK_PASSWORD=yes; shift ;;
+        --retries)         _flag_need "$1" "${2:-}"; IPERF_RETRIES="$2"; shift 2 ;;
+        --retries=*)       IPERF_RETRIES="${1#*=}"; shift ;;
+        --dry-run|-n)      IPERF_DRY_RUN=1; shift ;;
+        --verbose|-v)      IPERF_VERBOSITY=2; shift ;;
+        --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
-        --*)             _flag_die "unknown flag: $1" ;;
-        *)               _PARSED+=("$1"); shift ;;
+        --*)             _flag_die "unknown flag: $1 (global flags must come before the subcommand; subcommand flags must come after)" ;;
+        *)               _PARSED+=("$1"); _saw_subcommand=1; shift ;;
     esac
 done
 set -- "${_PARSED[@]}"
-unset _PARSED
+unset _PARSED _saw_subcommand
 
 # Re-validate the integer flags now that env+CLI have been merged.
 # Garbage values get caught here instead of silently propagating into
@@ -132,6 +155,9 @@ _validate_uint "IPERF_PORT / --port"           "$IPERF_PORT"     1
 _validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
 _validate_uint "IPERF_PARALLEL / --parallel"   "$IPERF_PARALLEL" 1
 _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
+_validate_uint "IPERF_RETRIES / --retries"     "$IPERF_RETRIES"  0
+_validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
+[ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
 
 # Paths derived from IPERF_DIR (computed AFTER flags so --iperf-dir works).
@@ -147,7 +173,22 @@ mkdir -p "$IPERF_DIR" "$RESULTS_DIR" "$LOGS_DIR" "$SCRIPTS_DIR"
 # Logging
 #------------------------------------------------------------------------------
 ts()    { date '+%Y-%m-%d %H:%M:%S'; }
-log()   { echo "[$(ts)] $*" | tee -a "$LOGS_DIR/orchestrator.log"; }
+log() {
+    # Suppressed at --quiet (IPERF_VERBOSITY=0). Always written to the
+    # orchestrator log file regardless of verbosity.
+    local line="[$(ts)] $*"
+    echo "$line" >> "$LOGS_DIR/orchestrator.log"
+    [ "${IPERF_VERBOSITY:-1}" -ge 1 ] && echo "$line"
+    return 0
+}
+vlog() {
+    # Verbose-only: only printed at --verbose (IPERF_VERBOSITY=2). Still
+    # always logged to the file for post-hoc debugging.
+    local line="[$(ts)] $*"
+    echo "$line" >> "$LOGS_DIR/orchestrator.log"
+    [ "${IPERF_VERBOSITY:-1}" -ge 2 ] && echo "$line"
+    return 0
+}
 warn()  { echo "[$(ts)] WARN: $*"  | tee -a "$LOGS_DIR/orchestrator.log" >&2; }
 err()   { echo "[$(ts)] ERROR: $*" | tee -a "$LOGS_DIR/orchestrator.log" >&2; }
 die()   { err "$*"; exit 1; }
@@ -203,6 +244,11 @@ read_servers() {
 ssh_run() {
     # ssh_run <host> <command...>
     local host="$1"; shift
+    vlog "ssh $SSH_USER@$host: $*"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN ssh $SSH_USER@$host -- $*"
+        return 0
+    fi
     # shellcheck disable=SC2086
     ssh $SSH_BATCH_OPTS "$SSH_USER@$host" "$@"
 }
@@ -210,6 +256,11 @@ ssh_run() {
 ssh_run_interactive() {
     # Allows password prompts (used by ssh-setup before keys exist)
     local host="$1"; shift
+    vlog "ssh (interactive) $SSH_USER@$host: $*"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN ssh (interactive) $SSH_USER@$host -- $*"
+        return 0
+    fi
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "$SSH_USER@$host" "$@"
 }
@@ -217,6 +268,11 @@ ssh_run_interactive() {
 scp_to() {
     # scp_to <local_src> <host> <remote_dst>
     local src="$1" host="$2" dst="$3"
+    vlog "scp $src -> $SSH_USER@$host:$dst"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN scp $src -> $SSH_USER@$host:$dst"
+        return 0
+    fi
     # shellcheck disable=SC2086
     scp $SSH_BATCH_OPTS "$src" "$SSH_USER@$host:$dst" >/dev/null
 }
@@ -224,6 +280,11 @@ scp_to() {
 scp_from() {
     # scp_from <host> <remote_src> <local_dst>
     local host="$1" src="$2" dst="$3"
+    vlog "scp $SSH_USER@$host:$src -> $dst"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN scp $SSH_USER@$host:$src -> $dst"
+        return 0
+    fi
     # shellcheck disable=SC2086
     scp $SSH_BATCH_OPTS "$SSH_USER@$host:$src" "$dst" >/dev/null 2>&1
 }
@@ -310,8 +371,23 @@ parallel_hosts() {
             running=$((running - 1))
         fi
         (
-            "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
-            echo $? > "$tmpdir/$i.rc"
+            # IPERF_RETRIES (default 0) gives N extra attempts after a
+            # non-zero exit, with linear back-off (1s, 2s, ...). Useful
+            # for transient SSH timeouts during ssh-setup / check-iperf.
+            local _attempt=0
+            local _max=$((${IPERF_RETRIES:-0} + 1))
+            local _rc=0
+            while [ "$_attempt" -lt "$_max" ]; do
+                _attempt=$((_attempt + 1))
+                "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
+                _rc=$?
+                [ "$_rc" -eq 0 ] && break
+                if [ "$_attempt" -lt "$_max" ]; then
+                    echo "  retry $_attempt/$((_max - 1)) for ${hosts[$i]} after rc=$_rc" >> "$tmpdir/$i.out"
+                    sleep "$_attempt"
+                fi
+            done
+            echo "$_rc" > "$tmpdir/$i.rc"
         ) &
         running=$((running + 1))
     done
@@ -419,6 +495,11 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --duration, -d SECONDS     test duration per pair (default $IPERF_DURATION)
     --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
     --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --retries N                retry parallel_hosts workers N extra times
+                               on failure with linear back-off (default $IPERF_RETRIES)
+    --dry-run, -n              print SSH/SCP commands without executing them
+    --verbose, -v              also print every ssh/scp invocation
+    --quiet, -q                suppress non-WARN/ERROR log lines
     --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --iperf-dir PATH           local working dir (default $IPERF_DIR)
@@ -610,6 +691,44 @@ cmd_status() {
         printf "  %-30s %s\n" "$s" "${STATE[$s]:-no}"
     done
 
+    # Suggest the next pipeline step. Each state key maps to the
+    # subcommand that flips it to "yes". Find the first one still set
+    # to "no" and surface it so the user doesn't have to memorize the
+    # pipeline order.
+    local first_pending=""
+    local cmd_for_step=(
+        "SERVER_LIST_LOADED:init <server_list>"
+        "SSH_KEYS_DISTRIBUTED:ssh-setup"
+        "IPERF_INSTALLED_CHECKED:check-iperf"
+        "SERVERS_RUNNING_CHECKED:check-servers"
+        "SERVERS_STARTED:start-servers"
+        "SCRIPTS_CREATED:create-scripts"
+        "SCRIPTS_DISTRIBUTED:distribute-scripts"
+        "TESTS_RUN:run-tests"
+        "RESULTS_COLLECTED:collect-results"
+        "SERVERS_STOPPED:stop-servers"
+        "CLEANED_UP:cleanup"
+        "CSV_BUILT:parse-csv"
+        "CPU_PARSED:parse-cpu"
+        "PIVOT_BUILT:make-pivot"
+        "HEATMAP_BUILT:make-heatmap"
+    )
+    local entry key cmd
+    for entry in "${cmd_for_step[@]}"; do
+        key="${entry%%:*}"
+        cmd="${entry#*:}"
+        if [ "${STATE[$key]:-no}" != "yes" ]; then
+            first_pending="$cmd"
+            break
+        fi
+    done
+    echo
+    if [ -n "$first_pending" ]; then
+        echo "Next: $0 $first_pending"
+    else
+        echo "Pipeline complete. Results in: $RESULTS_DIR"
+    fi
+
     # Show per-host check results if present
     for f in "$IPERF_DIR/iperf_installed.txt" "$IPERF_DIR/iperf_running.txt"; do
         if [ -f "$f" ]; then
@@ -622,18 +741,14 @@ cmd_status() {
 
 #------------------------------------------------------------------------------
 # Resolve a single SSH password from --password-file / --password-env /
-# --ask-password. Echoes the password to stdout. Exits if the configured
-# source is unusable.
+# --ask-password and write it to a chmod-600 temp file whose path is
+# placed in the global _IPERF_ORCH_PW_FILE. Using a file (instead of an
+# env var that gets inherited and is visible via /proc/$pid/environ)
+# avoids a leak path. The caller is responsible for unlinking the file
+# via _scrub_ssh_password.
 _resolve_ssh_password() {
-    # Resolves the SSH password from one of the configured sources and
-    # writes it into the global _IPERF_ORCH_PW. Returns non-zero on
-    # any failure (missing/empty file, missing/empty env var, empty
-    # interactive input). The caller MUST check the return code and
-    # die() on failure -- die()'s exit cannot be relied on here
-    # because earlier callers were invoking us via $() and the exit
-    # only killed the subshell, leaving an empty password to leak
-    # through to expect.
-    _IPERF_ORCH_PW=""
+    _IPERF_ORCH_PW_FILE=""
+    local pw=""
     if [ -n "$SSH_PASSWORD_FILE" ]; then
         [ -f "$SSH_PASSWORD_FILE" ] || { err "password file not found: $SSH_PASSWORD_FILE"; return 1; }
         local perms=""
@@ -642,34 +757,46 @@ _resolve_ssh_password() {
             ''|400|600) ;;
             *) warn "password file $SSH_PASSWORD_FILE has permissions $perms; recommend chmod 600" ;;
         esac
-        local pw
         IFS= read -r pw < "$SSH_PASSWORD_FILE" || true
         [ -n "$pw" ] || { err "password file $SSH_PASSWORD_FILE is empty"; return 1; }
-        _IPERF_ORCH_PW="$pw"
-        return 0
-    fi
-    if [ -n "$SSH_PASSWORD_ENV" ]; then
-        local val="${!SSH_PASSWORD_ENV:-}"
-        [ -n "$val" ] || { err "env var \$$SSH_PASSWORD_ENV is empty or unset"; return 1; }
-        _IPERF_ORCH_PW="$val"
-        return 0
-    fi
-    if [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        local pw
+    elif [ -n "$SSH_PASSWORD_ENV" ]; then
+        pw="${!SSH_PASSWORD_ENV:-}"
+        [ -n "$pw" ] || { err "env var \$$SSH_PASSWORD_ENV is empty or unset"; return 1; }
+    elif [ "$SSH_ASK_PASSWORD" = "yes" ]; then
         printf "SSH password (used for all hosts): " >&2
         IFS= read -rs pw < /dev/tty
         printf '\n' >&2
         [ -n "$pw" ] || { err "empty password"; return 1; }
-        _IPERF_ORCH_PW="$pw"
-        return 0
+    else
+        err "no password source configured"
+        return 1
     fi
-    err "no password source configured"
-    return 1
+
+    # Write the resolved password into a chmod-600 temp file. We create
+    # the file mode-restricted before writing, to avoid a window where
+    # the password is on disk world-readable.
+    local f
+    f=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-pw.XXXXXX") \
+        || { err "mktemp failed for password file"; return 1; }
+    chmod 600 "$f" || { rm -f "$f"; err "chmod 600 failed on $f"; return 1; }
+    # Newline-terminated so expect's `gets` returns the line cleanly.
+    printf '%s\n' "$pw" > "$f"
+    _IPERF_ORCH_PW_FILE="$f"
+    return 0
 }
 
-# Drive ssh-copy-id to a single host using `expect`. Reads the password from
-# the env var _IPERF_ORCH_PW so it never appears in argv (and thus not in
-# `ps`). Returns 0 on success, non-zero on failure.
+# Tear down the password file (if any). Safe to call multiple times.
+_scrub_ssh_password() {
+    if [ -n "${_IPERF_ORCH_PW_FILE:-}" ] && [ -f "$_IPERF_ORCH_PW_FILE" ]; then
+        rm -f "$_IPERF_ORCH_PW_FILE"
+    fi
+    unset _IPERF_ORCH_PW_FILE
+}
+
+# Drive ssh-copy-id to a single host using `expect`. Reads the password
+# from the chmod-600 temp file pointed to by env var _IPERF_ORCH_PW_FILE
+# (set by _resolve_ssh_password). Using a file rather than an env var
+# avoids /proc/$pid/environ exposure. Returns 0 on success.
 _ssh_copy_id_expect() {
     local host="$1"
     expect -f - "$SSH_USER" "$host" <<'EXPECT_EOF'
@@ -677,11 +804,17 @@ log_user 0
 set timeout 30
 set user [lindex $argv 0]
 set host [lindex $argv 1]
-if {![info exists env(_IPERF_ORCH_PW)]} {
-    puts stderr "expect: _IPERF_ORCH_PW not set"
+if {![info exists env(_IPERF_ORCH_PW_FILE)]} {
+    puts stderr "expect: _IPERF_ORCH_PW_FILE not set"
     exit 3
 }
-set password $env(_IPERF_ORCH_PW)
+set pwfile $env(_IPERF_ORCH_PW_FILE)
+if {[catch {open $pwfile r} fp]} {
+    puts stderr "expect: cannot open password file $pwfile: $fp"
+    exit 3
+}
+set password [string trimright [read $fp] "\n"]
+close $fp
 set sent_pw 0
 spawn ssh-copy-id -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -- $user@$host
 expect {
@@ -741,11 +874,13 @@ cmd_ssh_setup() {
     if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
         command -v expect >/dev/null 2>&1 \
             || die "automated password entry requires 'expect' (install with: apt install expect / dnf install expect / brew install expect)"
-        # Export so subshells (parallel workers -> expect) inherit it.
-        # Resolved once and reused for every host.
-        export _IPERF_ORCH_PW
         _resolve_ssh_password \
             || die "could not resolve SSH password (see above)"
+        # Export the path so subshells (parallel workers -> expect)
+        # inherit it. Make sure the temp file is unlinked even on
+        # signal so the password doesn't outlive an interrupted run.
+        export _IPERF_ORCH_PW_FILE
+        trap '_scrub_ssh_password' EXIT INT TERM
         use_expect=1
     fi
 
@@ -754,8 +889,8 @@ cmd_ssh_setup() {
         log "Distributing keys in parallel (max $IPERF_JOBS concurrent)"
         parallel_hosts _worker_ssh_copy_id
         failure_count=${#PARALLEL_FAILED[@]}
-        # Scrub the password from the environment.
-        unset _IPERF_ORCH_PW
+        _scrub_ssh_password
+        trap - EXIT INT TERM
     else
         # Interactive fallback: must stay sequential so password prompts
         # don't collide on stdin.
@@ -859,20 +994,24 @@ cmd_check_servers() {
 #------------------------------------------------------------------------------
 _worker_start_server() {
     local host="$1"
-    # pkill -x matches the exact process name "iperf" (not "iperf3").
-    # iperf2's multi-threaded server handles concurrent clients on one
-    # port, so we only need a single instance per host.
+    local errlog="$LOGS_DIR/start_${host}.err"
+    # pkill -f scopes to "iperf -s -p $IPERF_PORT" so we don't disturb
+    # the user's unrelated iperf -c clients or iperf servers on other
+    # ports. The [i]perf trick keeps pgrep from matching its own argv.
+    # Per-host remote stderr captured to $errlog so failures are
+    # diagnosable instead of just "FAILED to start on $host".
     if ssh_run "$host" "
         mkdir -p '$REMOTE_DIR' &&
-        pkill -x iperf 2>/dev/null; sleep 1;
+        pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null; sleep 1;
         nohup iperf -s -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1 &
         disown || true
         sleep 1
-        pgrep -x iperf >/dev/null
-    "; then
+        pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null
+    " 2>"$errlog"; then
         log "  OK: $host"
+        rm -f "$errlog"   # nothing useful, drop it
     else
-        warn "  FAILED to start on $host"
+        warn "  FAILED to start on $host (see $errlog)"
         return 1
     fi
 }
@@ -1358,7 +1497,7 @@ cmd_collect_results() {
 #------------------------------------------------------------------------------
 _worker_stop_server() {
     local host="$1"
-    if ssh_run "$host" "pkill -x iperf 2>/dev/null; sleep 0.5; ! pgrep -x iperf >/dev/null"; then
+    if ssh_run "$host" "pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null; sleep 0.5; ! pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null"; then
         log "  stopped: $host"
     else
         warn "  $host still has iperf running"
@@ -1388,6 +1527,20 @@ _worker_cleanup() {
 }
 
 cmd_cleanup() {
+    # Require --yes when invoked directly so a stray ./orch.sh cleanup
+    # doesn't blow away $REMOTE_DIR on every host with no warning.
+    # cmd_all sets _IPERF_ORCH_INTERNAL=1 to bypass this -- the pipeline
+    # is the canonical way to call cleanup.
+    if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ]; then
+        local seen_yes=0 a
+        for a in "$@"; do
+            [ "$a" = "--yes" ] && seen_yes=1
+        done
+        if [ "$seen_yes" -ne 1 ]; then
+            err "cleanup will run 'rm -rf $REMOTE_DIR' on every host."
+            die "pass --yes to confirm (e.g. $0 cleanup --yes)"
+        fi
+    fi
     log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_cleanup
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
@@ -1973,11 +2126,27 @@ cmd_make_pivot() {
     [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
     log "Building pivot table -> $pivot"
 
-    "$PYTHON_BIN" - "$csv" "$pivot" <<'PYEOF'
+    # Metadata captured for the header (best effort; reflects current
+    # environment, which may have changed since the actual test run).
+    local meta_run_at meta_mode meta_duration meta_port meta_parallel meta_n_hosts
+    meta_run_at="$(date '+%F %T %z')"
+    meta_mode="$(get_state TESTS_RUN_MODE)"
+    [ -z "$meta_mode" ] || [ "$meta_mode" = "no" ] && meta_mode="(unknown)"
+    meta_duration="$IPERF_DURATION"
+    meta_port="$IPERF_PORT"
+    meta_parallel="$IPERF_PARALLEL"
+    meta_n_hosts=0
+    [ -f "$SERVER_LIST_FILE" ] && meta_n_hosts=$(read_servers | wc -l)
+
+    "$PYTHON_BIN" - "$csv" "$pivot" \
+        "$meta_run_at" "$meta_mode" "$meta_duration" "$meta_port" \
+        "$meta_parallel" "$meta_n_hosts" <<'PYEOF'
 import csv, sys
 from collections import defaultdict
 
 in_csv, out_txt = sys.argv[1], sys.argv[2]
+meta_run_at, meta_mode, meta_duration = sys.argv[3], sys.argv[4], sys.argv[5]
+meta_port, meta_parallel, meta_n_hosts = sys.argv[6], sys.argv[7], sys.argv[8]
 
 mat = defaultdict(dict)   # mat[src][dst] = mbps
 sources, targets = set(), set()
@@ -2009,6 +2178,9 @@ def fmt_num(v):
 
 with open(out_txt, "w") as f:
     f.write(f"iperf2 full-duplex mesh throughput (Mbps)\n")
+    f.write(f"Run at:   {meta_run_at}\n")
+    f.write(f"Mode:     {meta_mode}    Duration: {meta_duration}s    "
+            f"Port: {meta_port}    Parallel: {meta_parallel}    Hosts: {meta_n_hosts}\n")
     f.write(f"Rows = source (sender), Columns = target (receiver)\n")
     f.write(f"Each cell from a single full-duplex test that measured both directions concurrently.\n")
     f.write(f"Diagonal '-' = no self-test\n\n")
@@ -2058,12 +2230,22 @@ cmd_make_heatmap() {
     [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
     log "Rendering heatmap + bar chart -> $png"
 
-    "$PYTHON_BIN" - "$csv" "$png" "$cpu_csv" <<'PYEOF'
+    local meta_run_at meta_mode meta_duration
+    meta_run_at="$(date '+%F %T %z')"
+    meta_mode="$(get_state TESTS_RUN_MODE)"
+    [ -z "$meta_mode" ] || [ "$meta_mode" = "no" ] && meta_mode="(unknown)"
+    meta_duration="$IPERF_DURATION"
+
+    "$PYTHON_BIN" - "$csv" "$png" "$cpu_csv" \
+        "$meta_run_at" "$meta_mode" "$meta_duration" <<'PYEOF'
 import csv, sys, os
 from collections import defaultdict
 
 in_csv, out_png = sys.argv[1], sys.argv[2]
 cpu_csv = sys.argv[3] if len(sys.argv) > 3 else ""
+meta_run_at = sys.argv[4] if len(sys.argv) > 4 else ""
+meta_mode   = sys.argv[5] if len(sys.argv) > 5 else ""
+meta_dur    = sys.argv[6] if len(sys.argv) > 6 else ""
 
 # Load CPU peaks per host if cpu_summary.csv is available. Used to overlay
 # "peak X%" annotations on the bar chart.
@@ -2177,7 +2359,14 @@ ax_heat.set_yticklabels(tick_lab, fontsize=heat_fontsize)
 ax_heat.set_xlabel("Target (receiver direction)")
 ax_heat.set_ylabel("Source (sender direction)")
 sub = "" if annotate_cells else f"  (cell labels suppressed for readability at N={n})"
-ax_heat.set_title(f"iperf2 full-duplex mesh throughput (Mbps)  —  {n}×{n} hosts{sub}")
+title_main = f"iperf2 full-duplex mesh throughput (Mbps)  —  {n}×{n} hosts{sub}"
+if meta_run_at or meta_mode or meta_dur:
+    meta_bits = []
+    if meta_run_at: meta_bits.append(meta_run_at)
+    if meta_mode:   meta_bits.append(f"mode={meta_mode}")
+    if meta_dur:    meta_bits.append(f"duration={meta_dur}s")
+    title_main = title_main + "\n" + " | ".join(meta_bits)
+ax_heat.set_title(title_main)
 
 if annotate_cells:
     for i in range(n):
@@ -2371,7 +2560,8 @@ cmd_all() {
     fi
     cmd_collect_results;    _all_gate collect-results
     cmd_stop_servers;       _all_gate stop-servers
-    cmd_cleanup;            _all_gate cleanup
+    _IPERF_ORCH_INTERNAL=1 cmd_cleanup
+    _all_gate cleanup
     cmd_parse_csv
     cmd_parse_cpu
     cmd_make_pivot
@@ -2385,10 +2575,145 @@ cmd_all() {
 }
 
 #==============================================================================
+# Per-subcommand help
+#
+# When the user runs `<subcmd> --help` we print a focused snippet for that
+# subcommand instead of the full usage. Returns 0 if a snippet was printed.
+#==============================================================================
+_subcmd_help() {
+    local sub="$1"
+    case "$sub" in
+        init)
+            cat <<'EOF'
+init <server_list_file>
+    Load a server list. The file should have one IP or hostname per line;
+    '#' comments and blank lines are ignored. Bracketed IPv6 ([fe80::1])
+    is accepted. Resets pipeline state so subsequent steps re-run.
+EOF
+            ;;
+        ssh-setup)
+            cat <<'EOF'
+ssh-setup
+    Generate ~/.ssh/id_ed25519 if missing, then run ssh-copy-id against
+    every host in the list. Default: prompts you per-host (sequential).
+    With --password-file / --password-env / --ask-password, drives
+    ssh-copy-id non-interactively via 'expect', in parallel (--jobs).
+EOF
+            ;;
+        check-iperf)
+            cat <<'EOF'
+check-iperf
+    Probe every host for `iperf -v` (must report version 2) and `mpstat`.
+    Writes results/iperf_installed.txt with per-host status. Hosts
+    without iperf2 fail the run; missing mpstat is tolerated (CPU
+    parser falls back to /proc/stat for box-wide CPU only).
+EOF
+            ;;
+        check-servers)
+            cat <<'EOF'
+check-servers
+    Probe every host for any running `iperf` daemon (informational).
+    Useful for verifying the cleanup state of a fleet before a fresh run.
+EOF
+            ;;
+        start-servers)
+            cat <<'EOF'
+start-servers
+    Start `iperf -s -p $IPERF_PORT` in daemon mode on every host. The
+    pkill scope is "iperf -s -p $IPERF_PORT" so unrelated iperf clients
+    or other-port servers are left alone.
+EOF
+            ;;
+        run-tests)
+            cat <<'EOF'
+run-tests [parallel|sequential-host|sequential-pair]
+    Run the iperf2 mesh tests. Modes:
+      parallel        (default) all hosts launch all clients
+                      simultaneously after a synchronized start.
+                      Maximum mesh contention; fastest wall-clock.
+      sequential-host hosts run one at a time; the active host fires
+                      its clients to all targets in parallel.
+      sequential-pair exactly one connection on the wire at any moment.
+                      Cleanest per-pair numbers; takes N*(N-1)/2 *
+                      duration (canonical pairs only).
+    Ctrl-C stops iperf servers on every host before exiting.
+EOF
+            ;;
+        collect-results)
+            cat <<'EOF'
+collect-results
+    Tar+gzip every host's iperf_test_*.log, iperf_run_*.status, and
+    cpu_*.log into results/ on this machine. Idempotent.
+EOF
+            ;;
+        stop-servers)
+            cat <<'EOF'
+stop-servers
+    Kill the iperf -s daemons we started. Scoped to "iperf -s -p $PORT"
+    so other iperf processes on the host aren't disturbed.
+EOF
+            ;;
+        cleanup)
+            cat <<'EOF'
+cleanup --yes
+    Remove $REMOTE_DIR (default /tmp/iperf_orchestrator) on every host.
+    Requires --yes when invoked directly to prevent accidental loss.
+    `all` calls this internally without --yes via an internal bypass.
+EOF
+            ;;
+        parse-csv|parse-cpu|make-pivot|make-heatmap)
+            cat <<'EOF'
+parse-csv / parse-cpu / make-pivot / make-heatmap
+    Local-only analysis steps (no SSH). Read from results/*.log files
+    that collect-results pulled back. Produces:
+      iperf_results.csv, cpu_summary.csv, iperf_pivot.txt, iperf_heatmap.png
+    Pivot and heatmap include a metadata header with run timestamp,
+    mode, and duration.
+EOF
+            ;;
+        all)
+            cat <<'EOF'
+all [parallel|sequential-host|sequential-pair] [--keep-going]
+    Run the full pipeline end-to-end. Calls `doctor` first to fail
+    fast on missing local prereqs. By default, aborts as soon as any
+    parallel step records per-host failures. Pass --keep-going to
+    plow through.
+EOF
+            ;;
+        doctor)
+            cat <<'EOF'
+doctor
+    Probe local prerequisites: ssh tools, expect (when a password flag
+    is set), python3 + numpy + pandas + matplotlib. Returns non-zero
+    on any missing dependency. `all` calls this first.
+EOF
+            ;;
+        status)
+            cat <<'EOF'
+status
+    Show pipeline progress (each state key as yes/no), the host count,
+    and a "Next:" hint pointing at the next subcommand to run.
+EOF
+            ;;
+        *)
+            return 1   # no specific snippet
+            ;;
+    esac
+    return 0
+}
+
+#==============================================================================
 # Dispatcher
 #==============================================================================
 cmd="${1:-}"
 shift || true
+
+# Subcommand-specific help: <subcmd> --help|-h
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    if _subcmd_help "$cmd"; then
+        exit 0
+    fi
+fi
 
 case "$cmd" in
     "")                 first_run_banner ;;
@@ -2403,7 +2728,7 @@ case "$cmd" in
     run-tests)          cmd_run_tests "$@" ;;
     collect-results)    cmd_collect_results ;;
     stop-servers)       cmd_stop_servers ;;
-    cleanup)            cmd_cleanup ;;
+    cleanup)            cmd_cleanup "$@" ;;
     parse-csv)          cmd_parse_csv ;;
     parse-cpu)          cmd_parse_cpu ;;
     make-pivot)         cmd_make_pivot ;;

@@ -132,4 +132,46 @@ run_test test_double_dash_terminates_flag_parsing
 run_test test_env_var_used_when_no_flag
 run_test test_flag_overrides_env
 
+test_subcommand_flag_passes_through_pre_pass() {
+    # Phase 2 made the flag pre-pass forward anything after the
+    # subcommand verbatim, so subcommand-specific flags like --yes
+    # and --keep-going aren't caught by the global "unknown flag"
+    # check. The cleanup --yes test in test_ssh_workflow exercises
+    # this for real; here we verify the basic dispatch path.
+    run_orch help --some-future-subcommand-flag
+    assert_status 0 "$RUN_RC" "subcommand flags should pass through pre-pass" || return 1
+}
+
+test_dry_run_flag_accepted() {
+    run_orch --dry-run help
+    assert_status 0 "$RUN_RC" "--dry-run should be accepted" || return 1
+}
+
+test_verbose_flag_accepted() {
+    run_orch --verbose help
+    assert_status 0 "$RUN_RC" "--verbose should be accepted" || return 1
+}
+
+test_quiet_flag_accepted() {
+    run_orch --quiet help
+    assert_status 0 "$RUN_RC" "--quiet should be accepted" || return 1
+}
+
+test_retries_flag_accepted() {
+    run_orch --retries 3 help
+    assert_status 0 "$RUN_RC" "--retries 3 should be accepted" || return 1
+}
+
+test_retries_must_be_non_negative_integer() {
+    run_orch --retries -1 help
+    assert_status 2 "$RUN_RC" "negative --retries should be rejected" || return 1
+}
+
+run_test test_subcommand_flag_passes_through_pre_pass
+run_test test_dry_run_flag_accepted
+run_test test_verbose_flag_accepted
+run_test test_quiet_flag_accepted
+run_test test_retries_flag_accepted
+run_test test_retries_must_be_non_negative_integer
+
 report_tests
