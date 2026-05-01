@@ -133,6 +133,23 @@ test_status_shows_next_hint() {
     assert_contains "$RUN_OUT" "ssh-setup" "next hint should point at ssh-setup" || return 1
 }
 
+test_status_json_emits_valid_object() {
+    local src="$TEST_TMPDIR/srv.txt"
+    printf 'h1\nh2\n' > "$src"
+    run_orch init "$src" >/dev/null
+    run_orch status --json
+    assert_status 0 "$RUN_RC" "status --json should exit 0" || return 1
+    # Crude shape checks (no jq dep): starts with {, ends with },
+    # contains expected keys.
+    case "$RUN_OUT" in
+        '{'*'}') ;;
+        *) echo "status --json output not a JSON object: $RUN_OUT" >&2; return 1 ;;
+    esac
+    assert_contains "$RUN_OUT" '"hosts":2' "should report 2 hosts" || return 1
+    assert_contains "$RUN_OUT" '"SERVER_LIST_LOADED":"yes"' "should reflect init" || return 1
+    assert_contains "$RUN_OUT" '"TESTS_RUN":"no"' "should include all state keys" || return 1
+}
+
 test_status_after_init_shows_pipeline_steps() {
     local src="$TEST_TMPDIR/srv.txt"
     printf 'h1\nh2\n' > "$src"
@@ -157,6 +174,7 @@ run_test test_init_warns_on_too_few_hosts
 run_test test_init_accepts_bracketed_ipv6
 run_test test_status_with_no_init
 run_test test_status_shows_next_hint
+run_test test_status_json_emits_valid_object
 run_test test_status_after_init_shows_pipeline_steps
 
 report_tests

@@ -54,7 +54,23 @@ REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_PARALLEL="${IPERF_PARALLEL:-1}"      # parallel streams per test
-IPERF_JOBS="${IPERF_JOBS:-16}"             # max concurrent SSH/SCP fan-out
+# --jobs default: derived from $(nproc) so a 64-core orchestrator host
+# can fan out further than a 4-core laptop. Capped at 32 to avoid
+# overwhelming SSH on huge fleets without an explicit opt-in. Override
+# via env var or --jobs.
+_default_jobs() {
+    local n
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null \
+        || nproc 2>/dev/null \
+        || sysctl -n hw.ncpu 2>/dev/null \
+        || echo 4)
+    case "$n" in ''|*[!0-9]*) n=4 ;; esac
+    local d=$((n * 4))
+    [ "$d" -lt 4 ]  && d=4
+    [ "$d" -gt 32 ] && d=32
+    echo "$d"
+}
+IPERF_JOBS="${IPERF_JOBS:-$(_default_jobs)}"  # max concurrent SSH/SCP fan-out
 
 SSH_USER="${SSH_USER:-${USER:-$(id -un)}}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30}"
@@ -158,6 +174,11 @@ _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
 _validate_uint "IPERF_RETRIES / --retries"     "$IPERF_RETRIES"  0
 _validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
 [ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
+# Sanity-warn (don't die) on suspicious --jobs values. Past ~256 you're
+# likely about to OOM the orchestrator host or saturate its FD table.
+if [ "$IPERF_JOBS" -gt 256 ]; then
+    echo "iperf-orchestrator: WARN: --jobs=$IPERF_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
+fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
 
 # Paths derived from IPERF_DIR (computed AFTER flags so --iperf-dir works).
@@ -330,6 +351,12 @@ parallel_hosts() {
 
     PARALLEL_FAILED=()
     [ "$n" -eq 0 ] && return 0
+
+    # Cap effective parallelism at the host count; running 64 jobs for 4
+    # hosts is just confusing log lines, not faster.
+    if [ "$jobs" -gt "$n" ]; then
+        jobs="$n"
+    fi
 
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-XXXXXX") || die "mktemp failed"
@@ -552,14 +579,19 @@ ANALYSIS:
     make-heatmap           Render results/iperf_heatmap.png (heatmap + bar chart)
 
 CONVENIENCE:
-    all [MODE] [--keep-going]
+    all [MODE] [--keep-going] [--resume]
                            Run the full sequence end-to-end. MODE is forwarded
                            to run-tests (default parallel). With --keep-going,
                            continue past per-host failures instead of aborting.
-                           Runs 'doctor' first.
+                           With --resume, skip pipeline steps whose state is
+                           already "yes" (use after a partial run). Runs
+                           'doctor' first.
     doctor                 Probe local prerequisites (ssh tools, expect when a
                            password source is configured, python3 + numpy +
                            pandas + matplotlib) and print install hints.
+    results-summary        Print P50/P95/min/mean/max throughput and the 5
+                           slowest source->target pairs. Reads
+                           results/iperf_results.csv (run parse-csv first).
     status                 Show what has been done so far
     help                   Show this message
 
@@ -568,7 +600,15 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_DURATION=$IPERF_DURATION       # seconds per pair
     IPERF_PARALLEL=$IPERF_PARALLEL       # parallel streams
     IPERF_JOBS=$IPERF_JOBS               # max concurrent SSH/SCP fan-out
+    IPERF_RETRIES=$IPERF_RETRIES         # retry count for parallel_hosts
+    IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
+    IPERF_DRY_RUN=$IPERF_DRY_RUN         # 1 = print SSH/SCP commands, don't run
+    IPERF_PROGRESS=${IPERF_PROGRESS:-1}  # 0 disables live progress on stderr
     SSH_USER=$SSH_USER
+    SSH_OPTS=$SSH_OPTS
+    SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-} # see --password-file
+    SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}   # see --password-env
+    SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD       # see --ask-password
     START_DELAY=$START_DELAY             # seconds in future for sync start
     IPERF_DIR=$IPERF_DIR
 
@@ -660,6 +700,30 @@ cmd_init() {
 #------------------------------------------------------------------------------
 cmd_status() {
     load_state
+
+    # --json: emit machine-readable status for CI / scripting. Hand-rolled
+    # so we don't pull in jq or python just to emit a flat object.
+    if [ "${1:-}" = "--json" ]; then
+        local n_hosts=0
+        [ -f "$SERVER_LIST_FILE" ] && n_hosts=$(read_servers | wc -l)
+        local steps=(
+            SERVER_LIST_LOADED SSH_KEYS_DISTRIBUTED IPERF_INSTALLED_CHECKED
+            SERVERS_RUNNING_CHECKED SERVERS_STARTED SCRIPTS_CREATED
+            SCRIPTS_DISTRIBUTED TESTS_RUN RESULTS_COLLECTED SERVERS_STOPPED
+            CLEANED_UP CSV_BUILT CPU_PARSED PIVOT_BUILT HEATMAP_BUILT
+        )
+        local first=1 s
+        printf '{'
+        printf '"iperf_dir":"%s","server_list":"%s","hosts":%s,"state":{' \
+            "$IPERF_DIR" "$SERVER_LIST_FILE" "$n_hosts"
+        for s in "${steps[@]}"; do
+            [ "$first" = "1" ] && first=0 || printf ','
+            printf '"%s":"%s"' "$s" "${STATE[$s]:-no}"
+        done
+        printf '},"tests_run_mode":"%s"}\n' "${STATE[TESTS_RUN_MODE]:-}"
+        return 0
+    fi
+
     echo "=== iperf-orchestrator status ==="
     echo "IPERF_DIR:       $IPERF_DIR"
     echo "Server list:     $SERVER_LIST_FILE"
@@ -2479,6 +2543,58 @@ _doctor_check_python_module() {
     return 1
 }
 
+# results-summary: print P50/P95/min/max throughput and the slowest 5
+# (host, target) pairs without opening the heatmap PNG. Reads
+# results/iperf_results.csv produced by parse-csv.
+cmd_results_summary() {
+    local csv="$RESULTS_DIR/iperf_results.csv"
+    [ -f "$csv" ] || die "No CSV at $csv; run: $0 parse-csv"
+    command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
+
+    "$PYTHON_BIN" - "$csv" <<'PYEOF'
+import csv, sys, statistics
+
+in_csv = sys.argv[1]
+
+vals = []        # (mbps, source, target)
+errors = 0
+with open(in_csv) as f:
+    for row in csv.DictReader(f):
+        v = row.get("mbps") or ""
+        if v == "":
+            errors += 1
+            continue
+        try:
+            vals.append((float(v), row.get("source",""), row.get("target","")))
+        except ValueError:
+            errors += 1
+
+if not vals:
+    print("No measured throughput rows in", in_csv)
+    sys.exit(1)
+
+mbps = sorted(v for v,_,_ in vals)
+n = len(mbps)
+def pct(p):
+    # nearest-rank percentile, fine for summary stats.
+    k = max(0, min(n - 1, int(round(p/100 * (n - 1)))))
+    return mbps[k]
+
+print(f"Throughput summary across {n} measured directions ({errors} errored/missing)")
+print(f"  min:    {mbps[0]:>10.2f} Mbps")
+print(f"  P50:    {pct(50):>10.2f} Mbps")
+print(f"  mean:   {statistics.fmean(mbps):>10.2f} Mbps")
+print(f"  P95:    {pct(95):>10.2f} Mbps")
+print(f"  max:    {mbps[-1]:>10.2f} Mbps")
+
+print()
+print("Slowest 5 (source -> target):")
+slowest = sorted(vals)[:5]
+for v, s, t in slowest:
+    print(f"  {v:>10.2f}  {s} -> {t}")
+PYEOF
+}
+
 cmd_doctor() {
     log "=== doctor: orchestrator-host prerequisites ==="
     local missing=0
@@ -2513,14 +2629,22 @@ cmd_doctor() {
 cmd_all() {
     local mode="parallel"
     local keep_going=0
+    local resume=0
     local arg
     for arg in "$@"; do
         case "$arg" in
             --keep-going)                              keep_going=1 ;;
+            --resume)                                  resume=1 ;;
             parallel|sequential-host|sequential-pair)  mode="$arg" ;;
-            *) die "cmd_all: unknown argument: $arg (expected mode and/or --keep-going)" ;;
+            *) die "cmd_all: unknown argument: $arg (expected mode and/or --keep-going / --resume)" ;;
         esac
     done
+
+    # _resume_skip <state_key>: with --resume, returns true (skip) if the
+    # step is already done. Without --resume, always returns false.
+    _resume_skip() {
+        [ "$resume" = "1" ] && [ "$(get_state "$1")" = "yes" ]
+    }
 
     # Stop iperf daemons across the fleet on Ctrl-C / SIGTERM.
     trap '_orchestrator_signal_cleanup' INT TERM
@@ -2549,27 +2673,89 @@ cmd_all() {
     }
 
     [ "$(get_state SSH_KEYS_DISTRIBUTED)" = "yes" ] || cmd_ssh_setup
-    cmd_check_iperf;        _all_gate check-iperf
-    cmd_check_servers;      _all_gate check-servers
-    cmd_start_servers;      _all_gate start-servers
-    cmd_create_scripts
-    cmd_distribute_scripts; _all_gate distribute-scripts
-    cmd_run_tests "$mode"
-    if [ "$(get_state TESTS_RUN)" != "yes" ] && [ "$keep_going" != "1" ]; then
-        die "run-tests had failure(s); aborting (use --keep-going to continue, or re-run run-tests)"
+    if _resume_skip IPERF_INSTALLED_CHECKED; then
+        log "Skip check-iperf (--resume; already done)"
+    else
+        cmd_check_iperf;        _all_gate check-iperf
     fi
-    cmd_collect_results;    _all_gate collect-results
-    cmd_stop_servers;       _all_gate stop-servers
-    _IPERF_ORCH_INTERNAL=1 cmd_cleanup
-    _all_gate cleanup
-    cmd_parse_csv
-    cmd_parse_cpu
-    cmd_make_pivot
-    cmd_make_heatmap
+    if _resume_skip SERVERS_RUNNING_CHECKED; then
+        log "Skip check-servers (--resume; already done)"
+    else
+        cmd_check_servers;      _all_gate check-servers
+    fi
+    if _resume_skip SERVERS_STARTED; then
+        log "Skip start-servers (--resume; already done)"
+    else
+        cmd_start_servers;      _all_gate start-servers
+    fi
+    if _resume_skip SCRIPTS_CREATED; then
+        log "Skip create-scripts (--resume; already done)"
+    else
+        cmd_create_scripts
+    fi
+    if _resume_skip SCRIPTS_DISTRIBUTED; then
+        log "Skip distribute-scripts (--resume; already done)"
+    else
+        cmd_distribute_scripts; _all_gate distribute-scripts
+    fi
+    if _resume_skip TESTS_RUN; then
+        log "Skip run-tests (--resume; already done)"
+    else
+        cmd_run_tests "$mode"
+        if [ "$(get_state TESTS_RUN)" != "yes" ] && [ "$keep_going" != "1" ]; then
+            die "run-tests had failure(s); aborting (use --keep-going to continue, or re-run run-tests)"
+        fi
+    fi
+    if _resume_skip RESULTS_COLLECTED; then
+        log "Skip collect-results (--resume; already done)"
+    else
+        cmd_collect_results;    _all_gate collect-results
+    fi
+    if _resume_skip SERVERS_STOPPED; then
+        log "Skip stop-servers (--resume; already done)"
+    else
+        cmd_stop_servers;       _all_gate stop-servers
+    fi
+    if _resume_skip CLEANED_UP; then
+        log "Skip cleanup (--resume; already done)"
+    else
+        _IPERF_ORCH_INTERNAL=1 cmd_cleanup
+        _all_gate cleanup
+    fi
+    if _resume_skip CSV_BUILT;     then log "Skip parse-csv (--resume; already done)";    else cmd_parse_csv;     fi
+    if _resume_skip CPU_PARSED;    then log "Skip parse-cpu (--resume; already done)";    else cmd_parse_cpu;     fi
+    if _resume_skip PIVOT_BUILT;   then log "Skip make-pivot (--resume; already done)";   else cmd_make_pivot;    fi
+    if _resume_skip HEATMAP_BUILT; then log "Skip make-heatmap (--resume; already done)"; else cmd_make_heatmap;  fi
     log "=== Pipeline complete ==="
     echo
     echo "Results in: $RESULTS_DIR"
     ls -1 "$RESULTS_DIR" | sed 's/^/  /'
+
+    local png="$RESULTS_DIR/iperf_heatmap.png"
+    if [ -f "$png" ]; then
+        echo
+        # Mac: `open`. Linux desktop: `xdg-open`. Headless: scp it back.
+        if command -v xdg-open >/dev/null 2>&1; then
+            echo "View the heatmap: xdg-open $png"
+        elif command -v open >/dev/null 2>&1; then
+            echo "View the heatmap: open $png"
+        else
+            echo "Heatmap rendered to: $png  (scp it to a desktop to view)"
+        fi
+    fi
+
+    # If any hosts lack mpstat, the parser falls back to /proc/stat
+    # (box-wide CPU only, no per-core). Surface this so users know why
+    # the heatmap's CPU-overlay annotations may look coarser.
+    local installed="$IPERF_DIR/iperf_installed.txt"
+    if [ -f "$installed" ] && grep -q 'mpstat=no' "$installed"; then
+        local n_no
+        n_no=$(grep -c 'mpstat=no' "$installed")
+        echo
+        echo "Note: $n_no host(s) lack mpstat; CPU samples on those used"
+        echo "      /proc/stat fallback (box-wide only). Install sysstat for"
+        echo "      per-core data: apt install sysstat / dnf install sysstat"
+    fi
 
     trap - INT TERM
 }
@@ -2673,11 +2859,22 @@ EOF
             ;;
         all)
             cat <<'EOF'
-all [parallel|sequential-host|sequential-pair] [--keep-going]
+all [parallel|sequential-host|sequential-pair] [--keep-going] [--resume]
     Run the full pipeline end-to-end. Calls `doctor` first to fail
     fast on missing local prereqs. By default, aborts as soon as any
-    parallel step records per-host failures. Pass --keep-going to
-    plow through.
+    parallel step records per-host failures.
+      --keep-going  continue past per-host failures
+      --resume      skip steps whose state key is already "yes" (use
+                    after a partial run; usually faster than re-running
+                    everything)
+EOF
+            ;;
+        results-summary)
+            cat <<'EOF'
+results-summary
+    Print quick stats from results/iperf_results.csv: P50, P95, min,
+    mean, max throughput, plus the 5 slowest source->target pairs.
+    Run after parse-csv (which `all` runs automatically).
 EOF
             ;;
         doctor)
@@ -2718,7 +2915,7 @@ fi
 case "$cmd" in
     "")                 first_run_banner ;;
     init)               cmd_init "$@" ;;
-    status)             cmd_status ;;
+    status)             cmd_status "$@" ;;
     ssh-setup)          cmd_ssh_setup ;;
     check-iperf)        cmd_check_iperf ;;
     check-servers)      cmd_check_servers ;;
@@ -2734,6 +2931,7 @@ case "$cmd" in
     make-pivot)         cmd_make_pivot ;;
     make-heatmap)       cmd_make_heatmap ;;
     doctor)             cmd_doctor ;;
+    results-summary)    cmd_results_summary ;;
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;

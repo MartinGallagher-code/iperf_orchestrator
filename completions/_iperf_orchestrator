@@ -1,0 +1,97 @@
+#compdef iperf_orchestrator.sh
+# zsh completion for iperf_orchestrator.sh
+#
+# Install: copy to a directory on $fpath (e.g. /usr/local/share/zsh/site-functions/_iperf_orchestrator)
+# then `compinit` (or restart your shell).
+
+_iperf_orchestrator() {
+    local -a subcommands run_modes global_flags
+    subcommands=(
+        'init:Load a server list'
+        'status:Show pipeline progress and next step'
+        'ssh-setup:Generate and distribute SSH keys'
+        'check-iperf:Probe iperf2 + mpstat on every host'
+        'check-servers:Probe for running iperf daemons'
+        'start-servers:Start iperf -s on every host'
+        'create-scripts:Generate per-host run scripts locally'
+        'distribute-scripts:Copy run scripts to each host'
+        'run-tests:Run the iperf2 mesh tests'
+        'collect-results:Pull all per-host logs back'
+        'stop-servers:Stop iperf -s daemons'
+        'cleanup:Remove $REMOTE_DIR on every host (requires --yes)'
+        'parse-csv:Parse iperf2 logs into CSV'
+        'parse-cpu:Parse mpstat / fallback CPU samples'
+        'make-pivot:Render text pivot table'
+        'make-heatmap:Render heatmap PNG'
+        'doctor:Probe local prerequisites'
+        'results-summary:Print P50/P95/slowest pairs from CSV'
+        'all:Run the full pipeline end-to-end'
+        'help:Show full usage'
+    )
+
+    run_modes=(parallel sequential-host sequential-pair)
+
+    global_flags=(
+        '--port[iperf2 listening port]:port:'
+        '--duration[seconds per pair]:seconds:'
+        '-d[seconds per pair]:seconds:'
+        '--parallel[parallel streams per test]:N:'
+        '-P[parallel streams per test]:N:'
+        '--jobs[max concurrent SSH/SCP fan-out]:N:'
+        '-j[max concurrent SSH/SCP fan-out]:N:'
+        '--start-delay[synchronized-start lead time]:seconds:'
+        '--ssh-user[SSH login user]:user:'
+        '-u[SSH login user]:user:'
+        '--iperf-dir[local working dir]:dir:_files -/'
+        '--remote-dir[remote working dir]:dir:'
+        '--python[Python interpreter]:path:_files'
+        '--password-file[SSH password file]:file:_files'
+        '--password-env[env var holding SSH password]:var:'
+        '--ask-password[prompt for SSH password once]'
+        '--retries[retry parallel_hosts workers N times]:N:'
+        '--dry-run[print SSH/SCP commands without executing]'
+        '-n[print SSH/SCP commands without executing]'
+        '--verbose[also print every ssh/scp invocation]'
+        '-v[also print every ssh/scp invocation]'
+        '--quiet[suppress non-WARN/ERROR log lines]'
+        '-q[suppress non-WARN/ERROR log lines]'
+        '-h[show help]'
+        '--help[show help]'
+    )
+
+    _arguments -C \
+        $global_flags \
+        '1: :->subcmd' \
+        '*::: :->subargs'
+
+    case $state in
+        subcmd)
+            _describe -t subcommands 'subcommand' subcommands
+            ;;
+        subargs)
+            case $line[1] in
+                run-tests|all)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--keep-going[continue past per-host failures]' \
+                        '--resume[skip steps already done in state]' \
+                        '--help[show help]'
+                    ;;
+                init)
+                    _arguments '1:server list:_files'
+                    ;;
+                cleanup)
+                    _arguments '--yes[confirm rm -rf on every host]' '--help[show help]'
+                    ;;
+                status)
+                    _arguments '--json[emit JSON for scripting]' '--help[show help]'
+                    ;;
+                *)
+                    _arguments '--help[show help]'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_iperf_orchestrator "$@"

@@ -87,6 +87,38 @@ test_keep_going_can_appear_before_or_after_mode() {
     }
 }
 
+test_resume_flag_skips_completed_steps() {
+    # Pre-flag the pipeline as fully done in state. With --resume, cmd_all
+    # should print "Skip" lines and not actually re-run anything that
+    # would require ssh shims.
+    if python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+        : # if the full stack is installed, doctor passes; we can run.
+    fi
+    prep_workflow a b
+    cat > "$IPERF_DIR/state" <<'EOF'
+SERVER_LIST_LOADED=yes
+SSH_KEYS_DISTRIBUTED=yes
+IPERF_INSTALLED_CHECKED=yes
+SERVERS_RUNNING_CHECKED=yes
+SERVERS_STARTED=yes
+SCRIPTS_CREATED=yes
+SCRIPTS_DISTRIBUTED=yes
+TESTS_RUN=yes
+RESULTS_COLLECTED=yes
+SERVERS_STOPPED=yes
+CLEANED_UP=yes
+CSV_BUILT=yes
+CPU_PARSED=yes
+PIVOT_BUILT=yes
+HEATMAP_BUILT=yes
+EOF
+    run_with_fakes -- all --keep-going --resume
+    # Whether doctor passes or not, --resume should produce skip lines
+    # for at least the steps marked yes. Look for one telltale string.
+    assert_contains "$RUN_OUT" "Skip check-iperf" "expected check-iperf to be skipped" || return 1
+    assert_contains "$RUN_OUT" "Skip run-tests" "expected run-tests to be skipped" || return 1
+}
+
 test_unknown_cmd_all_argument_is_rejected() {
     prep_workflow a b
     run_with_fakes -- all bogus-mode
@@ -256,6 +288,7 @@ test_cmd_all_default_keep_going_is_off() {
 run_test test_keep_going_flag_is_recognized_by_cmd_all
 run_test test_keep_going_can_appear_before_or_after_mode
 run_test test_unknown_cmd_all_argument_is_rejected
+run_test test_resume_flag_skips_completed_steps
 run_test test_cmd_all_dies_without_keep_going_when_doctor_fails
 run_test test_cmd_all_continues_with_keep_going_when_doctor_fails
 run_test test_keep_going_continues_past_per_host_failure
