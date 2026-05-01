@@ -164,6 +164,43 @@ run_test test_parse_cpu_proc_stat_fallback
 run_test test_parse_cpu_handles_both_kinds_in_one_run
 run_test test_parse_cpu_garbage_input_marks_parse_error
 run_test test_parse_cpu_sets_state_flag
+test_parse_cpu_prefers_host_header_over_filename() {
+    # Phase 3: the remote script writes a "# host=<original>" line at the
+    # top of cpu_*.log so the parser can recover an unsanitized hostname
+    # (e.g. for bracketed IPv6 like [fe80::1]) even though the on-disk
+    # filename was rewritten to cpu__fe80__1_.log.
+    local rd; rd=$(prep_results_dir)
+    local sanitized_path="$rd/cpu__fe80__1_.log"
+    local body="$TEST_TMPDIR/mpstat-body.log"
+    write_mpstat_log "$body"
+    {
+        echo "# host=[fe80::1]"
+        cat "$body"
+    } > "$sanitized_path"
+    run_orch parse-cpu
+    assert_status 0 "$RUN_RC" || return 1
+    local csv="$rd/cpu_summary.csv"
+    # Recovered host should be the unsanitized original.
+    if ! grep -F -- '[fe80::1]' "$csv" >/dev/null; then
+        echo "expected '[fe80::1]' as host in $csv:" >&2
+        cat "$csv" >&2
+        return 1
+    fi
+}
+
+test_parse_cpu_falls_back_to_filename_without_header() {
+    # Older logs without "# host=" still parse via filename derivation.
+    local rd; rd=$(prep_results_dir)
+    write_mpstat_log "$rd/cpu_legacy-host.log"
+    run_orch parse-cpu
+    assert_status 0 "$RUN_RC" || return 1
+    local v
+    v=$(cpu_cell "$rd/cpu_summary.csv" legacy-host source)
+    assert_eq "mpstat" "$v" "filename-derived host should still parse" || return 1
+}
+
 run_test test_parse_cpu_prints_ranked_table
+run_test test_parse_cpu_prefers_host_header_over_filename
+run_test test_parse_cpu_falls_back_to_filename_without_header
 
 report_tests

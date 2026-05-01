@@ -250,6 +250,24 @@ get_state() {
 }
 
 #------------------------------------------------------------------------------
+# Hostname sanitization
+#
+# Hostnames go into filenames at many places: run_<host>.sh, run_<host>.log,
+# iperf_test_<src>_to_<dst>.log, cpu_<host>.log, iperf_server_<host>.log,
+# iperf_run_<host>.status. Most names round-trip fine, but bracketed IPv6
+# (`[fe80::1]`) and rare hostnames containing `:` or `/` produce filenames
+# that confuse glob patterns and FAT/Windows-mounted shares. We replace
+# those characters with `_` for the on-disk name only -- the original
+# hostname is preserved inside file headers (`# pair_a=...`, `# host=...`)
+# so the analysis tooling sees the real value.
+#
+# Idempotent on plain DNS / IPv4 names.
+#------------------------------------------------------------------------------
+_sanitize_host() {
+    printf '%s' "$1" | tr ':/[] \t' '_______'
+}
+
+#------------------------------------------------------------------------------
 # Server list helpers
 #------------------------------------------------------------------------------
 read_servers() {
@@ -1058,7 +1076,8 @@ cmd_check_servers() {
 #------------------------------------------------------------------------------
 _worker_start_server() {
     local host="$1"
-    local errlog="$LOGS_DIR/start_${host}.err"
+    local host_safe; host_safe=$(_sanitize_host "$host")
+    local errlog="$LOGS_DIR/start_${host_safe}.err"
     # pkill -f scopes to "iperf -s -p $IPERF_PORT" so we don't disturb
     # the user's unrelated iperf -c clients or iperf servers on other
     # ports. The [i]perf trick keeps pgrep from matching its own argv.
@@ -1107,7 +1126,8 @@ cmd_create_scripts() {
 
     while IFS= read -r src; do
         [ -z "$src" ] && continue
-        local script="$SCRIPTS_DIR/run_${src}.sh"
+        local src_safe; src_safe=$(_sanitize_host "$src")
+        local script="$SCRIPTS_DIR/run_${src_safe}.sh"
 
         # Each unordered pair is tested once, but instead of always making
         # the lex-smaller host the client (which gives a 0..N-1 imbalance),
@@ -1167,7 +1187,14 @@ else
     run_targets=( "\${TARGETS[@]}" )
 fi
 
-echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "iperf_run_\${SOURCE}.status"
+# Sanitizer matching the orchestrator's _sanitize_host(). Keeps file
+# names safe for IPv6 hostnames like [fe80::1] and any host with `:`,
+# `/`, `[`, `]`, or whitespace. Real hostname is preserved inside
+# headers (# pair_a=..., # host=...) so the parser sees the truth.
+_san() { printf '%s' "\$1" | tr ':/[] \\t' '_______'; }
+SOURCE_SAFE=\$(_san "\$SOURCE")
+
+echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "iperf_run_\${SOURCE_SAFE}.status"
 
 # Start CPU sampling. We want to capture the test window plus a small tail
 # so the "after" baseline is visible. mpstat with -P ALL gives per-core
@@ -1177,26 +1204,27 @@ echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "iperf_run_\${S
 # If mpstat isn't installed we fall back to sampling /proc/stat directly,
 # which gives box-wide CPU but no per-core. The fallback file format is
 # made deliberately distinguishable from mpstat's so the parser can tell
-# them apart.
+# them apart. We always prepend a "# host=<original>" line so the parser
+# knows the unsanitized hostname even if the on-disk filename was
+# rewritten.
 SAMPLE_DURATION=\$(( DURATION + 4 ))
-cpu_log="cpu_\${SOURCE}.log"
+cpu_log="cpu_\${SOURCE_SAFE}.log"
 cpu_pid=""
 
-if command -v mpstat >/dev/null 2>&1; then
-    LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 "\$SAMPLE_DURATION" \
-        > "\$cpu_log" 2>&1 &
-    cpu_pid=\$!
-else
-    {
+{
+    echo "# host=\$SOURCE"
+    if command -v mpstat >/dev/null 2>&1; then
+        LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 "\$SAMPLE_DURATION" 2>&1
+    else
         echo "# fallback=proc_stat host=\$SOURCE samples=\$SAMPLE_DURATION"
         for _ in \$(seq 1 "\$SAMPLE_DURATION"); do
             date '+%F %T'
             head -n1 /proc/stat
             sleep 1
         done
-    } > "\$cpu_log" 2>&1 &
-    cpu_pid=\$!
-fi
+    fi
+} > "\$cpu_log" 2>&1 &
+cpu_pid=\$!
 
 # Even hosts with no client work still receive inbound traffic from their
 # peers, so we want CPU samples from them too. They skip the iperf-client
@@ -1207,8 +1235,9 @@ if [ \${#run_targets[@]} -gt 0 ]; then
     # -y C gives CSV summaries; -e enables enhanced reports.
     pids=()
     for target in "\${run_targets[@]}"; do
-        out="iperf_test_\${SOURCE}_to_\${target}.log"
-        echo "\$(date '+%F %T') testing <-> \$target" >> "iperf_run_\${SOURCE}.status"
+        target_safe=\$(_san "\$target")
+        out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}.log"
+        echo "\$(date '+%F %T') testing <-> \$target" >> "iperf_run_\${SOURCE_SAFE}.status"
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
             echo "# pair_a=\$SOURCE pair_b=\$target duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
@@ -1228,7 +1257,7 @@ if [ -n "\$cpu_pid" ]; then
     wait "\$cpu_pid" 2>/dev/null || true
 fi
 
-echo "\$(date '+%F %T') DONE" >> "iperf_run_\${SOURCE}.status"
+echo "\$(date '+%F %T') DONE" >> "iperf_run_\${SOURCE_SAFE}.status"
 EOF
         chmod +x "$script"
         log "  created $script (targets: ${#targets[@]})"
@@ -1256,7 +1285,8 @@ EOF
 #------------------------------------------------------------------------------
 _worker_distribute_script() {
     local host="$1"
-    local script="$SCRIPTS_DIR/run_${host}.sh"
+    local host_safe; host_safe=$(_sanitize_host "$host")
+    local script="$SCRIPTS_DIR/run_${host_safe}.sh"
     if [ ! -f "$script" ]; then
         warn "  no script for $host (run create-scripts first)"
         return 1
@@ -1341,7 +1371,8 @@ _run_parallel() {
     local hosts_for_pids=()
     while IFS= read -r host; do
         [ -z "$host" ] && continue
-        local hostlog="$LOGS_DIR/run_${host}.log"
+        local host_safe; host_safe=$(_sanitize_host "$host")
+        local hostlog="$LOGS_DIR/run_${host_safe}.log"
         ssh_run "$host" "'$REMOTE_DIR/run_iperf.sh' $start_time" \
             > "$hostlog" 2>&1 &
         pids+=("$!")
@@ -1425,7 +1456,8 @@ _run_sequential_host() {
         [ -z "$host" ] && continue
         i=$((i + 1))
         log "[$i/$n] running on $host (~${est_per_host}s)..."
-        local hostlog="$LOGS_DIR/run_${host}.log"
+        local host_safe; host_safe=$(_sanitize_host "$host")
+        local hostlog="$LOGS_DIR/run_${host_safe}.log"
         if ssh_run "$host" "'$REMOTE_DIR/run_iperf.sh' 0" > "$hostlog" 2>&1; then
             log "  finished: $host"
         else
@@ -1472,7 +1504,10 @@ _run_sequential_pair() {
             # once, with src as the client iff is_client_for says so.
             is_client_for "$src" "$dst" || continue
             i=$((i + 1))
-            local pairlog="$LOGS_DIR/run_${src}_to_${dst}.log"
+            local src_safe dst_safe
+            src_safe=$(_sanitize_host "$src")
+            dst_safe=$(_sanitize_host "$dst")
+            local pairlog="$LOGS_DIR/run_${src_safe}_to_${dst_safe}.log"
             log "[$i/$total] $src <-> $dst"
             if ssh_run "$src" "'$REMOTE_DIR/run_iperf.sh' 0 '$dst'" > "$pairlog" 2>&1; then
                 :
@@ -1506,19 +1541,20 @@ _worker_collect_results() {
     # The last canonical host has no client logs; we still want its
     # server log and status file, so we tolerate iperf_test_*.log
     # matching nothing.
+    local host_safe; host_safe=$(_sanitize_host "$host")
     if ! ssh_run "$host" "
         cd '$REMOTE_DIR' 2>/dev/null || exit 1
-        cp iperf_server.log iperf_server_${host}.log 2>/dev/null || true
+        cp iperf_server.log 'iperf_server_${host_safe}.log' 2>/dev/null || true
         {
             ls iperf_test_*.log 2>/dev/null || true
-            ls iperf_server_${host}.log 2>/dev/null || true
-            ls iperf_run_${host}.status 2>/dev/null || true
-            ls cpu_${host}.log 2>/dev/null || true
+            ls 'iperf_server_${host_safe}.log' 2>/dev/null || true
+            ls 'iperf_run_${host_safe}.status' 2>/dev/null || true
+            ls 'cpu_${host_safe}.log' 2>/dev/null || true
         } > _iperf_files.list
         if [ -s _iperf_files.list ]; then
             tar -czf '$tarball_remote' -T _iperf_files.list
         fi
-        rm -f _iperf_files.list iperf_server_${host}.log
+        rm -f _iperf_files.list 'iperf_server_${host_safe}.log'
         test -f '$tarball_remote'
     " 2>/dev/null; then
         warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
@@ -2141,11 +2177,31 @@ cols = ["host","source","n_cpus","peak_total_pct","mean_total_pct",
         "peak_softirq_pct","peak_softirq_cpu","peak_sys_pct","peak_user_pct",
         "peak_idle_floor_pct","filename"]
 
+def host_from_header(path):
+    """Read the first few lines looking for `# host=<original>`. The
+    remote script writes this so the parser can recover the original
+    hostname even when the on-disk filename has been sanitized
+    (e.g. for bracketed IPv6 like [fe80::1] -> _fe80__1_)."""
+    try:
+        with open(path) as f:
+            for _ in range(5):
+                line = f.readline()
+                if not line:
+                    break
+                if line.startswith("# host="):
+                    return line[len("# host="):].strip()
+    except OSError:
+        pass
+    return None
+
 rows = []
 for path in sorted(glob.glob(os.path.join(results_dir, "cpu_*.log"))):
     base = os.path.basename(path)
-    # cpu_<host>.log
-    host = base[len("cpu_"):-len(".log")]
+    # Prefer the embedded `# host=` header (round-trips IPv6 names
+    # correctly); fall back to the filename for older logs.
+    host = host_from_header(path)
+    if not host:
+        host = base[len("cpu_"):-len(".log")]
 
     summary = parse_mpstat(path) or parse_proc_stat_fallback(path)
     if summary is None:
