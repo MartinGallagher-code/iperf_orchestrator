@@ -114,13 +114,26 @@ test_stop_servers_kills_iperf_on_each_host() {
 
 test_cleanup_removes_remote_dir() {
     prep_workflow a b
-    run_with_fake_path cleanup
+    # cleanup requires --yes when invoked directly (not via cmd_all) so a
+    # stray "./orch.sh cleanup" doesn't blow away $REMOTE_DIR by accident.
+    run_with_fake_path cleanup --yes
     assert_status 0 "$RUN_RC" || return 1
     grep -q '^CLEANED_UP=yes$' "$IPERF_DIR/state" || return 1
     # Verify the rm -rf command actually got dispatched per host.
     local rm_count
     rm_count=$(grep -c "rm -rf" "$FAKE_SSH_LOG")
     assert_eq "2" "$rm_count" "rm -rf should hit each of 2 hosts" || return 1
+}
+
+test_cleanup_without_yes_dies() {
+    prep_workflow a b
+    run_with_fake_path cleanup
+    assert_status 1 "$RUN_RC" "cleanup without --yes should die" || return 1
+    assert_contains "$RUN_OUT" "--yes" "should mention --yes" || return 1
+    if grep -q "rm -rf" "$FAKE_SSH_LOG"; then
+        echo "rm -rf was dispatched without --yes" >&2
+        return 1
+    fi
 }
 
 test_check_iperf_uses_parallel_jobs() {
@@ -157,6 +170,7 @@ run_test test_check_servers_reports_running_when_pgrep_finds_proc
 run_test test_start_servers_marks_state
 run_test test_stop_servers_kills_iperf_on_each_host
 run_test test_cleanup_removes_remote_dir
+run_test test_cleanup_without_yes_dies
 run_test test_check_iperf_uses_parallel_jobs
 run_test test_workflow_subcommands_are_idempotent
 
