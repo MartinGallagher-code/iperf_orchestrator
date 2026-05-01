@@ -1,5 +1,336 @@
-# iperf_orchestrator
+# iperf-orchestrator
 
-## License
+A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
-This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
+Built primarily for **network fabric stress testing**: load every link in both directions simultaneously and find out what breaks or degrades. Also useful for one-off "is the network healthy" surveys of a fleet.
+
+---
+
+## Quick Start
+
+```bash
+# 1. List your servers, one IP or hostname per line ('#' for comments)
+cat > servers.txt <<EOF
+10.0.0.10
+10.0.0.11
+10.0.0.12
+10.0.0.13
+EOF
+
+# 2. Initialize and distribute SSH keys
+./iperf-orchestrator.sh init servers.txt
+./iperf-orchestrator.sh ssh-setup     # one-time; may prompt for passwords
+
+# 3. Run everything end-to-end
+./iperf-orchestrator.sh all
+```
+
+Results land in `~/.iperf_orchestrator/results/`:
+- `iperf_results.csv` — every test, both directions, fully parsed
+- `cpu_summary.csv` — per-host CPU peaks during the run
+- `iperf_pivot.txt` — text pivot table of throughput
+- `iperf_heatmap.png` — heatmap + sorted bar chart with CPU annotations
+
+---
+
+## Requirements
+
+### On the orchestrator host (where you run the script)
+- bash 4+
+- ssh, scp
+- Python 3 with `numpy` and `matplotlib` (for the heatmap step only)
+- tar, gzip
+
+### On every server in the mesh
+- **iperf2** (binary name `iperf`, *not* `iperf3`) — version 2.0.13+ recommended for `--full-duplex`
+- **sysstat** providing `mpstat` (recommended) — falls back to `/proc/stat` sampling if missing
+- ssh access from the orchestrator
+
+The script's `check-iperf` subcommand verifies both iperf2 and mpstat before you start.
+
+### Why iperf2 and not iperf3
+iperf3's server is single-threaded and accepts only one client at a time. A full mesh of N hosts would need N iperf3 servers per host on different ports just to function, plus a port-assignment scheme, plus N times the firewall holes. iperf2's multi-threaded server handles concurrent clients on a single port — one daemon per host on port 5001 and you're done. iperf2's `--full-duplex` also gives you a true single-socket bidirectional test, which is what fabric stress testing actually wants.
+
+---
+
+## Subcommands
+
+```
+SETUP:
+  init <server_list>     Set the server list
+  ssh-setup              Generate (if needed) and distribute SSH keys
+  check-iperf            Verify iperf2 + mpstat presence on every host
+  check-servers          Check which hosts have iperf -s currently running
+
+EXECUTION:
+  start-servers          Start iperf2 -s on every host (port 5001)
+  create-scripts         Generate per-host run scripts locally
+  distribute-scripts     Push each host's script out
+  run-tests [MODE]       Run the tests; MODE is parallel|sequential-host|sequential-pair
+  collect-results        Pull logs back as a tar archive per host
+  stop-servers           Kill iperf -s on every host
+  cleanup                Remove the remote working directory on every host
+
+ANALYSIS:
+  parse-csv              Parse iperf2 CSV logs into iperf_results.csv (2 rows per test)
+  parse-cpu              Parse mpstat samples into cpu_summary.csv
+  make-pivot             Text pivot table at iperf_pivot.txt
+  make-heatmap           Heatmap + bar chart at iperf_heatmap.png
+
+CONVENIENCE:
+  all [MODE]             Run the full sequence end-to-end
+  status                 Show what's been done so far
+  help                   Show command help
+```
+
+### Configuration (env vars)
+| Variable | Default | Purpose |
+|---|---|---|
+| `IPERF_PORT` | 5001 | iperf2 listening port |
+| `IPERF_DURATION` | 10 | seconds per test |
+| `IPERF_PARALLEL` | 1 | parallel streams within each test |
+| `SSH_USER` | `$USER` | SSH login user |
+| `START_DELAY` | 30 | seconds in the future to schedule the synchronized start |
+| `IPERF_DIR` | `~/.iperf_orchestrator` | local working directory |
+| `REMOTE_DIR` | `/tmp/iperf_orchestrator` | remote working directory |
+| `PYTHON_BIN` | `python3` | Python interpreter for analysis steps |
+
+---
+
+## Run modes
+
+`run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. All three modes use canonical-pair generation — each unordered pair `{A, B}` is tested exactly once, with `--full-duplex` measuring both directions concurrently on a single TCP socket.
+
+| Mode | What runs concurrently | Wall-clock at N=100, DUR=10 | When to use |
+|---|---|---|---|
+| `parallel` (default) | all hosts launch all of their clients at once after a synchronized start | ~1 × DURATION (~50s) | fabric stress testing: load everything at once and see what breaks |
+| `sequential-host` | one host at a time runs all of its clients in parallel | ~N × DURATION (~17 min) | clean numbers per host without inter-host interference |
+| `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
+
+---
+
+## How it works
+
+### Synchronized start (`parallel` mode)
+The orchestrator computes `start_time = now + START_DELAY` once locally, pushes that epoch timestamp to every host as a script argument, and each remote run-script busy-waits until that epoch before launching iperf. All hosts start within a fraction of a second of each other.
+
+### Per-host run scripts
+Generated locally with each host's targets baked in, then distributed once via scp. The remote side has no orchestration logic — it's just a target list, a synchronization barrier, mpstat in the background, and a fan-out of `iperf -c ... --full-duplex` calls (one per target, all backgrounded and `wait`-ed).
+
+### Balanced pair assignment (the parity rule)
+For an unordered pair `{A, B}` somebody has to be the iperf2 client. Naive "lex-smaller is always the client" gives terrible load imbalance: at N=100 the lex-first host runs 99 clients and the lex-last runs 0.
+
+The fix is the **parity rule on host indices**: for indices `i, j` (positions in the sorted server list), the client is the smaller index when `(i+j)` is even, the larger when `(i+j)` is odd. Both endpoints compute the same answer independently, so no coordination is needed.
+
+| N | spread | meaning |
+|---|---|---|
+| odd | 0 | every host runs exactly `(N-1)/2` clients |
+| even | 1 | every host runs `(N-2)/2` or `N/2` clients |
+| 100 | 1 | every host runs 49 or 50 clients (was 0..99 before) |
+
+### CPU sampling
+Each host runs `mpstat -P ALL 1 N` in the background, started right before iperf and running for `DURATION + 4` seconds. The fallback (`/proc/stat` deltas) kicks in if mpstat isn't installed; the parser detects which format it's reading.
+
+The bar chart annotates each host's bar with peak CPU. Three patterns to watch for:
+
+| Pattern | What it usually means |
+|---|---|
+| `peak_total_pct` low but `peak_softirq_pct` high on one core | RSS isn't spreading NIC IRQs — one core is doing all the packet work |
+| `peak_idle_floor_pct` near 0 but `peak_total_pct` low | One specific core is pinned (usually by softirq) while others sit idle |
+| `peak_total_pct` near 100 across all hosts | True CPU bound — throughput numbers measure the CPU, not the fabric |
+
+### Result collection
+For each host, one ssh + one scp + one local untar — instead of N-1 individual scp calls. At N=100 that's roughly 300 SSH/SCP operations across the whole pipeline instead of 5,000.
+
+### Heatmap auto-degradation
+Cell annotations, axis labels, and figure size adapt to N:
+
+| N | Cell labels | Axis labels | Bar value labels | Figure size |
+|---|---|---|---|---|
+| ≤ 30 | yes | every host | yes | scales linearly |
+| 31–50 | no | every host | yes | scales linearly |
+| 51–60 | no | every host (smaller font) | no | capped |
+| > 60 | no | every Nth (~30 shown total) | no | capped at 36×32 inches |
+
+At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts visible as red rows and columns.
+
+---
+
+## Output schema
+
+### `iperf_results.csv` (one row per direction, two per test file)
+
+| Column | Meaning |
+|---|---|
+| timestamp | iperf2's reported test time |
+| source | sender host for this row's direction |
+| target | receiver host for this row's direction |
+| status | `OK`, `NO_HEADER`, `NO_SUMMARY`, `DIRECTION_MISSING`, `READ_ERROR` |
+| protocol | `TCP` |
+| duration_s, parallel_streams | from the run-script header |
+| bytes_transferred, bps, mbps | the throughput numbers |
+| src_port, dst_port | raw from iperf2 |
+| pair_a, pair_b | the canonical pair this row came from |
+| filename, error | log file and any error text |
+
+### `cpu_summary.csv` (one row per host)
+
+| Column | Meaning |
+|---|---|
+| host | from the cpu log filename |
+| source | `mpstat` or `proc_stat` (which parser handled it) |
+| n_cpus | core count (mpstat only) |
+| peak_total_pct | max box-wide `100 - %idle` across samples |
+| mean_total_pct | mean box-wide `100 - %idle` |
+| peak_softirq_pct | max `%soft` on any single core |
+| peak_softirq_cpu | which core (mpstat only) |
+| peak_sys_pct | max `%sys` (box-wide) |
+| peak_user_pct | max `%usr` (box-wide) |
+| peak_idle_floor_pct | lowest `%idle` on any single core |
+
+### Heatmap reading
+- **Rows = source** (sender direction)
+- **Columns = target** (receiver direction)
+- Cell `(A, B)` is the throughput when A was sending to B during the full-duplex test
+- A row that's all red → that host has bad outbound
+- A column that's all red → that host has bad inbound
+- The bar chart underneath ranks hosts by mean outgoing Mbps with peak CPU% labeled when available
+
+---
+
+## State and idempotence
+
+State is tracked in `~/.iperf_orchestrator/state` as `KEY=value` lines. After every successful step, the corresponding key is set. `status` reads back exactly what's been done:
+
+```
+=== iperf-orchestrator status ===
+...
+Pipeline state:
+  SERVER_LIST_LOADED             yes
+  SSH_KEYS_DISTRIBUTED           yes
+  SERVERS_STARTED                yes
+  SCRIPTS_CREATED                yes
+  TESTS_RUN                      yes
+  TESTS_RUN_MODE                 parallel
+  RESULTS_COLLECTED              yes
+  CSV_BUILT                      yes
+  CPU_PARSED                     yes
+  PIVOT_BUILT                    yes
+  HEATMAP_BUILT                  yes
+```
+
+Every subcommand is safe to re-run individually. Common workflows:
+
+```bash
+# Full pipeline
+./iperf-orchestrator.sh all
+
+# Re-run just the analysis after editing parsing logic
+./iperf-orchestrator.sh parse-csv
+./iperf-orchestrator.sh parse-cpu
+./iperf-orchestrator.sh make-pivot
+./iperf-orchestrator.sh make-heatmap
+
+# Run one mode, collect, then run a second mode against the same servers
+./iperf-orchestrator.sh all parallel
+mv ~/.iperf_orchestrator/results ~/.iperf_orchestrator/results.parallel
+./iperf-orchestrator.sh run-tests sequential-host
+./iperf-orchestrator.sh collect-results
+./iperf-orchestrator.sh parse-csv
+# etc.
+```
+
+---
+
+## Design decisions and lessons learned
+
+This section documents *why* the script is shaped the way it is. Most of these were arrived at by hitting a real problem and fixing it.
+
+### iperf3 was the wrong tool for full-mesh testing
+The first version of this script used iperf3 with JSON output. iperf3 has nicer reporting (TCP retransmits, CPU utilization in the output, structured JSON), but its server is single-threaded and accepts one client at a time. At 100 hosts, every other host trying to connect to one server simultaneously would mostly fail with "the server is busy running a test." Working around this means running 100 iperf3 daemons per host on 100 ports, plus a port-assignment scheme, plus 100× the firewall config. We switched to iperf2 and the architecture got dramatically simpler.
+
+### Bidirectional testing per pair
+Earlier versions ran two independent tests per host pair (A→B as one test, B→A as another). With iperf2 `--full-duplex`, one TCP socket carries traffic in both directions simultaneously, both numbers come out of the same test, and you halve the test count. For fabric stress testing this is also more realistic — real-world traffic isn't strictly unidirectional and the switch buffers don't see the same patterns.
+
+### Parity rule for client assignment
+The first canonical-pair scheme used "lex-smaller host is always the client." That's correct but pathologically imbalanced — lex-first runs N-1 clients, lex-last runs 0. The parity-on-indices rule gives every host roughly (N-1)/2 clients with a max-min spread of 0 (N odd) or 1 (N even). At N=100 this turns 0..99 client load into 49..50 client load. Both endpoints compute the rule independently and agree without coordination.
+
+### Per-host iperf parallelism
+A subtle bug in early versions: `parallel` mode synchronized the *start* of each host but each host then ran its iperf3 calls in a serial `for` loop. So all hosts started at T+0, but A→B finished before A→C started. The whole point of parallel mode is to load the wire all at once; we were missing it. Fixed by backgrounding each `iperf` call with `&` and `wait`-ing for the whole batch on each host.
+
+### CPU sampling has to run on every host, including the no-client one
+With balanced pair assignment, every host has *some* client work — but if N is odd or if you customize the rule, you can end up with a host whose only role is being a server for inbound flows. That host's CPU is still doing real work (handling N/2 inbound full-duplex sockets), so it still needs to be sampled. The run-script keeps the mpstat sampler running even when its target list is empty.
+
+### Synchronized barrier instead of locks/coordination
+The first design considered something like a GPIO-style "everyone signal ready" barrier. Vastly simpler: pick a future epoch timestamp, push it to every host, each host busy-waits until then. No coordination, no failure modes around partial-readiness, no protocol to debug. Just a number.
+
+### Tar-batched result collection
+N-1 sequential scp calls per host at N=100 is ~80 minutes of pure SSH handshake overhead. One tar + one scp + one local untar per host is closer to a few minutes. Same data, ~17× faster, and the tarball naming naturally namespaces server-side log files (which were originally going to collide on extract).
+
+### Embedded Python for analysis
+The bash script runs locally only; on remote hosts the only assumption is iperf2 (and ideally mpstat). The CSV parser, pivot generator, and matplotlib renderer are embedded as heredoc Python in the orchestrator. This keeps it one file you can scp and run, no `pip install -e .` ceremony.
+
+### Fail open, not closed, on individual hosts
+`set -e` is intentionally **not** set. The orchestrator tracks failures per host and per step, warns about them, and keeps going so one bad host doesn't abort a 100-host run. Each step's success criterion is "did *enough* of it work to make the next step useful," not "did every single host succeed."
+
+### What CPU sampling reveals
+The most common surprise on first runs: the heatmap shows a host with low throughput, you assume the network is bad, then `cpu_summary.csv` shows that host pegged at 100% CPU during the test. The throughput number was measuring the CPU, not the fabric. The peak %CPU annotation on the bar chart exists to surface this immediately rather than letting you misread the heatmap.
+
+A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100% on core 0. The box-wide CPU looks fine, but RSS is hashing every flow to the same core. This is invisible without per-core data, which is why `mpstat -P ALL` is preferred over the `/proc/stat` fallback.
+
+---
+
+## Limitations and known gaps
+
+- **Other serial SSH loops (`start-servers`, `distribute-scripts`, `stop-servers`, `cleanup`, `check-iperf`, `check-servers`) iterate one host at a time.** At N=100 with ~1s per SSH, that's ~100s per command. Tolerable but not great — the fix is capped-concurrency parallel SSH (`xargs -P 20` or a bash job pool). Not implemented yet because doing it sloppily makes failure handling harder; doing it well adds 100+ lines.
+- **No retry on transient SSH failures.** If `start-servers` fails on one host, the orchestrator reports it and moves on. You can re-run the subcommand to pick up the stragglers, but there's no automatic retry.
+- **`sequential-pair` at N=100 takes ~14 hours.** The cleanest mode is also the slowest. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack all `N(N-1)/2` edges into ~N-1 rounds where every host has at most one flow per round). Not implemented; would be moderate complexity.
+- **Heatmap above ~60 hosts loses cell labels.** This is by design — they're unreadable at that density — but it means you have to read the colormap or the CSV for exact values.
+- **Asymmetric NIC speeds aren't auto-handled.** If half your fleet is 1G and half is 10G, the heatmap colormap is dominated by the 10G hosts and the 1G hosts all look very red. Acceptable for our use case ("uniform fleet"); for a heterogeneous fleet you'd want per-pair expected-bandwidth normalization.
+- **No UDP testing.** Fabric stress testing usually wants TCP because that's what real workloads do; if you specifically need UDP loss/jitter measurements, the iperf invocation in the generated run script needs `-u` and the parser needs to read different CSV columns.
+
+---
+
+## Troubleshooting
+
+**`check-iperf` says `WRONG_VERSION`.** Some distributions ship `iperf` as a symlink to `iperf3`. Verify with `iperf -v` on the host and install the actual iperf2 package (`apt install iperf` on Debian/Ubuntu, where `iperf` is iperf2 and `iperf3` is iperf3).
+
+**`run-tests` finishes but logs are full of "the server is busy" errors.** Confirms an iperf3 instance is still listening on port 5001. `pkill -x iperf3` and re-run `start-servers`.
+
+**One host's row is all NaN in the pivot.** Either it failed to start its iperf2 server, or it failed to run its client script. Check `~/.iperf_orchestrator/logs/run_<host>.log` and `~/.iperf_orchestrator/results/iperf_run_<host>.status`.
+
+**Heatmap shows surprisingly low numbers everywhere.** Look at `cpu_summary.csv`. If `peak_total_pct` is near 100%, you're CPU-bound, not network-bound. Possible fixes: bigger hosts, more cores, RSS tuning, or run in `sequential-host` mode to see what each host can do without contention.
+
+**`make-heatmap` errors out with `Missing Python package`.** `pip install matplotlib numpy` (or your distro's equivalent). Only the `make-heatmap` step needs these — the other steps work without them.
+
+---
+
+## File layout (working directory `~/.iperf_orchestrator/`)
+
+```
+servers.list            # the server list (after init)
+state                   # KEY=value pipeline state
+iperf_installed.txt     # check-iperf output
+iperf_running.txt       # check-servers output
+scripts/
+  run_<host>.sh         # generated per-host run scripts
+logs/
+  orchestrator.log      # everything the orchestrator did
+  run_<host>.log        # stdout/stderr of each host's run-tests session
+  run_<src>_to_<dst>.log  # sequential-pair only
+results/
+  iperf_test_<src>_to_<dst>.log    # raw iperf2 CSV with header
+  iperf_server_<host>.log           # server-side iperf log per host
+  iperf_run_<host>.status           # per-host status timeline
+  cpu_<host>.log                    # mpstat or proc_stat samples
+  iperf_results.csv                 # parsed throughput data
+  cpu_summary.csv                   # parsed CPU data
+  iperf_pivot.txt                   # text pivot
+  iperf_heatmap.png                 # heatmap + bar chart
+```
+
+---
+
+## License and contribution
+
+(Add your license of choice and contribution guidelines here.)
