@@ -184,9 +184,9 @@ test_keep_going_continues_past_per_host_failure() {
 
 test_keep_going_warning_message_appears_when_step_fails() {
     # Force start-servers to fail by making the fake ssh refuse the
-    # nohup command for one host.
+    # iperf -s -D command for one host.
     prep_workflow good doomed
-    # Patch the fake-ssh to fail nohup for "doomed".
+    # Patch the fake-ssh to fail iperf -s -D for "doomed".
     cat > "$FAKE_BIN/ssh" <<'SHIM'
 #!/usr/bin/env bash
 set -u
@@ -206,7 +206,7 @@ printf 'ssh\t%s\t%s\n' "$host" "$remote_cmd" >> "$LOG"
 case "$remote_cmd" in
     *"iperf -v"*) echo "iperf version 2.1.9 pthreads"; exit 0 ;;
     *"command -v mpstat"*) echo "yes"; exit 0 ;;
-    *"nohup iperf"*)
+    *"iperf -s -D"*)
         if [ "$host" = "doomed" ]; then
             exit 1   # simulate "won't start"
         fi
@@ -252,7 +252,7 @@ printf 'ssh\t%s\t%s\n' "$host" "$remote_cmd" >> "$LOG"
 case "$remote_cmd" in
     *"iperf -v"*) echo "iperf version 2.1.9 pthreads"; exit 0 ;;
     *"command -v mpstat"*) echo "yes"; exit 0 ;;
-    *"nohup iperf"*)
+    *"iperf -s -D"*)
         if [ "$host" = "doomed" ]; then
             exit 1
         fi

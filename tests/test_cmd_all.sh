@@ -53,8 +53,8 @@ case "\$remote_cmd" in
     *"command -v mpstat"*)
         echo "yes"
         exit 0 ;;
-    *"nohup iperf"*)
-        # cmd_start_servers: mkdir + pkill + nohup + pgrep verify.
+    *"iperf -s -D"*)
+        # cmd_start_servers: mkdir + pkill + iperf -s -D + pgrep verify.
         touch "\$fake_remote/_running"
         exit 0 ;;
     *"! pgrep"*)

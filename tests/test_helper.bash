@@ -112,11 +112,11 @@ if [ -f "$FAKE_BIN/unreachable" ] && grep -Fxq "$host" "$FAKE_BIN/unreachable"; 
 fi
 
 # Order matters: orchestrator commands compound several ops on one line
-# (e.g. start = mkdir + pkill + nohup + pgrep), so we match on the most
-# specific signature first.
+# (e.g. start = mkdir + pkill + iperf -s -D + pgrep), so we match on
+# the most specific signature first.
 case "$remote_cmd" in
-    *"nohup iperf"*)
-        # cmd_start_servers: mkdir + pkill + nohup iperf -s + pgrep.
+    *"iperf -s -D"*)
+        # cmd_start_servers: mkdir + pkill + iperf -s -D + pgrep.
         # Record this host as running for subsequent pgrep probes.
         touch "$FAKE_BIN/iperf_running_$host"
         exit 0
