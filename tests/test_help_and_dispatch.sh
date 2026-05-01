@@ -7,14 +7,19 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test_helper.bash
 source "$DIR/test_helper.bash"
 
-test_help_with_no_args_prints_usage() {
+test_help_with_no_args_prints_first_run_banner() {
     run_orch
     assert_status 0 "$RUN_RC" "no-args invocation should exit 0" || return 1
-    assert_contains "$RUN_OUT" "iperf-orchestrator.sh" "usage missing program name" || return 1
-    assert_contains "$RUN_OUT" "USAGE:" "usage missing USAGE header" || return 1
-    assert_contains "$RUN_OUT" "init" "usage should list init subcommand" || return 1
-    assert_contains "$RUN_OUT" "run-tests" "usage should list run-tests subcommand" || return 1
-    assert_contains "$RUN_OUT" "make-heatmap" "usage should list make-heatmap" || return 1
+    assert_contains "$RUN_OUT" "iperf-orchestrator.sh" "banner missing program name" || return 1
+    assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
+    assert_contains "$RUN_OUT" "init" "banner should mention init" || return 1
+    assert_contains "$RUN_OUT" "ssh-setup" "banner should mention ssh-setup" || return 1
+    assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
+    # Banner should be terse, not the full usage.
+    if echo "$RUN_OUT" | grep -q '^USAGE:$'; then
+        echo "no-args output should be the brief banner, not full usage" >&2
+        return 1
+    fi
 }
 
 test_help_explicit_subcommand() {
@@ -41,7 +46,7 @@ test_unknown_subcommand_is_rejected() {
     assert_contains "$RUN_OUT" "Unknown command" "should mention unknown command" || return 1
 }
 
-run_test test_help_with_no_args_prints_usage
+run_test test_help_with_no_args_prints_first_run_banner
 run_test test_help_explicit_subcommand
 run_test test_help_dash_h_flag
 run_test test_help_double_dash_help_flag

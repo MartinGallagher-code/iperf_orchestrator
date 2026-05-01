@@ -116,6 +116,43 @@ test_parallel_hosts_empty_list_is_noop() {
     }
 }
 
+test_parallel_hosts_emits_live_progress_on_stderr() {
+    write_servers a b c
+    export IPERF_JOBS=8
+    source_orch
+    _worker_quick() { sleep 0.1; }
+    local err_file="$TEST_TMPDIR/progress.err"
+    parallel_hosts _worker_quick >/dev/null 2>"$err_file"
+    # Should have one progress line per host, ending with N/N.
+    local lines
+    lines=$(grep -c "progress: " "$err_file" 2>/dev/null || echo 0)
+    if [ "$lines" -ne 3 ]; then
+        echo "expected 3 progress lines on stderr, got $lines:" >&2
+        cat "$err_file" >&2
+        return 1
+    fi
+    grep -q "progress: 3/3" "$err_file" || {
+        echo "missing final '3/3' progress line:" >&2
+        cat "$err_file" >&2
+        return 1
+    }
+}
+
+test_parallel_hosts_progress_disabled_via_env() {
+    write_servers a b c
+    export IPERF_JOBS=8
+    export IPERF_PROGRESS=0
+    source_orch
+    _worker_quick() { :; }
+    local err_file="$TEST_TMPDIR/noprogress.err"
+    parallel_hosts _worker_quick >/dev/null 2>"$err_file"
+    if grep -q "progress:" "$err_file"; then
+        echo "IPERF_PROGRESS=0 should suppress progress output:" >&2
+        cat "$err_file" >&2
+        return 1
+    fi
+}
+
 test_parallel_hosts_no_failures_leaves_empty_array() {
     write_servers a b c
     source_orch
@@ -134,6 +171,8 @@ run_test test_parallel_hosts_records_failures
 run_test test_parallel_hosts_respects_jobs_cap
 run_test test_parallel_hosts_captures_worker_output_in_order
 run_test test_parallel_hosts_empty_list_is_noop
+run_test test_parallel_hosts_emits_live_progress_on_stderr
+run_test test_parallel_hosts_progress_disabled_via_env
 run_test test_parallel_hosts_no_failures_leaves_empty_array
 
 report_tests
