@@ -333,4 +333,8 @@ results/
 
 ## License and contribution
 
-(Add your license of choice and contribution guidelines here.)
+This project is licensed under the **GNU General Public License v3.0** (GPL-3.0). See the [LICENSE](LICENSE) file for the full text.
+
+In short: you are free to use, modify, and redistribute this software, but any distributed derivative work must also be licensed under GPL v3 and made available in source form. The software is provided without warranty.
+
+Contributions are welcome and, by submitting them, you agree that they will be licensed under the same GPL v3 terms.
