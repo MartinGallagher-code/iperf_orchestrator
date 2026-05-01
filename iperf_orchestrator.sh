@@ -273,10 +273,39 @@ parallel_hosts() {
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-XXXXXX") || die "mktemp failed"
 
+    # Live progress drainer: tails $tmpdir for new $i.rc files (each worker
+    # writes its rc as the very last action) and prints an ordered count
+    # to stderr so the user sees "47/100 done" while the slowest worker is
+    # still running. Stdout is reserved for the ordered replay below.
+    # Disabled by IPERF_PROGRESS=0 for tests that need clean stderr.
+    local drain_pid=""
+    if [ "${IPERF_PROGRESS:-1}" != "0" ] && [ "$n" -gt 1 ]; then
+        (
+            local printed=0 j rc_d label
+            declare -A seen=()
+            while [ "$printed" -lt "$n" ]; do
+                for ((j=0; j<n; j++)); do
+                    if [ -z "${seen[$j]:-}" ] && [ -f "$tmpdir/$j.rc" ]; then
+                        rc_d=$(cat "$tmpdir/$j.rc" 2>/dev/null)
+                        seen[$j]=1
+                        printed=$((printed + 1))
+                        if [ "${rc_d:-1}" = "0" ]; then label=OK; else label="FAIL(rc=${rc_d:-?})"; fi
+                        echo "[$(ts)]   progress: $printed/$n $label: ${hosts[$j]}" \
+                            | tee -a "$LOGS_DIR/orchestrator.log" >&2
+                    fi
+                done
+                sleep 0.5
+            done
+        ) &
+        drain_pid=$!
+    fi
+
     local i running=0
     for ((i=0; i<n; i++)); do
         if [ "$running" -ge "$jobs" ]; then
-            # Block until any one worker exits, then free a slot.
+            # Block until any one worker exits, then free a slot. The
+            # drainer is also a child but it doesn't exit until all .rc
+            # files exist, so wait -n only ever reaps a worker here.
             wait -n 2>/dev/null || wait
             running=$((running - 1))
         fi
@@ -287,6 +316,9 @@ parallel_hosts() {
         running=$((running + 1))
     done
     wait
+
+    # Drainer should have exited on its own once printed==n; reap it.
+    [ -n "$drain_pid" ] && wait "$drain_pid" 2>/dev/null
 
     for ((i=0; i<n; i++)); do
         [ -s "$tmpdir/$i.out" ] && cat "$tmpdir/$i.out"
@@ -351,6 +383,24 @@ is_client_for() {
 #==============================================================================
 # Subcommands
 #==============================================================================
+
+first_run_banner() {
+    cat <<EOF
+iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
+
+Quick start:
+    1. $0 init <server_list_file>   # one IP/host per line; '#' comments OK
+    2. $0 ssh-setup                 # distribute SSH keys
+                                    #   add --ask-password to skip per-host prompts
+    3. $0 all                       # run the full pipeline + render heatmap
+
+Other useful commands:
+    $0 doctor      Check that local prerequisites are installed
+    $0 status      Show progress through the pipeline
+    $0 help        Full command and flag reference
+
+EOF
+}
 
 usage() {
     cat <<EOF
@@ -421,8 +471,14 @@ ANALYSIS:
     make-heatmap           Render results/iperf_heatmap.png (heatmap + bar chart)
 
 CONVENIENCE:
-    all [MODE]             Run the full sequence end-to-end (MODE is forwarded
-                           to run-tests; default parallel)
+    all [MODE] [--keep-going]
+                           Run the full sequence end-to-end. MODE is forwarded
+                           to run-tests (default parallel). With --keep-going,
+                           continue past per-host failures instead of aborting.
+                           Runs 'doctor' first.
+    doctor                 Probe local prerequisites (ssh tools, expect when a
+                           password source is configured, python3 + numpy +
+                           pandas + matplotlib) and print install hints.
     status                 Show what has been done so far
     help                   Show this message
 
@@ -448,6 +504,48 @@ cmd_init() {
     local src="${1:-}"
     [ -n "$src" ] || die "Usage: $0 init <server_list_file>"
     [ -f "$src" ] || die "File not found: $src"
+
+    # Validate the server list before copying it in. Apply the same
+    # comment/whitespace stripping read_servers does, then reject any entry
+    # that isn't a plausible hostname or IP. Bracketed IPv6 ([fe80::1]) is
+    # accepted; unbracketed IPv6 with colons is also accepted because we
+    # need it for run_iperf and the script handles colons elsewhere.
+    local cleaned
+    cleaned=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        "$src" | grep -v '^$' || true)
+
+    local invalid=()
+    if [ -n "$cleaned" ]; then
+        local line
+        while IFS= read -r line; do
+            case "$line" in
+                *://*)         invalid+=("$line  (URL not allowed; use bare hostname or IP)") ; continue ;;
+                */*)           invalid+=("$line  (contains '/'; not a valid hostname)") ; continue ;;
+                *' '*|*$'\t'*) invalid+=("$line  (contains whitespace)") ; continue ;;
+            esac
+            case "$line" in
+                \[*\]) ;;  # bracketed IPv6
+                *)
+                    if ! [[ "$line" =~ ^[a-zA-Z0-9._:-]+$ ]]; then
+                        invalid+=("$line  (contains characters outside [a-zA-Z0-9._:-])")
+                    fi
+                    ;;
+            esac
+        done <<< "$cleaned"
+    fi
+
+    if [ ${#invalid[@]} -gt 0 ]; then
+        err "Invalid entries in $src:"
+        local v
+        for v in "${invalid[@]}"; do err "  $v"; done
+        die "fix the server list and re-run init"
+    fi
+
+    local n_clean=0
+    if [ -n "$cleaned" ]; then
+        n_clean=$(printf '%s\n' "$cleaned" | wc -l)
+    fi
+    [ "$n_clean" -ge 2 ] || die "need at least 2 hosts for full-mesh testing (got $n_clean)"
 
     cp "$src" "$SERVER_LIST_FILE"
     : > "$STATE_FILE"
@@ -951,14 +1049,27 @@ cmd_distribute_scripts() {
 }
 
 #------------------------------------------------------------------------------
+# Signal handler: on Ctrl-C or SIGTERM during run-tests / cmd_all, try to
+# stop the iperf daemons we spawned on every remote host so they don't
+# linger. cmd_stop_servers is idempotent and parallel.
+_orchestrator_signal_cleanup() {
+    trap - INT TERM
+    warn "interrupted; attempting to stop iperf servers on all hosts"
+    # Best-effort: don't let a failure here mask the original signal.
+    cmd_stop_servers || true
+    exit 130
+}
+
 cmd_run_tests() {
     local mode="${1:-parallel}"
+    trap '_orchestrator_signal_cleanup' INT TERM
     case "$mode" in
         parallel)        _run_parallel ;;
         sequential-host) _run_sequential_host ;;
         sequential-pair) _run_sequential_pair ;;
         *) die "Unknown mode: $mode (expected: parallel | sequential-host | sequential-pair)" ;;
     esac
+    trap - INT TERM
 }
 
 # parallel: every host runs its full test sequence at the same synchronized
@@ -998,6 +1109,39 @@ _run_parallel() {
     done <<< "$hosts"
 
     log "Launched ${#pids[@]} remote sessions; waiting for completion..."
+
+    # Live progress poller: every 5s, count how many of the launched pids
+    # have exited and print a counter when it changes. Also emit a
+    # watchdog warning if the run hasn't finished by the estimated time
+    # plus a 30s grace, listing which hosts are still outstanding -- this
+    # is usually a clock-skew issue past START_DELAY, or a stuck SSH.
+    local total=${#pids[@]}
+    local last_done=0 elapsed=0 done_count
+    local watchdog_at=$((est + 30))
+    while :; do
+        done_count=0
+        for p in "${pids[@]}"; do
+            kill -0 "$p" 2>/dev/null || done_count=$((done_count + 1))
+        done
+        if [ "$done_count" -ne "$last_done" ]; then
+            log "  progress: $done_count/$total hosts finished"
+            last_done=$done_count
+        fi
+        [ "$done_count" -eq "$total" ] && break
+        sleep 5
+        elapsed=$((elapsed + 5))
+        if [ "$elapsed" -ge "$watchdog_at" ]; then
+            local hung=()
+            local i_w
+            for i_w in "${!pids[@]}"; do
+                kill -0 "${pids[$i_w]}" 2>/dev/null && hung+=("${hosts_for_pids[$i_w]}")
+            done
+            warn "  watchdog: ${#hung[@]} host(s) still running after ${elapsed}s: ${hung[*]:-(none)}"
+            warn "  (likely cause: clock skew past START_DELAY, or a stuck SSH session)"
+            watchdog_at=$((elapsed + 60))
+        fi
+    done
+
     local failed=()
     local i p h
     for i in "${!pids[@]}"; do
@@ -2078,19 +2222,119 @@ PYEOF
 }
 
 #------------------------------------------------------------------------------
+# doctor: probe orchestrator-host prerequisites (ssh tools, expect when a
+# password source is configured, python + matplotlib stack) up front so a
+# missing dep fails fast instead of crashing 90s into `all`. Returns
+# non-zero if anything is missing.
+_doctor_check_tool() {
+    local tool="$1" hint="$2"
+    if command -v "$tool" >/dev/null 2>&1; then
+        local ver
+        ver=$("$tool" --version 2>&1 | head -n1 | tr -d '\r')
+        log "  OK  $tool   ${ver:-(no --version output)}"
+        return 0
+    fi
+    warn "  MISSING $tool   ($hint)"
+    return 1
+}
+
+_doctor_check_python_module() {
+    local mod="$1"
+    if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+        return 1
+    fi
+    if "$PYTHON_BIN" -c "import $mod" 2>/dev/null; then
+        local pyver
+        pyver=$("$PYTHON_BIN" -c "import $mod; print(getattr($mod, '__version__', '?'))" 2>/dev/null)
+        log "  OK  python -m $mod   $pyver"
+        return 0
+    fi
+    warn "  MISSING python module '$mod'   (pip install $mod)"
+    return 1
+}
+
+cmd_doctor() {
+    log "=== doctor: orchestrator-host prerequisites ==="
+    local missing=0
+
+    _doctor_check_tool ssh          "install openssh-client" || missing=$((missing + 1))
+    _doctor_check_tool scp          "install openssh-client" || missing=$((missing + 1))
+    _doctor_check_tool ssh-copy-id  "install openssh-client" || missing=$((missing + 1))
+    _doctor_check_tool ssh-keygen   "install openssh-client" || missing=$((missing + 1))
+
+    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
+        _doctor_check_tool expect \
+            "install: apt install expect / dnf install expect / brew install expect" \
+            || missing=$((missing + 1))
+    fi
+
+    _doctor_check_tool "$PYTHON_BIN" "install python3" || missing=$((missing + 1))
+
+    local mod
+    for mod in numpy pandas matplotlib; do
+        _doctor_check_python_module "$mod" || missing=$((missing + 1))
+    done
+
+    if [ "$missing" -eq 0 ]; then
+        log "doctor: all prerequisites OK"
+        return 0
+    fi
+    warn "doctor: $missing issue(s) above"
+    return 1
+}
+
+#------------------------------------------------------------------------------
 cmd_all() {
-    local mode="${1:-parallel}"
-    log "=== Running full pipeline (run-tests mode: $mode) ==="
+    local mode="parallel"
+    local keep_going=0
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --keep-going)                              keep_going=1 ;;
+            parallel|sequential-host|sequential-pair)  mode="$arg" ;;
+            *) die "cmd_all: unknown argument: $arg (expected mode and/or --keep-going)" ;;
+        esac
+    done
+
+    # Stop iperf daemons across the fleet on Ctrl-C / SIGTERM.
+    trap '_orchestrator_signal_cleanup' INT TERM
+
+    log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
+
+    # Fail fast on missing local prereqs instead of crashing 90s into the
+    # pipeline at parse-csv / make-heatmap.
+    if ! cmd_doctor; then
+        if [ "$keep_going" = "1" ]; then
+            warn "doctor reported issues; continuing because --keep-going was passed"
+        else
+            die "doctor reported issues; install missing tools or pass --keep-going"
+        fi
+    fi
+
+    _all_gate() {
+        local step="$1"
+        if [ "${#PARALLEL_FAILED[@]}" -gt 0 ]; then
+            if [ "$keep_going" = "1" ]; then
+                warn "$step had ${#PARALLEL_FAILED[@]} failure(s); continuing (--keep-going)"
+            else
+                die "$step had ${#PARALLEL_FAILED[@]} failure(s); aborting (use --keep-going to continue, or re-run the failing step)"
+            fi
+        fi
+    }
+
     [ "$(get_state SSH_KEYS_DISTRIBUTED)" = "yes" ] || cmd_ssh_setup
-    cmd_check_iperf
-    cmd_check_servers
-    cmd_start_servers
+    cmd_check_iperf;        _all_gate check-iperf
+    cmd_check_servers;      _all_gate check-servers
+    cmd_start_servers;      _all_gate start-servers
     cmd_create_scripts
-    cmd_distribute_scripts
+    cmd_distribute_scripts; _all_gate distribute-scripts
     cmd_run_tests "$mode"
-    cmd_collect_results
-    cmd_stop_servers
-    cmd_cleanup
+    if [ "$(get_state TESTS_RUN)" != "yes" ] && [ "$keep_going" != "1" ]; then
+        die "run-tests had failure(s); aborting (use --keep-going to continue, or re-run run-tests)"
+    fi
+    cmd_collect_results;    _all_gate collect-results
+    cmd_stop_servers;       _all_gate stop-servers
+    cmd_cleanup;            _all_gate cleanup
     cmd_parse_csv
     cmd_parse_cpu
     cmd_make_pivot
@@ -2099,15 +2343,18 @@ cmd_all() {
     echo
     echo "Results in: $RESULTS_DIR"
     ls -1 "$RESULTS_DIR" | sed 's/^/  /'
+
+    trap - INT TERM
 }
 
 #==============================================================================
 # Dispatcher
 #==============================================================================
-cmd="${1:-help}"
+cmd="${1:-}"
 shift || true
 
 case "$cmd" in
+    "")                 first_run_banner ;;
     init)               cmd_init "$@" ;;
     status)             cmd_status ;;
     ssh-setup)          cmd_ssh_setup ;;
@@ -2124,7 +2371,8 @@ case "$cmd" in
     parse-cpu)          cmd_parse_cpu ;;
     make-pivot)         cmd_make_pivot ;;
     make-heatmap)       cmd_make_heatmap ;;
+    doctor)             cmd_doctor ;;
     all)                cmd_all "$@" ;;
-    help|-h|--help|"")  usage ;;
+    help|-h|--help)     usage ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac
