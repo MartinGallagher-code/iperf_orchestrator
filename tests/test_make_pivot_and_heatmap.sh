@@ -112,22 +112,26 @@ test_make_heatmap_produces_png_or_skips_cleanly() {
 }
 
 test_make_heatmap_missing_dependency_message() {
-    # The orchestrator's bash wrapper does not propagate the embedded
-    # Python's exit code, so the overall return is 0 even when the
-    # render fails. We instead assert the user-facing diagnostic
-    # message and that no PNG was produced.
+    # The wrapper now propagates the embedded Python's exit code, so
+    # we expect a non-zero status, the dep-missing diagnostic, no PNG,
+    # and no false HEATMAP_BUILT=yes flag.
     if python3 -c 'import matplotlib' >/dev/null 2>&1; then
         echo "    SKIP test_make_heatmap_missing_dependency_message: matplotlib IS installed; can't simulate its absence portably"
         return 0
     fi
     prep_csv
     run_orch make-heatmap
+    assert_ne 0 "$RUN_RC" "should fail when matplotlib unavailable" || return 1
     assert_contains "$RUN_OUT" "Missing Python package" \
         "expected dependency-missing diagnostic" || return 1
     [ ! -f "$IPERF_DIR/results/iperf_heatmap.png" ] || {
         echo "PNG should not exist when matplotlib is missing" >&2
         return 1
     }
+    if [ -f "$IPERF_DIR/state" ] && grep -q '^HEATMAP_BUILT=yes$' "$IPERF_DIR/state"; then
+        echo "HEATMAP_BUILT should NOT be flagged when render failed" >&2
+        return 1
+    fi
 }
 
 run_test test_make_pivot_requires_csv

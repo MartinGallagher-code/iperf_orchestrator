@@ -27,7 +27,7 @@ test_flag_requiring_value_with_no_value() {
 test_jobs_must_be_positive_integer() {
     run_orch --jobs notanumber help
     assert_status 2 "$RUN_RC" "non-integer --jobs should exit 2" || return 1
-    assert_contains "$RUN_OUT" "positive integer" "error message should explain integer requirement" || return 1
+    assert_contains "$RUN_OUT" "integer" "error message should explain integer requirement" || return 1
 }
 
 test_jobs_zero_is_rejected() {

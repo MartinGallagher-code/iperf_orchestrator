@@ -106,10 +106,22 @@ set -- "${_PARSED[@]}"
 unset _PARSED
 
 # Re-validate the integer flags now that env+CLI have been merged.
-case "$IPERF_JOBS" in
-    ''|*[!0-9]*) _flag_die "IPERF_JOBS / --jobs must be a positive integer (got '$IPERF_JOBS')" ;;
-esac
-[ "$IPERF_JOBS" -ge 1 ] || _flag_die "IPERF_JOBS / --jobs must be >= 1"
+# Garbage values get caught here instead of silently propagating into
+# generated scripts and only failing on the remote side at iperf time.
+_validate_uint() {
+    # _validate_uint <name> <value> <min>
+    local name="$1" val="$2" min="$3"
+    case "$val" in
+        ''|*[!0-9]*) _flag_die "$name must be a non-negative integer (got '$val')" ;;
+    esac
+    [ "$val" -ge "$min" ] || _flag_die "$name must be >= $min (got $val)"
+}
+_validate_uint "IPERF_JOBS / --jobs"           "$IPERF_JOBS"     1
+_validate_uint "IPERF_PORT / --port"           "$IPERF_PORT"     1
+_validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
+_validate_uint "IPERF_PARALLEL / --parallel"   "$IPERF_PARALLEL" 1
+_validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
+[ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
 
 # Paths derived from IPERF_DIR (computed AFTER flags so --iperf-dir works).
 STATE_FILE="$IPERF_DIR/state"
@@ -229,6 +241,13 @@ parallel_hosts() {
     local fn="$1"
     local jobs="$IPERF_JOBS"
     [ "$jobs" -lt 1 ] && jobs=1
+
+    # read_servers calls die() when the list is missing, but we invoke
+    # it inside a process substitution below -- its exit only kills
+    # the subshell, so the parent would silently see an empty host
+    # list and falsely flag the pipeline step as completed. Check
+    # the file up front so the failure surfaces.
+    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
 
     local hosts=() h
     while IFS= read -r h; do
@@ -415,6 +434,21 @@ cmd_init() {
 
     local n
     n=$(read_servers | wc -l)
+
+    # Warn on duplicates: the script keys on hostname for HOST_IDX,
+    # output paths, and per-host log files, so duplicates would
+    # silently overwrite each other and skew the parity-rule load
+    # balance.
+    local dups
+    dups=$(read_servers | sort | uniq -d)
+    if [ -n "$dups" ]; then
+        warn "Server list contains duplicate hostnames; per-host scripts and"
+        warn "logs would overwrite each other. Duplicates:"
+        while IFS= read -r d; do
+            warn "  $d"
+        done <<< "$dups"
+    fi
+
     log "Initialized with $n hosts from $src -> $SERVER_LIST_FILE"
 }
 
@@ -520,6 +554,11 @@ _worker_check_iperf() {
 }
 
 cmd_check_iperf() {
+    # Up-front check: parallel_hosts itself dies on a missing server
+    # list, but we pipe its output through tee below, which forks
+    # parallel_hosts into a subshell -- the die's exit only kills that
+    # subshell and the outer command would falsely flag the step done.
+    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
     local out="$IPERF_DIR/iperf_installed.txt"
     : > "$out"
     log "Checking iperf2 + mpstat availability on all hosts (parallel x$IPERF_JOBS)..."
@@ -543,6 +582,9 @@ _worker_check_servers() {
 }
 
 cmd_check_servers() {
+    # See cmd_check_iperf for why we double-check here despite
+    # parallel_hosts already validating the server list.
+    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
     local out="$IPERF_DIR/iperf_running.txt"
     : > "$out"
     log "Checking iperf2 daemon status on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
@@ -808,23 +850,26 @@ _run_parallel() {
     log "Synchronized start at $human_start (epoch $start_time)"
     log "$n_pairs pairs tested simultaneously for ${IPERF_DURATION}s; estimated total ~${est}s"
 
+    # Two parallel arrays instead of "$pid:$host" strings, so an IPv6
+    # hostname (which contains colons) doesn't get truncated when we
+    # try to recover it for the per-host log line.
     local pids=()
-    local pid_to_host=()
+    local hosts_for_pids=()
     while IFS= read -r host; do
         [ -z "$host" ] && continue
         local hostlog="$LOGS_DIR/run_${host}.log"
         ssh_run "$host" "'$REMOTE_DIR/run_iperf.sh' $start_time" \
             > "$hostlog" 2>&1 &
-        local p=$!
-        pids+=("$p")
-        pid_to_host+=("$p:$host")
+        pids+=("$!")
+        hosts_for_pids+=("$host")
     done <<< "$hosts"
 
     log "Launched ${#pids[@]} remote sessions; waiting for completion..."
     local failed=()
-    for entry in "${pid_to_host[@]}"; do
-        local p="${entry%%:*}"
-        local h="${entry##*:}"
+    local i p h
+    for i in "${!pids[@]}"; do
+        p="${pids[$i]}"
+        h="${hosts_for_pids[$i]}"
         if wait "$p"; then
             log "  finished: $h"
         else
@@ -852,7 +897,6 @@ _run_sequential_host() {
 
     local n
     n=$(echo "$hosts" | wc -l)
-    local n_targets=$(( n - 1 ))
     local est_per_host=$(( IPERF_DURATION + 5 ))
     local est_total=$(( n * est_per_host ))
     log "Mode: sequential-host (canonical pairs, full-duplex)"
@@ -1011,7 +1055,11 @@ _worker_stop_server() {
 cmd_stop_servers() {
     log "Stopping iperf2 servers on every host (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_stop_server
-    set_state SERVERS_STOPPED yes
+    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
+        set_state SERVERS_STOPPED yes
+    else
+        warn "stop-servers had ${#PARALLEL_FAILED[@]} failure(s)"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -1028,7 +1076,11 @@ _worker_cleanup() {
 cmd_cleanup() {
     log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_cleanup
-    set_state CLEANED_UP yes
+    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
+        set_state CLEANED_UP yes
+    else
+        warn "cleanup had ${#PARALLEL_FAILED[@]} failure(s)"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -1175,21 +1227,30 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
     # lines. The line whose source port equals the listening port is the
     # server-as-sender direction (pair_b -> pair_a). The other line has an
     # ephemeral source port and is client-as-sender (pair_a -> pair_b).
+    #
+    # We partition the summaries by source port BEFORE assigning, so a
+    # second ephemeral row can't overwrite the first (the previous loop
+    # would silently clobber a_to_b if both rows had ephemeral source
+    # ports, which can happen with non-standard iperf2 builds).
     a_to_b = None  # pair_a (client) -> pair_b (server)
     b_to_a = None  # pair_b (server) -> pair_a (client)
+    listening = []
+    ephemeral = []
     for cols in summaries:
         try:
             sp = int(cols[2])
         except ValueError:
             continue
-        if sp == listening_port:
-            b_to_a = cols
-        else:
-            a_to_b = cols
+        (listening if sp == listening_port else ephemeral).append(cols)
 
-    # Last-resort fallback: addr matching (works when listening-port logic
-    # somehow failed -- e.g. an unexpected iperf2 version that emits ports
-    # differently).
+    if len(listening) == 1:
+        b_to_a = listening[0]
+    if len(ephemeral) == 1:
+        a_to_b = ephemeral[0]
+
+    # Fallbacks for unusual layouts (zero or multiple matches on either
+    # side). Try addr matching first; if that fails too, take the rows
+    # in their reported order.
     if a_to_b is None and b_to_a is None and len(summaries) >= 2:
         for cols in summaries:
             if addr_matches(cols[1], pair_a):
@@ -1248,7 +1309,8 @@ with open(out_csv, "w", newline="") as f:
 ok = sum(1 for r in rows if r["status"] == "OK")
 print(f"Wrote {len(rows)} rows ({ok} OK) from {len(set(r['filename'] for r in rows))} log files to {out_csv}")
 PYEOF
-
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
     set_state CSV_BUILT yes
 }
 
@@ -1385,6 +1447,7 @@ def parse_mpstat(path):
     peak_sys = 0.0
     peak_user = 0.0
     lowest_idle_per_core = 100.0
+    saw_percore = False  # only emit per-core metrics if we actually saw per-core rows
 
     for ts, rows in samples:
         all_row = rows.get('all')
@@ -1397,6 +1460,7 @@ def parse_mpstat(path):
         for cpu_label, metrics in rows.items():
             if cpu_label == 'all':
                 continue
+            saw_percore = True
             soft = metrics.get('%soft', 0.0)
             if soft > peak_softirq:
                 peak_softirq = soft
@@ -1412,11 +1476,14 @@ def parse_mpstat(path):
         "n_cpus": n_cpus,
         "peak_total_pct":   round(peak_total, 2),
         "mean_total_pct":   round(mean_total, 2),
-        "peak_softirq_pct": round(peak_softirq, 2),
-        "peak_softirq_cpu": peak_softirq_cpu,
-        "peak_sys_pct":     round(peak_sys, 2),
-        "peak_user_pct":    round(peak_user, 2),
-        "peak_idle_floor_pct": round(lowest_idle_per_core, 2),
+        # Leave per-core fields blank when no per-core rows were seen,
+        # so they aren't misread as "softirq=0, idle floor=100" when in
+        # reality the data wasn't measured.
+        "peak_softirq_pct":     round(peak_softirq, 2)         if saw_percore else "",
+        "peak_softirq_cpu":     peak_softirq_cpu               if saw_percore else "",
+        "peak_sys_pct":         round(peak_sys, 2),
+        "peak_user_pct":        round(peak_user, 2),
+        "peak_idle_floor_pct":  round(lowest_idle_per_core, 2) if saw_percore else "",
         "source": "mpstat",
     }
 
@@ -1519,7 +1586,8 @@ if ranked:
               f"{str(r['peak_softirq_pct']):>9} {str(r['peak_sys_pct']):>9} "
               f"{str(r['peak_idle_floor_pct']):>9}")
 PYEOF
-
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
     set_state CPU_PARSED yes
 }
 
@@ -1602,7 +1670,8 @@ with open(out_txt, "w") as f:
 
 print(f"Wrote {out_txt}")
 PYEOF
-
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
     set_state PIVOT_BUILT yes
 }
 
@@ -1809,7 +1878,8 @@ ax_bar_cbar.axis("off")
 plt.savefig(out_png, dpi=150, bbox_inches="tight")
 print(f"Wrote {out_png}")
 PYEOF
-
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
     set_state HEATMAP_BUILT yes
 }
 

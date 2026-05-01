@@ -52,14 +52,19 @@ with open('$1') as f:
 test_parse_csv_no_logs_produces_error() {
     prep_results_dir >/dev/null
     run_orch parse-csv
-    # The bash wrapper does NOT propagate the Python exit code, so
-    # the overall return is 0; we instead assert the diagnostic
-    # message reaches the user and that no CSV was produced.
+    # The wrapper now propagates the Python exit code, so we get a
+    # non-zero status, the diagnostic on stderr, no CSV produced, and
+    # no false CSV_BUILT=yes flag in state.
+    assert_ne 0 "$RUN_RC" "should fail when no logs present" || return 1
     assert_contains "$RUN_OUT" "No log files found" || return 1
     [ ! -f "$IPERF_DIR/results/iperf_results.csv" ] || {
         echo "iperf_results.csv should not exist when there were no input logs" >&2
         return 1
     }
+    if [ -f "$IPERF_DIR/state" ] && grep -q '^CSV_BUILT=yes$' "$IPERF_DIR/state"; then
+        echo "CSV_BUILT should NOT be flagged when parse failed" >&2
+        return 1
+    fi
 }
 
 test_parse_csv_extracts_both_directions() {
