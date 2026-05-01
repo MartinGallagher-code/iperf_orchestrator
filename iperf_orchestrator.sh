@@ -1082,15 +1082,47 @@ _worker_start_server() {
     # pkill -f scopes to "iperf -s -p $IPERF_PORT" so we don't disturb
     # the user's unrelated iperf -c clients or iperf servers on other
     # ports. The [i]perf trick keeps pgrep from matching its own argv.
-    # Per-host remote stderr captured to $errlog so failures are
-    # diagnosable instead of just "FAILED to start on $host".
+    #
+    # iperf -D is iperf2's built-in daemon mode: the parent binds the
+    # port, forks, and exits with a meaningful return code (non-zero if
+    # bind failed before fork). That is exactly the semantics we want,
+    # so we use it instead of nohup + & + disown -- which fakes the same
+    # thing but loses the bind error and is fragile across remote
+    # shells.
+    #
+    # iperf's own stderr is still redirected into the remote
+    # iperf_server.log, so a bare "FAILED rc=1" on the orchestrator side
+    # hides the real reason (binary not on non-interactive PATH, port in
+    # TIME_WAIT, permission denied, etc.). On failure we tail that
+    # remote log into ssh's stderr so it lands in $errlog and the user
+    # sees the actual error without having to log into each host.
     if ssh_run "$host" "
-        mkdir -p '$REMOTE_DIR' &&
-        pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null; sleep 1;
-        nohup iperf -s -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1 &
-        disown || true
+        if ! mkdir -p '$REMOTE_DIR' 2>&1; then
+            echo 'iperf-orchestrator: cannot create $REMOTE_DIR on remote' >&2
+            exit 1
+        fi
+        pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null
         sleep 1
-        pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null
+        iperf -s -D -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1
+        rc=\$?
+        if [ \$rc -eq 0 ] && pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null; then
+            exit 0
+        fi
+        echo \"iperf-orchestrator: iperf -s -D failed (rc=\$rc) or did not stay running.\" >&2
+        if [ -s '$REMOTE_DIR/iperf_server.log' ]; then
+            echo '--- remote iperf_server.log (tail) ---' >&2
+            tail -n 20 '$REMOTE_DIR/iperf_server.log' >&2
+            echo '--- end ---' >&2
+        else
+            # Empty log is the classic non-interactive PATH symptom:
+            # the shell failed to even exec iperf, so nothing was written.
+            echo '(remote iperf_server.log is empty)' >&2
+            echo \"remote PATH=\$PATH\" >&2
+            if ! command -v iperf >/dev/null 2>&1; then
+                echo 'iperf is not on the non-interactive PATH; fix the remote login PATH (e.g. /etc/environment) or symlink iperf into /usr/local/bin' >&2
+            fi
+        fi
+        exit 1
     " 2>"$errlog"; then
         log "  OK: $host"
         rm -f "$errlog"   # nothing useful, drop it
