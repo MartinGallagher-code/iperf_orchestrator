@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for build_host_idx + is_client_for. The script's docstring
 # promises:
 #   - For every unordered pair {a,b} exactly one of (a is client of b)

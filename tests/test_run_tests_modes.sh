@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for the `run-tests` subcommand and its three execution modes:
 #   parallel         (sync-start, all hosts simultaneously)
 #   sequential-host  (one host at a time)

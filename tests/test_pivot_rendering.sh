@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Detailed tests for the pivot-table rendering. Beyond the smoke tests
 # in test_make_pivot_and_heatmap.sh, this verifies:
 #   - column-width auto-scaling for long hostnames

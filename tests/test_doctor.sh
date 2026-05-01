@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for cmd_doctor and its _doctor_check_* helpers (added in
 # the recent Phase 1 UX improvement). cmd_doctor probes for the
 # tools and Python modules the pipeline needs and reports issues

@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 #
 # Shared helpers for the iperf-orchestrator test suite.
 #

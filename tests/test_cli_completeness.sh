@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Meta-tests: the CLI's documented surface and the dispatcher must
 # agree, the script must remain executable from anywhere, and the
 # usage text must mention every subcommand the dispatcher knows.

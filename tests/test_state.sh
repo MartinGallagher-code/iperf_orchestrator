@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for the load_state / save_state / set_state / get_state helpers
 # and the on-disk state file format.
 

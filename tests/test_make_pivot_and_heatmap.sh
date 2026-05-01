@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for `make-pivot` (text pivot table) and `make-heatmap` (PNG
 # render). The heatmap test requires matplotlib + numpy; if missing,
 # the heatmap test is skipped (treated as pass with a SKIP note).
