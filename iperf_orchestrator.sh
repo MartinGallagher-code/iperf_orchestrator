@@ -366,9 +366,10 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
 SETUP:
     init <server_list>     Set the server list (one IP/host per line; '#' comments OK)
     ssh-setup              Generate (if needed) and distribute SSH keys to all hosts.
-                           By default prompts you per-host for the SSH password.
-                           Pass --password-file / --password-env / --ask-password
-                           to drive ssh-copy-id non-interactively via 'expect'.
+                           By default prompts you per-host for the SSH password
+                           (sequential). Pass --password-file / --password-env /
+                           --ask-password to drive ssh-copy-id non-interactively
+                           via 'expect', in parallel (capped by --jobs).
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts currently have iperf -s running
 
@@ -558,6 +559,19 @@ exit [lindex $result 3]
 EXPECT_EOF
 }
 
+# Parallel worker for the expect-driven path. _IPERF_ORCH_PW must be exported
+# in the parent so it's inherited by this subshell.
+_worker_ssh_copy_id() {
+    local host="$1"
+    log "Distributing key to $host (automated via expect)"
+    if _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
+        log "  OK: $host"
+        return 0
+    fi
+    warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
+    return 1
+}
+
 cmd_ssh_setup() {
     # Make sure we have a key
     local key="$HOME/.ssh/id_ed25519"
@@ -569,47 +583,47 @@ cmd_ssh_setup() {
     fi
 
     # Resolve password source (if any). When set, we use `expect` to drive
-    # ssh-copy-id non-interactively for every host.
-    local password="" use_expect=0
+    # ssh-copy-id non-interactively, in parallel across hosts.
+    local use_expect=0
     if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
         command -v expect >/dev/null 2>&1 \
             || die "automated password entry requires 'expect' (install with: apt install expect / dnf install expect / brew install expect)"
-        password=$(_resolve_ssh_password)
+        # Export so subshells (parallel workers -> expect) inherit it.
+        # Resolved once and reused for every host.
+        export _IPERF_ORCH_PW
+        _IPERF_ORCH_PW=$(_resolve_ssh_password)
         use_expect=1
     fi
 
-    local hosts; hosts=$(read_servers)
-    local failed=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        if [ "$use_expect" = "1" ]; then
-            log "Distributing key to $host (automated via expect)"
-            if _IPERF_ORCH_PW="$password" _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
-                log "  OK: $host"
-            else
-                warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-                failed+=("$host")
-            fi
-        else
+    local failure_count=0
+    if [ "$use_expect" = "1" ]; then
+        log "Distributing keys in parallel (max $IPERF_JOBS concurrent)"
+        parallel_hosts _worker_ssh_copy_id
+        failure_count=${#PARALLEL_FAILED[@]}
+        # Scrub the password from the environment.
+        unset _IPERF_ORCH_PW
+    else
+        # Interactive fallback: must stay sequential so password prompts
+        # don't collide on stdin.
+        local hosts; hosts=$(read_servers)
+        local host
+        while IFS= read -r host; do
+            [ -z "$host" ] && continue
             log "Distributing key to $host (you may be prompted for the password)"
             if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
                 log "  OK: $host"
             else
                 warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-                failed+=("$host")
+                failure_count=$((failure_count + 1))
             fi
-        fi
-    done <<< "$hosts"
+        done <<< "$hosts"
+    fi
 
-    # Best-effort scrub of the in-memory password.
-    password=""
-    unset password
-
-    if [ ${#failed[@]} -eq 0 ]; then
+    if [ "$failure_count" -eq 0 ]; then
         set_state SSH_KEYS_DISTRIBUTED yes
         log "SSH keys distributed to all hosts"
     else
-        warn "ssh-setup completed with ${#failed[@]} failure(s)"
+        warn "ssh-setup completed with $failure_count failure(s)"
     fi
 }
 
