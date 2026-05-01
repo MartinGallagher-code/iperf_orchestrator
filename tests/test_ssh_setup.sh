@@ -151,10 +151,26 @@ test_ssh_setup_dies_when_expect_unavailable() {
     prep_servers a
     local pwf="$TEST_TMPDIR/pw.txt"
     echo "p" > "$pwf"; chmod 600 "$pwf"
-    # Restricted PATH (no system path) so neither fake-bin nor system
-    # has expect. Keep /bin and /usr/bin so the orchestrator can still
-    # find core utilities like ssh-keygen, but expect must be absent.
-    HOME="$TEST_TMPDIR/home" PATH="$FAKE_BIN:/usr/bin:/bin" run_orch --password-file "$pwf" ssh-setup
+    # Build a sandbox bin dir that mirrors /bin + /usr/bin but omits
+    # `expect`. This keeps the test robust on hosts where the maintainer
+    # has `expect` installed system-wide (required to run the
+    # test_expect_integration.sh suite) -- without the sandbox, the
+    # orchestrator would resolve /usr/bin/expect and the test premise
+    # ("expect missing") would silently break.
+    local sandbox="$TEST_TMPDIR/no-expect-bin"
+    mkdir -p "$sandbox"
+    local d f b
+    for d in /bin /usr/bin; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            [ "$b" = "expect" ] && continue
+            [ -e "$sandbox/$b" ] && continue
+            ln -s "$f" "$sandbox/$b"
+        done
+    done
+    HOME="$TEST_TMPDIR/home" PATH="$FAKE_BIN:$sandbox" run_orch --password-file "$pwf" ssh-setup
     assert_ne 0 "$RUN_RC" "should have failed without expect on PATH" || return 1
     assert_contains "$RUN_OUT" "expect" "error message should mention 'expect'" || return 1
 }
