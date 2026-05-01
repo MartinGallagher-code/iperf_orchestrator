@@ -545,7 +545,12 @@ cmd_init() {
     if [ -n "$cleaned" ]; then
         n_clean=$(printf '%s\n' "$cleaned" | wc -l)
     fi
-    [ "$n_clean" -ge 2 ] || die "need at least 2 hosts for full-mesh testing (got $n_clean)"
+    # Don't die on short lists at init time -- single-host lists are
+    # legitimate for diagnostic subcommands. The "need >=2 hosts" check
+    # is enforced inside run-tests where mesh size actually matters.
+    if [ "$n_clean" -lt 2 ]; then
+        warn "server list has $n_clean host(s); run-tests needs at least 2"
+    fi
 
     cp "$src" "$SERVER_LIST_FILE"
     : > "$STATE_FILE"
@@ -1080,6 +1085,11 @@ _orchestrator_signal_cleanup() {
 cmd_run_tests() {
     local mode="${1:-parallel}"
     trap '_orchestrator_signal_cleanup' INT TERM
+    # Mesh size is enforced here, not at init: init is also used to load
+    # diagnostic single-host lists for ad-hoc check-iperf / cleanup runs.
+    local _n_hosts
+    _n_hosts=$(read_servers | wc -l)
+    [ "$_n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts for a full-mesh test (got $_n_hosts)"
     case "$mode" in
         parallel)        _run_parallel ;;
         sequential-host) _run_sequential_host ;;

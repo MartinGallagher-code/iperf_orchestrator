@@ -97,12 +97,14 @@ test_init_rejects_path_entries() {
     assert_contains "$RUN_OUT" "valid hostname" "should explain why path was rejected" || return 1
 }
 
-test_init_rejects_too_few_hosts() {
+test_init_warns_on_too_few_hosts() {
     local src="$TEST_TMPDIR/one.txt"
     echo only-one-host > "$src"
     run_orch init "$src"
-    assert_status 1 "$RUN_RC" "init should reject N<2" || return 1
-    assert_contains "$RUN_OUT" "at least 2 hosts" "should explain N<2 minimum" || return 1
+    # init accepts single-host lists (used by diagnostic subcommands) but
+    # warns; the hard >=2 check happens inside run-tests.
+    assert_status 0 "$RUN_RC" "init should accept N=1 with a warning" || return 1
+    assert_contains "$RUN_OUT" "run-tests needs at least 2" "should warn that run-tests needs >=2" || return 1
 }
 
 test_init_accepts_bracketed_ipv6() {
@@ -140,7 +142,7 @@ run_test test_init_reports_correct_count_with_comments
 run_test test_init_resets_existing_state
 run_test test_init_rejects_url_entries
 run_test test_init_rejects_path_entries
-run_test test_init_rejects_too_few_hosts
+run_test test_init_warns_on_too_few_hosts
 run_test test_init_accepts_bracketed_ipv6
 run_test test_status_with_no_init
 run_test test_status_after_init_shows_pipeline_steps
