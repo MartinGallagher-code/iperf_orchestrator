@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # End-to-end style tests for the SSH-driven subcommands. We replace
 # `ssh`/`scp` on PATH with a shim (see test_helper.bash :: install_fake_ssh)
 # that records every invocation and returns canned responses for the

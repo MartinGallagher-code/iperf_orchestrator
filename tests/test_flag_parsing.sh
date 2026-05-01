@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for the CLI flag pre-pass: --flag value vs --flag=value forms,
 # unknown flags, missing values, and integer validation on --jobs.
 

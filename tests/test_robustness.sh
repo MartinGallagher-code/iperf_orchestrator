@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Robustness probes: large inputs, weird whitespace, non-default paths,
 # parser pathologies, behavior on the boundary between commands. None
 # of these are happy-path tests -- they're the "what if a user does

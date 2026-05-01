@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for the embedded CPU log parser invoked by `parse-cpu`. Covers
 # both mpstat output (with -P ALL, ISO time format) and the proc_stat
 # fallback used when mpstat is missing on the remote host.

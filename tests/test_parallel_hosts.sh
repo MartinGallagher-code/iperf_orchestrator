@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for the parallel_hosts() fan-out helper. Verifies:
 #   - it iterates every host in the server list
 #   - it caps concurrency to $IPERF_JOBS

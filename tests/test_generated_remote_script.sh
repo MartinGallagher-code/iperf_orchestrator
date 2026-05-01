@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # End-to-end behavior tests for the generated remote run_iperf.sh.
 # We actually execute the generated script with a fake `iperf` binary
 # (and optionally a fake `mpstat`) so its run-time behavior -- not

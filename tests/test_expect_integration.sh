@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Integration tests that drive the *real* `expect` interpreter against a
 # fake `ssh-copy-id` which emits realistic prompts. Unlike test_ssh_setup.sh
 # (which stubs `expect` itself and only verifies orchestration around it),

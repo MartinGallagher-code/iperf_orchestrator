@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for cmd_check_iperf's classification logic. The worker probes
 # `iperf -v` and grep's the output for "iperf version 2". Possible
 # outcomes:

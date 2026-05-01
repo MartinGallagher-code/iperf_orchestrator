@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
 # Tests for `create-scripts`: per-host run script generation, balanced
 # load summary, and that the generated scripts are syntactically valid
 # bash that uses the right targets.
