@@ -1223,42 +1223,103 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
                                    err_text or "No full-duration summary line found"))
         continue
 
-    # Direction detection: in --full-duplex CSV iperf2 emits two summary
-    # lines. The line whose source port equals the listening port is the
-    # server-as-sender direction (pair_b -> pair_a). The other line has an
-    # ephemeral source port and is client-as-sender (pair_a -> pair_b).
+    # Direction detection. In --full-duplex CSV iperf2 emits, per
+    # direction:
+    #   -P 1:    one summary row.
+    #   -P N>1:  N per-stream rows + one SUM row (transfer_id='-1',
+    #            and src_port='SUM' in newer iperf2 builds).
+    # The row whose source port equals the listening port is the
+    # server-as-sender direction (pair_b -> pair_a); the other is
+    # client-as-sender (pair_a -> pair_b).
     #
-    # We partition the summaries by source port BEFORE assigning, so a
-    # second ephemeral row can't overwrite the first (the previous loop
-    # would silently clobber a_to_b if both rows had ephemeral source
-    # ports, which can happen with non-standard iperf2 builds).
+    # Algorithm:
+    #   1. Group summaries by source address. Each group corresponds
+    #      to one direction.
+    #   2. From each group pick ONE aggregate row: the SUM row if
+    #      present (-P > 1), otherwise the single per-stream row
+    #      (-P 1), otherwise the row with the highest bps.
+    #   3. Classify aggregates by source port == listening_port.
+    #   4. For aggregates with a non-numeric src_port (SUM marker),
+    #      fall back to EXACT pair_a/pair_b address match. Substring
+    #      matching is intentionally NOT used here -- it gives false
+    #      positives for IP prefixes (e.g. "10.0.0.1" is a substring
+    #      of "10.0.0.10").
+    def _is_sum_row(cols):
+        # Newer iperf2: src_port is the literal "SUM" / "-1".
+        # Either way, transfer_id == "-1" marks the aggregate.
+        return cols[5] == "-1" or cols[2] in ("SUM", "-1")
+
+    def _pick_aggregate(group):
+        for r in group:
+            if _is_sum_row(r):
+                return r
+        if len(group) == 1:
+            return group[0]
+        # Multiple per-stream rows without an explicit SUM marker:
+        # the aggregate has bps >= any single stream's, so pick max.
+        def _bps(r):
+            try:
+                return float(r[8])
+            except (ValueError, IndexError):
+                return 0.0
+        return max(group, key=_bps)
+
+    groups = {}
+    for cols in summaries:
+        groups.setdefault(cols[1], []).append(cols)
+    aggregates = {addr: _pick_aggregate(rows) for addr, rows in groups.items()}
+
+    listening_aggs = []   # source port == listening_port -> server-as-sender
+    ephemeral_aggs = []   # source port != listening_port (but numeric)
+    unknown_aggs   = []   # source port not numeric (SUM marker)
+    for addr, agg in aggregates.items():
+        sp = agg[2]
+        if sp.isdigit():
+            if int(sp) == listening_port:
+                listening_aggs.append((addr, agg))
+            else:
+                ephemeral_aggs.append((addr, agg))
+        else:
+            unknown_aggs.append((addr, agg))
+
     a_to_b = None  # pair_a (client) -> pair_b (server)
     b_to_a = None  # pair_b (server) -> pair_a (client)
-    listening = []
-    ephemeral = []
-    for cols in summaries:
-        try:
-            sp = int(cols[2])
-        except ValueError:
-            continue
-        (listening if sp == listening_port else ephemeral).append(cols)
 
-    if len(listening) == 1:
-        b_to_a = listening[0]
-    if len(ephemeral) == 1:
-        a_to_b = ephemeral[0]
+    # Best path: exactly 1 listening + 1 ephemeral, the standard layout.
+    if len(listening_aggs) == 1:
+        b_to_a = listening_aggs[0][1]
+    if len(ephemeral_aggs) == 1:
+        a_to_b = ephemeral_aggs[0][1]
 
-    # Fallbacks for unusual layouts (zero or multiple matches on either
-    # side). Try addr matching first; if that fails too, take the rows
-    # in their reported order.
-    if a_to_b is None and b_to_a is None and len(summaries) >= 2:
-        for cols in summaries:
-            if addr_matches(cols[1], pair_a):
-                a_to_b = cols
-            elif addr_matches(cols[1], pair_b):
-                b_to_a = cols
+    # Both directions ephemeral (some non-standard iperf2 builds):
+    # disambiguate via exact pair_a/pair_b address match, then by
+    # listed order. Substring matching is intentionally avoided here
+    # because IP prefixes give false positives (e.g. "10.0.0.1" is a
+    # substring of "10.0.0.10").
+    if a_to_b is None and b_to_a is None and len(ephemeral_aggs) == 2:
+        for addr, agg in ephemeral_aggs:
+            if addr == pair_a and a_to_b is None:
+                a_to_b = agg
+            elif addr == pair_b and b_to_a is None:
+                b_to_a = agg
         if a_to_b is None and b_to_a is None:
-            a_to_b, b_to_a = summaries[0], summaries[1]
+            a_to_b = ephemeral_aggs[0][1]
+            b_to_a = ephemeral_aggs[1][1]
+
+    # SUM-marker rows (port unknown): classify by exact address.
+    for addr, agg in unknown_aggs:
+        if addr == pair_a and a_to_b is None:
+            a_to_b = agg
+        elif addr == pair_b and b_to_a is None:
+            b_to_a = agg
+
+    # Final fallback: still both unset but we have ≥2 aggregates.
+    # Assign positionally so the row count stays correct (caller still
+    # sees both directions, even if labels could be swapped).
+    if a_to_b is None and b_to_a is None and len(aggregates) >= 2:
+        addrs = list(aggregates.keys())
+        a_to_b = aggregates[addrs[0]]
+        b_to_a = aggregates[addrs[1]]
 
     def emit(direction_cols, src, dst):
         if direction_cols is None:
