@@ -83,17 +83,35 @@ CONVENIENCE:
   help                   Show command help
 ```
 
-### Configuration (env vars)
-| Variable | Default | Purpose |
-|---|---|---|
-| `IPERF_PORT` | 5001 | iperf2 listening port |
-| `IPERF_DURATION` | 10 | seconds per test |
-| `IPERF_PARALLEL` | 1 | parallel streams within each test |
-| `SSH_USER` | `$USER` | SSH login user |
-| `START_DELAY` | 30 | seconds in the future to schedule the synchronized start |
-| `IPERF_DIR` | `~/.iperf_orchestrator` | local working directory |
-| `REMOTE_DIR` | `/tmp/iperf_orchestrator` | remote working directory |
-| `PYTHON_BIN` | `python3` | Python interpreter for analysis steps |
+### Configuration
+
+Every setting can be supplied either as an environment variable or as a CLI flag. The CLI flag wins when both are set. Flags accept both `--flag value` and `--flag=value` forms, and may appear before the subcommand:
+
+```bash
+./iperf-orchestrator.sh --duration 60 --jobs 32 all
+./iperf-orchestrator.sh -d 60 -j 32 all parallel
+IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
+```
+
+| Env var | Flag | Default | Purpose |
+|---|---|---|---|
+| `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
+| `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
+| `IPERF_PARALLEL` | `--parallel`, `-P` | `1` | parallel streams within each test |
+| `IPERF_JOBS` | `--jobs`, `-j` | `16` | max concurrent SSH/SCP fan-out (capped concurrency) |
+| `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
+| `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
+| `IPERF_DIR` | `--iperf-dir` | `~/.iperf_orchestrator` | local working directory |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working directory |
+| `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
+
+#### `--jobs` and capped-concurrency parallel SSH
+
+Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`, `distribute-scripts`, `collect-results`, `stop-servers`, `cleanup`) fan out to all hosts in parallel, capped at `IPERF_JOBS` concurrent SSH/SCP sessions. Per-host output is captured in worker buffers and replayed in server-list order so the screen output stays readable; the central `orchestrator.log` receives entries in real time as workers run, so `tail -f ~/.iperf_orchestrator/logs/orchestrator.log` shows live progress.
+
+The default of `16` keeps the orchestrator host's SSH agent and the per-host sshd happy on most fleets. Bump it (e.g. `--jobs 64`) when you have hundreds of hosts and the orchestrator's CPU/network can absorb it; lower it if `MaxStartups` on your sshds rejects connections.
+
+The actual `run-tests parallel` mode is *not* throttled by `--jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--jobs` only caps the setup/teardown fan-outs.
 
 ---
 

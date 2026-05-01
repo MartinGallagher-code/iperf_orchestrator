@@ -46,20 +46,15 @@ set -u
 # so one bad host doesn't abort the whole run.
 
 #------------------------------------------------------------------------------
-# Configuration (override via env vars)
+# Configuration (override via env vars; CLI flags below win over env vars)
 #------------------------------------------------------------------------------
 IPERF_DIR="${IPERF_DIR:-$HOME/.iperf_orchestrator}"
-STATE_FILE="$IPERF_DIR/state"
-SERVER_LIST_FILE="$IPERF_DIR/servers.list"
-RESULTS_DIR="$IPERF_DIR/results"
-LOGS_DIR="$IPERF_DIR/logs"
-SCRIPTS_DIR="$IPERF_DIR/scripts"
-
 REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_PARALLEL="${IPERF_PARALLEL:-1}"      # parallel streams per test
+IPERF_JOBS="${IPERF_JOBS:-16}"             # max concurrent SSH/SCP fan-out
 
 SSH_USER="${SSH_USER:-${USER:-$(id -un)}}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30}"
@@ -69,6 +64,59 @@ SSH_BATCH_OPTS="$SSH_OPTS -o BatchMode=yes"
 START_DELAY="${START_DELAY:-30}"           # seconds in future for synchronized start
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+#------------------------------------------------------------------------------
+# CLI flag pre-pass
+#
+# Consumes flags from "$@" and leaves only the subcommand + its positional
+# args behind. Flags accept both "--key value" and "--key=value" forms.
+# Anything after a literal "--" is passed through verbatim.
+#------------------------------------------------------------------------------
+_flag_die() { echo "iperf-orchestrator: $*" >&2; exit 2; }
+_flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
+
+_PARSED=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --port)          _flag_need "$1" "${2:-}"; IPERF_PORT="$2"; shift 2 ;;
+        --port=*)        IPERF_PORT="${1#*=}"; shift ;;
+        --duration|-d)   _flag_need "$1" "${2:-}"; IPERF_DURATION="$2"; shift 2 ;;
+        --duration=*)    IPERF_DURATION="${1#*=}"; shift ;;
+        --parallel|-P)   _flag_need "$1" "${2:-}"; IPERF_PARALLEL="$2"; shift 2 ;;
+        --parallel=*)    IPERF_PARALLEL="${1#*=}"; shift ;;
+        --jobs|-j)       _flag_need "$1" "${2:-}"; IPERF_JOBS="$2"; shift 2 ;;
+        --jobs=*)        IPERF_JOBS="${1#*=}"; shift ;;
+        --start-delay)   _flag_need "$1" "${2:-}"; START_DELAY="$2"; shift 2 ;;
+        --start-delay=*) START_DELAY="${1#*=}"; shift ;;
+        --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
+        --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
+        --iperf-dir)     _flag_need "$1" "${2:-}"; IPERF_DIR="$2"; shift 2 ;;
+        --iperf-dir=*)   IPERF_DIR="${1#*=}"; shift ;;
+        --remote-dir)    _flag_need "$1" "${2:-}"; REMOTE_DIR="$2"; shift 2 ;;
+        --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
+        --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
+        --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
+        --)              shift; _PARSED+=("$@"); break ;;
+        -h|--help)       _PARSED+=("help"); shift ;;
+        --*)             _flag_die "unknown flag: $1" ;;
+        *)               _PARSED+=("$1"); shift ;;
+    esac
+done
+set -- "${_PARSED[@]}"
+unset _PARSED
+
+# Re-validate the integer flags now that env+CLI have been merged.
+case "$IPERF_JOBS" in
+    ''|*[!0-9]*) _flag_die "IPERF_JOBS / --jobs must be a positive integer (got '$IPERF_JOBS')" ;;
+esac
+[ "$IPERF_JOBS" -ge 1 ] || _flag_die "IPERF_JOBS / --jobs must be >= 1"
+
+# Paths derived from IPERF_DIR (computed AFTER flags so --iperf-dir works).
+STATE_FILE="$IPERF_DIR/state"
+SERVER_LIST_FILE="$IPERF_DIR/servers.list"
+RESULTS_DIR="$IPERF_DIR/results"
+LOGS_DIR="$IPERF_DIR/logs"
+SCRIPTS_DIR="$IPERF_DIR/scripts"
 
 mkdir -p "$IPERF_DIR" "$RESULTS_DIR" "$LOGS_DIR" "$SCRIPTS_DIR"
 
@@ -158,6 +206,68 @@ scp_from() {
 }
 
 #------------------------------------------------------------------------------
+# Capped-concurrency parallel host fan-out
+#
+# parallel_hosts <worker_fn>
+#   Runs <worker_fn> <host> in the background for every host in the server
+#   list, with at most $IPERF_JOBS concurrent workers. Each worker's stdout
+#   and stderr are captured to a per-host buffer and replayed in original
+#   server-list order after all workers finish, so output stays readable
+#   even when 100 hosts are running in parallel.
+#
+#   Workers are subshells of this script and can call log()/warn(), use
+#   ssh_run / scp_to / scp_from, etc. log() still appends to the central
+#   orchestrator.log in real time via tee -a (POSIX guarantees PIPE_BUF-
+#   sized atomic appends), so `tail -f` shows live progress while the
+#   per-worker stdout/stderr is buffered for ordered replay.
+#
+#   The worker's exit status is recorded; PARALLEL_FAILED is set to the
+#   list of hosts whose worker exited non-zero. Caller checks that array
+#   instead of a return value.
+#------------------------------------------------------------------------------
+parallel_hosts() {
+    local fn="$1"
+    local jobs="$IPERF_JOBS"
+    [ "$jobs" -lt 1 ] && jobs=1
+
+    local hosts=() h
+    while IFS= read -r h; do
+        [ -z "$h" ] && continue
+        hosts+=("$h")
+    done < <(read_servers)
+    local n=${#hosts[@]}
+
+    PARALLEL_FAILED=()
+    [ "$n" -eq 0 ] && return 0
+
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-XXXXXX") || die "mktemp failed"
+
+    local i running=0
+    for ((i=0; i<n; i++)); do
+        if [ "$running" -ge "$jobs" ]; then
+            # Block until any one worker exits, then free a slot.
+            wait -n 2>/dev/null || wait
+            running=$((running - 1))
+        fi
+        (
+            "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
+            echo $? > "$tmpdir/$i.rc"
+        ) &
+        running=$((running + 1))
+    done
+    wait
+
+    for ((i=0; i<n; i++)); do
+        [ -s "$tmpdir/$i.out" ] && cat "$tmpdir/$i.out"
+        local rc
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null)
+        [ "${rc:-1}" -ne 0 ] && PARALLEL_FAILED+=("${hosts[$i]}")
+    done
+    rm -rf "$tmpdir"
+}
+
+#------------------------------------------------------------------------------
 # Balanced pair assignment
 #
 # For each unordered pair {a, b} we need to pick exactly one endpoint to
@@ -222,7 +332,19 @@ two rows per test, one for each direction, so the heatmap is filled
 symmetrically by direction but values can differ.
 
 USAGE:
-    $0 <command> [args]
+    $0 [global flags] <command> [args]
+
+GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
+    --port PORT                iperf2 listening port (default $IPERF_PORT)
+    --duration, -d SECONDS     test duration per pair (default $IPERF_DURATION)
+    --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
+    --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
+    --ssh-user, -u USER        SSH login user (default $SSH_USER)
+    --iperf-dir PATH           local working dir (default $IPERF_DIR)
+    --remote-dir PATH          remote working dir (default $REMOTE_DIR)
+    --python PATH              Python interpreter (default $PYTHON_BIN)
+    -h, --help                 show this message
 
 SETUP:
     init <server_list>     Set the server list (one IP/host per line; '#' comments OK)
@@ -264,10 +386,11 @@ CONVENIENCE:
     status                 Show what has been done so far
     help                   Show this message
 
-CONFIG (env vars, with defaults):
+CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
     IPERF_DURATION=$IPERF_DURATION       # seconds per pair
     IPERF_PARALLEL=$IPERF_PARALLEL       # parallel streams
+    IPERF_JOBS=$IPERF_JOBS               # max concurrent SSH/SCP fan-out
     SSH_USER=$SSH_USER
     START_DELAY=$START_DELAY             # seconds in future for sync start
     IPERF_DIR=$IPERF_DIR
@@ -372,88 +495,92 @@ cmd_ssh_setup() {
 }
 
 #------------------------------------------------------------------------------
+_worker_check_iperf() {
+    local host="$1"
+    # iperf2's binary is `iperf` (vs `iperf3`). Probe with -v and check
+    # the version string says "version 2". Also probe mpstat -- if it's
+    # missing the run-script falls back to /proc/stat, which works but
+    # gives only box-wide CPU (no per-core breakdown).
+    local ver mp
+    ver=$(ssh_run "$host" 'iperf -v 2>&1 | head -n1' 2>/dev/null || true)
+    mp=$(ssh_run "$host" 'command -v mpstat >/dev/null && echo yes || echo no' 2>/dev/null || echo "?")
+
+    local iperf_status=""
+    if [ -n "$ver" ] && echo "$ver" | grep -qE 'iperf[[:space:]]*version[[:space:]]*2'; then
+        iperf_status="INSTALLED"
+    elif [ -n "$ver" ]; then
+        # Found something called iperf but it's not v2 (probably v3 with
+        # an `iperf` symlink, or some other binary).
+        iperf_status="WRONG_VERSION"
+    else
+        iperf_status="MISSING"
+    fi
+
+    printf "%-30s %-13s %-12s %s\n" "$host" "$iperf_status" "mpstat=$mp" "$ver"
+}
+
 cmd_check_iperf() {
     local out="$IPERF_DIR/iperf_installed.txt"
     : > "$out"
-    log "Checking iperf2 + mpstat availability on all hosts..."
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        # iperf2's binary is `iperf` (vs `iperf3`). Probe with -v and check
-        # the version string says "version 2". Also probe mpstat -- if it's
-        # missing the run-script falls back to /proc/stat, which works but
-        # gives only box-wide CPU (no per-core breakdown).
-        local ver mp
-        ver=$(ssh_run "$host" 'iperf -v 2>&1 | head -n1' 2>/dev/null || true)
-        mp=$(ssh_run "$host" 'command -v mpstat >/dev/null && echo yes || echo no' 2>/dev/null || echo "?")
-
-        local iperf_status=""
-        if [ -n "$ver" ] && echo "$ver" | grep -qE 'iperf[[:space:]]*version[[:space:]]*2'; then
-            iperf_status="INSTALLED"
-        elif [ -n "$ver" ]; then
-            # Found something called iperf but it's not v2 (probably v3 with
-            # an `iperf` symlink, or some other binary).
-            iperf_status="WRONG_VERSION"
-        else
-            iperf_status="MISSING"
-        fi
-
-        local mp_status="mpstat=$mp"
-        printf "%-30s %-13s %-12s %s\n" "$host" "$iperf_status" "$mp_status" "$ver" | tee -a "$out"
-    done < <(read_servers)
+    log "Checking iperf2 + mpstat availability on all hosts (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_check_iperf | tee -a "$out"
     set_state IPERF_INSTALLED_CHECKED yes
     log "Wrote $out"
 }
 
 #------------------------------------------------------------------------------
+_worker_check_servers() {
+    local host="$1"
+    # `pgrep -x iperf` matches process name exactly = "iperf", which
+    # excludes "iperf3". Adding -a includes the full command line.
+    local result
+    result=$(ssh_run "$host" "pgrep -ax iperf || true" 2>/dev/null || true)
+    if [ -n "$result" ]; then
+        printf "%-30s RUNNING    %s\n" "$host" "$(echo "$result" | head -n1)"
+    else
+        printf "%-30s STOPPED\n" "$host"
+    fi
+}
+
 cmd_check_servers() {
     local out="$IPERF_DIR/iperf_running.txt"
     : > "$out"
-    log "Checking iperf2 daemon status on port $IPERF_PORT..."
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        # `pgrep -x iperf` matches process name exactly = "iperf", which
-        # excludes "iperf3". Adding -a includes the full command line.
-        local result
-        result=$(ssh_run "$host" "pgrep -ax iperf || true" 2>/dev/null || true)
-        if [ -n "$result" ]; then
-            printf "%-30s RUNNING    %s\n" "$host" "$(echo "$result" | head -n1)" | tee -a "$out"
-        else
-            printf "%-30s STOPPED\n" "$host" | tee -a "$out"
-        fi
-    done < <(read_servers)
+    log "Checking iperf2 daemon status on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_check_servers | tee -a "$out"
     set_state SERVERS_RUNNING_CHECKED yes
     log "Wrote $out"
 }
 
 #------------------------------------------------------------------------------
-cmd_start_servers() {
-    log "Starting iperf2 -s on port $IPERF_PORT on every host..."
-    local failed=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        # pkill -x matches the exact process name "iperf" (not "iperf3").
-        # iperf2's multi-threaded server handles concurrent clients on one
-        # port, so we only need a single instance per host.
-        if ssh_run "$host" "
-            mkdir -p '$REMOTE_DIR' &&
-            pkill -x iperf 2>/dev/null; sleep 1;
-            nohup iperf -s -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1 &
-            disown || true
-            sleep 1
-            pgrep -x iperf >/dev/null
-        "; then
-            log "  OK: $host"
-        else
-            warn "  FAILED to start on $host"
-            failed+=("$host")
-        fi
-    done < <(read_servers)
+_worker_start_server() {
+    local host="$1"
+    # pkill -x matches the exact process name "iperf" (not "iperf3").
+    # iperf2's multi-threaded server handles concurrent clients on one
+    # port, so we only need a single instance per host.
+    if ssh_run "$host" "
+        mkdir -p '$REMOTE_DIR' &&
+        pkill -x iperf 2>/dev/null; sleep 1;
+        nohup iperf -s -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1 &
+        disown || true
+        sleep 1
+        pgrep -x iperf >/dev/null
+    "; then
+        log "  OK: $host"
+    else
+        warn "  FAILED to start on $host"
+        return 1
+    fi
+}
 
-    if [ ${#failed[@]} -eq 0 ]; then
+cmd_start_servers() {
+    log "Starting iperf2 -s on port $IPERF_PORT on every host (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_start_server
+
+    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
         set_state SERVERS_STARTED yes
         log "All iperf2 servers started"
     else
-        warn "start-servers completed with ${#failed[@]} failure(s)"
+        warn "start-servers completed with ${#PARALLEL_FAILED[@]} failure(s)"
     fi
 }
 
@@ -619,32 +746,32 @@ EOF
 }
 
 #------------------------------------------------------------------------------
-cmd_distribute_scripts() {
-    log "Distributing run scripts to each host..."
-    local failed=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        local script="$SCRIPTS_DIR/run_${host}.sh"
-        if [ ! -f "$script" ]; then
-            warn "  no script for $host (run create-scripts first)"
-            failed+=("$host")
-            continue
-        fi
-        if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f '$REMOTE_DIR'/iperf_test_*.log '$REMOTE_DIR'/iperf_run_*.status '$REMOTE_DIR'/iperf_run_*.complete" \
-           && scp_to "$script" "$host" "$REMOTE_DIR/run_iperf.sh" \
-           && ssh_run "$host" "chmod +x '$REMOTE_DIR/run_iperf.sh'"; then
-            log "  OK: $host"
-        else
-            warn "  FAILED: $host"
-            failed+=("$host")
-        fi
-    done < <(read_servers)
+_worker_distribute_script() {
+    local host="$1"
+    local script="$SCRIPTS_DIR/run_${host}.sh"
+    if [ ! -f "$script" ]; then
+        warn "  no script for $host (run create-scripts first)"
+        return 1
+    fi
+    if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f '$REMOTE_DIR'/iperf_test_*.log '$REMOTE_DIR'/iperf_run_*.status '$REMOTE_DIR'/iperf_run_*.complete" \
+       && scp_to "$script" "$host" "$REMOTE_DIR/run_iperf.sh" \
+       && ssh_run "$host" "chmod +x '$REMOTE_DIR/run_iperf.sh'"; then
+        log "  OK: $host"
+    else
+        warn "  FAILED: $host"
+        return 1
+    fi
+}
 
-    if [ ${#failed[@]} -eq 0 ]; then
+cmd_distribute_scripts() {
+    log "Distributing run scripts to each host (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_distribute_script
+
+    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
         set_state SCRIPTS_DISTRIBUTED yes
         log "All run scripts distributed"
     else
-        warn "distribute-scripts had ${#failed[@]} failure(s)"
+        warn "distribute-scripts had ${#PARALLEL_FAILED[@]} failure(s)"
     fi
 }
 
@@ -805,104 +932,102 @@ _run_sequential_pair() {
 }
 
 #------------------------------------------------------------------------------
-cmd_collect_results() {
-    log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched)"
-    local failed=()
-    local empty_hosts=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
+_worker_collect_results() {
+    local host="$1"
+    local tarball_remote="$REMOTE_DIR/_results_${host}.tar.gz"
+    local tarball_local="$RESULTS_DIR/_results_${host}.tar.gz"
 
-        local tarball_remote="$REMOTE_DIR/_results_${host}.tar.gz"
-        local tarball_local="$RESULTS_DIR/_results_${host}.tar.gz"
-
-        # Build the tarball remotely. iperf_test_*.log filenames already
-        # include the source host so they don't collide on extract; the
-        # server log gets a host suffix to disambiguate. The status file
-        # is already host-named.
-        #
-        # The last canonical host has no client logs; we still want its
-        # server log and status file, so we tolerate iperf_test_*.log
-        # matching nothing.
-        if ! ssh_run "$host" "
-            cd '$REMOTE_DIR' 2>/dev/null || exit 1
-            cp iperf_server.log iperf_server_${host}.log 2>/dev/null || true
-            {
-                ls iperf_test_*.log 2>/dev/null || true
-                ls iperf_server_${host}.log 2>/dev/null || true
-                ls iperf_run_${host}.status 2>/dev/null || true
-                ls cpu_${host}.log 2>/dev/null || true
-            } > _iperf_files.list
-            if [ -s _iperf_files.list ]; then
-                tar -czf '$tarball_remote' -T _iperf_files.list
-            fi
-            rm -f _iperf_files.list iperf_server_${host}.log
-            test -f '$tarball_remote'
-        " 2>/dev/null; then
-            warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
-            empty_hosts+=("$host")
-            continue
+    # Build the tarball remotely. iperf_test_*.log filenames already
+    # include the source host so they don't collide on extract; the
+    # server log gets a host suffix to disambiguate. The status file
+    # is already host-named.
+    #
+    # The last canonical host has no client logs; we still want its
+    # server log and status file, so we tolerate iperf_test_*.log
+    # matching nothing.
+    if ! ssh_run "$host" "
+        cd '$REMOTE_DIR' 2>/dev/null || exit 1
+        cp iperf_server.log iperf_server_${host}.log 2>/dev/null || true
+        {
+            ls iperf_test_*.log 2>/dev/null || true
+            ls iperf_server_${host}.log 2>/dev/null || true
+            ls iperf_run_${host}.status 2>/dev/null || true
+            ls cpu_${host}.log 2>/dev/null || true
+        } > _iperf_files.list
+        if [ -s _iperf_files.list ]; then
+            tar -czf '$tarball_remote' -T _iperf_files.list
         fi
+        rm -f _iperf_files.list iperf_server_${host}.log
+        test -f '$tarball_remote'
+    " 2>/dev/null; then
+        warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
+        return 0  # empty is normal for the lex-last host; not a failure
+    fi
 
-        if ! scp_from "$host" "$tarball_remote" "$tarball_local"; then
-            warn "  $host: scp of tarball failed"
-            failed+=("$host")
-            continue
-        fi
+    if ! scp_from "$host" "$tarball_remote" "$tarball_local"; then
+        warn "  $host: scp of tarball failed"
+        return 1
+    fi
 
-        # Count client logs from the archive before extracting
-        local client_count
-        client_count=$(tar -tzf "$tarball_local" 2>/dev/null | grep -c '^iperf_test_' || true)
-        # Extract into the results dir
-        if tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>/dev/null; then
-            log "  $host: $client_count client logs + server log + status"
-        else
-            warn "  $host: local extraction failed"
-            failed+=("$host")
-        fi
-
+    local client_count
+    client_count=$(tar -tzf "$tarball_local" 2>/dev/null | grep -c '^iperf_test_' || true)
+    if tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>/dev/null; then
+        log "  $host: $client_count client logs + server log + status"
+    else
+        warn "  $host: local extraction failed"
         rm -f "$tarball_local"
-        ssh_run "$host" "rm -f '$tarball_remote'" 2>/dev/null || true
-    done < <(read_servers)
+        return 1
+    fi
+
+    rm -f "$tarball_local"
+    ssh_run "$host" "rm -f '$tarball_remote'" 2>/dev/null || true
+}
+
+cmd_collect_results() {
+    log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched, parallel x$IPERF_JOBS)"
+    parallel_hosts _worker_collect_results
 
     local total
     total=$(ls "$RESULTS_DIR"/iperf_test_*.log 2>/dev/null | wc -l)
-    if [ ${#failed[@]} -eq 0 ]; then
+    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
         set_state RESULTS_COLLECTED yes
-        if [ ${#empty_hosts[@]} -gt 0 ]; then
-            log "Collected $total client logs total (${#empty_hosts[@]} host(s) had nothing to collect, which is normal for the lex-last host)"
-        else
-            log "Collected $total client logs total"
-        fi
+        log "Collected $total client logs total"
     else
-        warn "collect-results: ${#failed[@]} host(s) had transfer failures"
+        warn "collect-results: ${#PARALLEL_FAILED[@]} host(s) had transfer failures"
     fi
 }
 
 #------------------------------------------------------------------------------
+_worker_stop_server() {
+    local host="$1"
+    if ssh_run "$host" "pkill -x iperf 2>/dev/null; sleep 0.5; ! pgrep -x iperf >/dev/null"; then
+        log "  stopped: $host"
+    else
+        warn "  $host still has iperf running"
+        return 1
+    fi
+}
+
 cmd_stop_servers() {
-    log "Stopping iperf2 servers on every host..."
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        if ssh_run "$host" "pkill -x iperf 2>/dev/null; sleep 0.5; ! pgrep -x iperf >/dev/null"; then
-            log "  stopped: $host"
-        else
-            warn "  $host still has iperf running"
-        fi
-    done < <(read_servers)
+    log "Stopping iperf2 servers on every host (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_stop_server
     set_state SERVERS_STOPPED yes
 }
 
 #------------------------------------------------------------------------------
+_worker_cleanup() {
+    local host="$1"
+    if ssh_run "$host" "rm -rf '$REMOTE_DIR'"; then
+        log "  cleaned: $host"
+    else
+        warn "  cleanup failed: $host"
+        return 1
+    fi
+}
+
 cmd_cleanup() {
-    log "Removing $REMOTE_DIR on every host..."
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        if ssh_run "$host" "rm -rf '$REMOTE_DIR'"; then
-            log "  cleaned: $host"
-        else
-            warn "  cleanup failed: $host"
-        fi
-    done < <(read_servers)
+    log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
+    parallel_hosts _worker_cleanup
     set_state CLEANED_UP yes
 }
 
