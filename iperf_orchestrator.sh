@@ -808,14 +808,24 @@ _worker_check_iperf() {
 
 cmd_check_iperf() {
     # Up-front check: parallel_hosts itself dies on a missing server
-    # list, but we pipe its output through tee below, which forks
-    # parallel_hosts into a subshell -- the die's exit only kills that
-    # subshell and the outer command would falsely flag the step done.
+    # list, but we used to pipe its output through `tee` here, which
+    # forked parallel_hosts into a subshell -- the die's exit only
+    # killed that subshell and the outer command would falsely flag
+    # the step done. The same subshell barrier also dropped the
+    # PARALLEL_FAILED array, which cmd_all then read in _all_gate
+    # (causing an unbound-variable error under set -u when no prior
+    # parallel_hosts call had populated it).
+    #
+    # Fix: write parallel_hosts output to the file directly, then
+    # cat it back to stdout. parallel_hosts already buffers per-host
+    # output and emits in server-list order after every worker
+    # finishes, so this is functionally identical from the user's
+    # perspective AND it preserves PARALLEL_FAILED for the caller.
     [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
     local out="$IPERF_DIR/iperf_installed.txt"
-    : > "$out"
     log "Checking iperf2 + mpstat availability on all hosts (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_iperf | tee -a "$out"
+    parallel_hosts _worker_check_iperf > "$out"
+    cat "$out"
     set_state IPERF_INSTALLED_CHECKED yes
     log "Wrote $out"
 }
@@ -835,13 +845,13 @@ _worker_check_servers() {
 }
 
 cmd_check_servers() {
-    # See cmd_check_iperf for why we double-check here despite
-    # parallel_hosts already validating the server list.
+    # See cmd_check_iperf for why we double-check the server list and
+    # avoid piping through tee (subshell drops PARALLEL_FAILED).
     [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
     local out="$IPERF_DIR/iperf_running.txt"
-    : > "$out"
     log "Checking iperf2 daemon status on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_servers | tee -a "$out"
+    parallel_hosts _worker_check_servers > "$out"
+    cat "$out"
     set_state SERVERS_RUNNING_CHECKED yes
     log "Wrote $out"
 }
