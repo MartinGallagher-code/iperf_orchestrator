@@ -2,7 +2,7 @@
 #==============================================================================
 # iperf-orchestrator.sh
 #
-# Copyright (C) 2026 iperf_orchestrator contributors
+# Copyright (C) 2026 Martin J. Gallagher
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
