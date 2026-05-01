@@ -61,6 +61,12 @@ SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -
 # Used when we want commands that require an existing key (no password prompts):
 SSH_BATCH_OPTS="$SSH_OPTS -o BatchMode=yes"
 
+# Optional password sources for ssh-setup. When any of these is set, the
+# script drives ssh-copy-id with `expect` instead of prompting interactively.
+SSH_PASSWORD_FILE="${SSH_PASSWORD_FILE:-}"
+SSH_PASSWORD_ENV="${SSH_PASSWORD_ENV:-}"
+SSH_ASK_PASSWORD="${SSH_ASK_PASSWORD:-no}"
+
 START_DELAY="${START_DELAY:-30}"           # seconds in future for synchronized start
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -96,6 +102,11 @@ while [ $# -gt 0 ]; do
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
         --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
+        --password-file)   _flag_need "$1" "${2:-}"; SSH_PASSWORD_FILE="$2"; shift 2 ;;
+        --password-file=*) SSH_PASSWORD_FILE="${1#*=}"; shift ;;
+        --password-env)    _flag_need "$1" "${2:-}"; SSH_PASSWORD_ENV="$2"; shift 2 ;;
+        --password-env=*)  SSH_PASSWORD_ENV="${1#*=}"; shift ;;
+        --ask-password)    SSH_ASK_PASSWORD=yes; shift ;;
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
         --*)             _flag_die "unknown flag: $1" ;;
@@ -363,11 +374,21 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --iperf-dir PATH           local working dir (default $IPERF_DIR)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
     --python PATH              Python interpreter (default $PYTHON_BIN)
+    --password-file PATH       Read SSH password from PATH (single line; chmod 600).
+                               Enables automated 'expect'-driven ssh-setup.
+    --password-env VAR         Read SSH password from env var named VAR.
+                               Enables automated 'expect'-driven ssh-setup.
+    --ask-password             Prompt once for an SSH password and reuse it
+                               for every host. Enables 'expect'-driven ssh-setup.
     -h, --help                 show this message
 
 SETUP:
     init <server_list>     Set the server list (one IP/host per line; '#' comments OK)
-    ssh-setup              Generate (if needed) and distribute SSH keys to all hosts
+    ssh-setup              Generate (if needed) and distribute SSH keys to all hosts.
+                           By default prompts you per-host for the SSH password
+                           (sequential). Pass --password-file / --password-env /
+                           --ask-password to drive ssh-copy-id non-interactively
+                           via 'expect', in parallel (capped by --jobs).
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts currently have iperf -s running
 
@@ -497,6 +518,94 @@ cmd_status() {
 }
 
 #------------------------------------------------------------------------------
+# Resolve a single SSH password from --password-file / --password-env /
+# --ask-password. Echoes the password to stdout. Exits if the configured
+# source is unusable.
+_resolve_ssh_password() {
+    if [ -n "$SSH_PASSWORD_FILE" ]; then
+        [ -f "$SSH_PASSWORD_FILE" ] || die "password file not found: $SSH_PASSWORD_FILE"
+        local perms=""
+        perms=$(stat -c '%a' "$SSH_PASSWORD_FILE" 2>/dev/null || stat -f '%A' "$SSH_PASSWORD_FILE" 2>/dev/null || echo "")
+        case "$perms" in
+            ''|400|600) ;;
+            *) warn "password file $SSH_PASSWORD_FILE has permissions $perms; recommend chmod 600" ;;
+        esac
+        local pw
+        IFS= read -r pw < "$SSH_PASSWORD_FILE" || true
+        [ -n "$pw" ] || die "password file $SSH_PASSWORD_FILE is empty"
+        printf '%s' "$pw"
+        return 0
+    fi
+    if [ -n "$SSH_PASSWORD_ENV" ]; then
+        local val="${!SSH_PASSWORD_ENV:-}"
+        [ -n "$val" ] || die "env var \$$SSH_PASSWORD_ENV is empty or unset"
+        printf '%s' "$val"
+        return 0
+    fi
+    if [ "$SSH_ASK_PASSWORD" = "yes" ]; then
+        local pw
+        printf "SSH password (used for all hosts): " >&2
+        IFS= read -rs pw < /dev/tty
+        printf '\n' >&2
+        [ -n "$pw" ] || die "empty password"
+        printf '%s' "$pw"
+        return 0
+    fi
+}
+
+# Drive ssh-copy-id to a single host using `expect`. Reads the password from
+# the env var _IPERF_ORCH_PW so it never appears in argv (and thus not in
+# `ps`). Returns 0 on success, non-zero on failure.
+_ssh_copy_id_expect() {
+    local host="$1"
+    expect -f - "$SSH_USER" "$host" <<'EXPECT_EOF'
+log_user 0
+set timeout 30
+set user [lindex $argv 0]
+set host [lindex $argv 1]
+if {![info exists env(_IPERF_ORCH_PW)]} {
+    puts stderr "expect: _IPERF_ORCH_PW not set"
+    exit 3
+}
+set password $env(_IPERF_ORCH_PW)
+set sent_pw 0
+spawn ssh-copy-id -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -- $user@$host
+expect {
+    -re {\(yes/no[^)]*\)\??} { send "yes\r"; exp_continue }
+    -nocase -re {password:[ ]*$} {
+        if {$sent_pw} {
+            puts stderr "authentication failed for $user@$host"
+            exit 5
+        }
+        incr sent_pw
+        send -- "$password\r"
+        exp_continue
+    }
+    -nocase "permission denied" {
+        puts stderr "permission denied for $user@$host"
+        exit 5
+    }
+    timeout { puts stderr "timeout connecting to $host"; exit 2 }
+    eof {}
+}
+catch wait result
+exit [lindex $result 3]
+EXPECT_EOF
+}
+
+# Parallel worker for the expect-driven path. _IPERF_ORCH_PW must be exported
+# in the parent so it's inherited by this subshell.
+_worker_ssh_copy_id() {
+    local host="$1"
+    log "Distributing key to $host (automated via expect)"
+    if _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
+        log "  OK: $host"
+        return 0
+    fi
+    warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
+    return 1
+}
+
 cmd_ssh_setup() {
     # Make sure we have a key
     local key="$HOME/.ssh/id_ed25519"
@@ -507,24 +616,48 @@ cmd_ssh_setup() {
         ssh-keygen -t ed25519 -N "" -f "$key" -q
     fi
 
-    local hosts; hosts=$(read_servers)
-    local failed=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        log "Distributing key to $host (you may be prompted for the password)"
-        if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
-            log "  OK: $host"
-        else
-            warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-            failed+=("$host")
-        fi
-    done <<< "$hosts"
+    # Resolve password source (if any). When set, we use `expect` to drive
+    # ssh-copy-id non-interactively, in parallel across hosts.
+    local use_expect=0
+    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
+        command -v expect >/dev/null 2>&1 \
+            || die "automated password entry requires 'expect' (install with: apt install expect / dnf install expect / brew install expect)"
+        # Export so subshells (parallel workers -> expect) inherit it.
+        # Resolved once and reused for every host.
+        export _IPERF_ORCH_PW
+        _IPERF_ORCH_PW=$(_resolve_ssh_password)
+        use_expect=1
+    fi
 
-    if [ ${#failed[@]} -eq 0 ]; then
+    local failure_count=0
+    if [ "$use_expect" = "1" ]; then
+        log "Distributing keys in parallel (max $IPERF_JOBS concurrent)"
+        parallel_hosts _worker_ssh_copy_id
+        failure_count=${#PARALLEL_FAILED[@]}
+        # Scrub the password from the environment.
+        unset _IPERF_ORCH_PW
+    else
+        # Interactive fallback: must stay sequential so password prompts
+        # don't collide on stdin.
+        local hosts; hosts=$(read_servers)
+        local host
+        while IFS= read -r host; do
+            [ -z "$host" ] && continue
+            log "Distributing key to $host (you may be prompted for the password)"
+            if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
+                log "  OK: $host"
+            else
+                warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
+                failure_count=$((failure_count + 1))
+            fi
+        done <<< "$hosts"
+    fi
+
+    if [ "$failure_count" -eq 0 ]; then
         set_state SSH_KEYS_DISTRIBUTED yes
         log "SSH keys distributed to all hosts"
     else
-        warn "ssh-setup completed with ${#failed[@]} failure(s)"
+        warn "ssh-setup completed with $failure_count failure(s)"
     fi
 }
 
