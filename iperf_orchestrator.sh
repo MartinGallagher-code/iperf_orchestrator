@@ -495,8 +495,14 @@ parallel_hosts() {
                         seen[$j]=1
                         printed=$((printed + 1))
                         if [ "${rc_d:-1}" = "0" ]; then label=OK; else label="FAIL(rc=${rc_d:-?})"; fi
-                        echo "[$(ts)]   progress: $printed/$n $label: ${hosts[$j]}" \
-                            | tee -a "$LOGS_DIR/orchestrator.log" >&2
+                        local _line="[$(ts)]   progress: $printed/$n $label: ${hosts[$j]}"
+                        echo "$_line" >&2
+                        # Mirror to the run log only if a write command has
+                        # established one. Probe-style commands (status,
+                        # ssh-setup) leave LOGS_DIR empty.
+                        if [ -n "${LOGS_DIR:-}" ] && [ -d "${LOGS_DIR}" ]; then
+                            printf '%s\n' "$_line" >> "$LOGS_DIR/orchestrator.log"
+                        fi
                     fi
                 done
                 sleep 0.5
