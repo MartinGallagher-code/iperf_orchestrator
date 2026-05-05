@@ -1176,7 +1176,11 @@ _worker_start_server() {
             echo 'iperf-orchestrator: cannot create $REMOTE_DIR on remote' >&2
             exit 1
         fi
-        pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null
+        # The pattern is anchored with ^ so pkill matches the actual
+        # iperf process and NOT the parent bash running this script
+        # (whose /proc/PID/cmdline contains the literal pattern text).
+        # Same trick is used for stop-servers.
+        pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null || true
         sleep 1
         iperf -s -D -p $IPERF_PORT > '$server_log_remote' 2>&1
         rc=\$?
@@ -1718,7 +1722,9 @@ cmd_collect_results() {
 #------------------------------------------------------------------------------
 _worker_stop_server() {
     local host="$1"
-    if ssh_run "$host" "pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null; sleep 0.5; ! pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null"; then
+    # Anchor the pkill pattern so it doesn't match the parent bash whose
+    # /proc/PID/cmdline contains the literal pattern text.
+    if ssh_run "$host" "pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null; sleep 0.5; ! pgrep -f '^iperf -s -p $IPERF_PORT\b' >/dev/null"; then
         log "  stopped: $host"
     else
         warn "  $host still has iperf running"
