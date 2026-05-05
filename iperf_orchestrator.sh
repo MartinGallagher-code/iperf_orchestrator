@@ -95,10 +95,6 @@ SSH_PASSWORD_FILE="${SSH_PASSWORD_FILE:-}"
 SSH_PASSWORD_ENV="${SSH_PASSWORD_ENV:-}"
 SSH_ASK_PASSWORD="${SSH_ASK_PASSWORD:-no}"
 
-# Number of retry attempts after a worker fails inside parallel_hosts.
-# 0 = no retries (current behavior). Useful for flaky SSH on big fleets.
-IPERF_RETRIES="${IPERF_RETRIES:-0}"
-
 # Verbosity: 0 = quiet (errors and warnings only),
 #            1 = normal (default),
 #            2 = verbose (also prints every ssh/scp invocation).
@@ -159,8 +155,6 @@ while [ $# -gt 0 ]; do
         --password-env)    _flag_need "$1" "${2:-}"; SSH_PASSWORD_ENV="$2"; shift 2 ;;
         --password-env=*)  SSH_PASSWORD_ENV="${1#*=}"; shift ;;
         --ask-password)    SSH_ASK_PASSWORD=yes; shift ;;
-        --retries)         _flag_need "$1" "${2:-}"; IPERF_RETRIES="$2"; shift 2 ;;
-        --retries=*)       IPERF_RETRIES="${1#*=}"; shift ;;
         --dry-run|-n)      IPERF_DRY_RUN=1; shift ;;
         --verbose|-v)      IPERF_VERBOSITY=2; shift ;;
         --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
@@ -189,7 +183,6 @@ _validate_uint "IPERF_PORT / --port"           "$IPERF_PORT"     1
 _validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
 _validate_uint "IPERF_PARALLEL / --parallel"   "$IPERF_PARALLEL" 1
 _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
-_validate_uint "IPERF_RETRIES / --retries"     "$IPERF_RETRIES"  0
 _validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
 [ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
 # Sanity-warn (don't die) on suspicious --jobs values. Past ~256 you're
@@ -333,46 +326,9 @@ read_servers() {
 _validate_server_list() {
     [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
         || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
-    local cleaned
-    cleaned=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-        "$SERVER_LIST_FILE" | grep -v '^$' || true)
-    local invalid=()
-    if [ -n "$cleaned" ]; then
-        local line
-        while IFS= read -r line; do
-            case "$line" in
-                *://*)         invalid+=("$line  (URL not allowed; use bare hostname or IP)") ; continue ;;
-                */*)           invalid+=("$line  (contains '/'; not a valid hostname)") ; continue ;;
-                *' '*|*$'\t'*) invalid+=("$line  (contains whitespace)") ; continue ;;
-            esac
-            case "$line" in
-                \[*\]) ;;  # bracketed IPv6
-                *)
-                    if ! [[ "$line" =~ ^[a-zA-Z0-9._:-]+$ ]]; then
-                        invalid+=("$line  (contains characters outside [a-zA-Z0-9._:-])")
-                    fi
-                    ;;
-            esac
-        done <<< "$cleaned"
-    fi
-    if [ ${#invalid[@]} -gt 0 ]; then
-        err "invalid entries in $SERVER_LIST_FILE:"
-        local v
-        for v in "${invalid[@]}"; do err "  $v"; done
-        die "fix the server list and re-run"
-    fi
-    # Warn (don't die) on duplicates; they would silently overwrite each
-    # other in HOST_IDX and skew the parity-rule load balance.
     local dups
-    dups=$(printf '%s\n' "$cleaned" | sort | uniq -d)
-    if [ -n "$dups" ]; then
-        warn "server list contains duplicate hostnames; per-host scripts and"
-        warn "logs would overwrite each other. Duplicates:"
-        local d
-        while IFS= read -r d; do
-            warn "  $d"
-        done <<< "$dups"
-    fi
+    dups=$(read_servers | sort | uniq -d)
+    [ -z "$dups" ] || warn "server list has duplicate hostnames: $(echo $dups)"
 }
 
 #------------------------------------------------------------------------------
@@ -478,73 +434,19 @@ parallel_hosts() {
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-XXXXXX") || die "mktemp failed"
 
-    # Live progress drainer: tails $tmpdir for new $i.rc files (each worker
-    # writes its rc as the very last action) and prints an ordered count
-    # to stderr so the user sees "47/100 done" while the slowest worker is
-    # still running. Stdout is reserved for the ordered replay below.
-    # Disabled by IPERF_PROGRESS=0 for tests that need clean stderr.
-    local drain_pid=""
-    if [ "${IPERF_PROGRESS:-1}" != "0" ] && [ "$n" -gt 1 ]; then
-        (
-            local printed=0 j rc_d label
-            declare -A seen=()
-            while [ "$printed" -lt "$n" ]; do
-                for ((j=0; j<n; j++)); do
-                    if [ -z "${seen[$j]:-}" ] && [ -f "$tmpdir/$j.rc" ]; then
-                        rc_d=$(cat "$tmpdir/$j.rc" 2>/dev/null)
-                        seen[$j]=1
-                        printed=$((printed + 1))
-                        if [ "${rc_d:-1}" = "0" ]; then label=OK; else label="FAIL(rc=${rc_d:-?})"; fi
-                        local _line="[$(ts)]   progress: $printed/$n $label: ${hosts[$j]}"
-                        echo "$_line" >&2
-                        # Mirror to the run log only if a write command has
-                        # established one. Probe-style commands (status,
-                        # ssh-setup) leave LOGS_DIR empty.
-                        if [ -n "${LOGS_DIR:-}" ] && [ -d "${LOGS_DIR}" ]; then
-                            printf '%s\n' "$_line" >> "$LOGS_DIR/orchestrator.log"
-                        fi
-                    fi
-                done
-                sleep 0.5
-            done
-        ) &
-        drain_pid=$!
-    fi
-
     local i running=0
     for ((i=0; i<n; i++)); do
         if [ "$running" -ge "$jobs" ]; then
-            # Block until any one worker exits, then free a slot. The
-            # drainer is also a child but it doesn't exit until all .rc
-            # files exist, so wait -n only ever reaps a worker here.
             wait -n 2>/dev/null || wait
             running=$((running - 1))
         fi
         (
-            # IPERF_RETRIES (default 0) gives N extra attempts after a
-            # non-zero exit, with linear back-off (1s, 2s, ...). Useful
-            # for transient SSH timeouts during ssh-setup / check-iperf.
-            local _attempt=0
-            local _max=$((${IPERF_RETRIES:-0} + 1))
-            local _rc=0
-            while [ "$_attempt" -lt "$_max" ]; do
-                _attempt=$((_attempt + 1))
-                "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
-                _rc=$?
-                [ "$_rc" -eq 0 ] && break
-                if [ "$_attempt" -lt "$_max" ]; then
-                    echo "  retry $_attempt/$((_max - 1)) for ${hosts[$i]} after rc=$_rc" >> "$tmpdir/$i.out"
-                    sleep "$_attempt"
-                fi
-            done
-            echo "$_rc" > "$tmpdir/$i.rc"
+            "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
+            echo $? > "$tmpdir/$i.rc"
         ) &
         running=$((running + 1))
     done
     wait
-
-    # Drainer should have exited on its own once printed==n; reap it.
-    [ -n "$drain_pid" ] && wait "$drain_pid" 2>/dev/null
 
     for ((i=0; i<n; i++)); do
         [ -s "$tmpdir/$i.out" ] && cat "$tmpdir/$i.out"
@@ -659,8 +561,6 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --duration, -d SECONDS     test duration per pair (default $IPERF_DURATION)
     --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
     --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
-    --retries N                retry parallel_hosts workers N extra times
-                               on failure with linear back-off (default $IPERF_RETRIES)
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -738,10 +638,8 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_DURATION=$IPERF_DURATION       # seconds per pair
     IPERF_PARALLEL=$IPERF_PARALLEL       # parallel streams
     IPERF_JOBS=$IPERF_JOBS               # max concurrent SSH/SCP fan-out
-    IPERF_RETRIES=$IPERF_RETRIES         # retry count for parallel_hosts
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
     IPERF_DRY_RUN=$IPERF_DRY_RUN         # 1 = print SSH/SCP commands, don't run
-    IPERF_PROGRESS=${IPERF_PROGRESS:-1}  # 0 disables live progress on stderr
     SSH_USER=$SSH_USER
     SSH_OPTS=$SSH_OPTS
     SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-} # see --password-file
@@ -760,125 +658,37 @@ EOF
 }
 
 #------------------------------------------------------------------------------
-# cmd_status: probe hosts live (iperf installed? server running?) and list
-# available run directories. No state file is read or written.
-#
-# --json emits a flat object suitable for scripting / CI.
-#------------------------------------------------------------------------------
-_status_collect_run_dirs() {
-    # Print one run-id per line, sorted oldest -> newest, for any direct
-    # subdirectory of $RESULTS_BASE (excluding the 'latest' symlink).
-    [ -d "$RESULTS_BASE" ] || return 0
-    local d
-    for d in "$RESULTS_BASE"/*/; do
-        [ -d "$d" ] || continue
-        d="${d%/}"
-        local base="${d##*/}"
-        [ "$base" = "latest" ] && continue
-        printf '%s\n' "$base"
-    done | sort
-}
-
+# Probe hosts and list local run directories. No state file is read or
+# written; everything is derived live.
 cmd_status() {
-    local emit_json=0
-    if [ "${1:-}" = "--json" ]; then
-        emit_json=1
-    fi
-
-    local latest_target=""
-    if [ -L "$RESULTS_BASE/latest" ]; then
-        latest_target=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
-    elif [ -d "$RESULTS_BASE/latest" ]; then
-        latest_target="latest"
-    fi
-
-    local runs=()
-    local r
-    while IFS= read -r r; do
-        [ -n "$r" ] && runs+=("$r")
-    done < <(_status_collect_run_dirs)
-
-    # Probe hosts only when a server list is available. Skip cleanly
-    # otherwise so `status` never errors on a fresh checkout.
-    local probe_iperf=""
-    local probe_servers=""
-    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
-        local n_hosts
-        n_hosts=$(read_servers | wc -l)
-        if [ "$n_hosts" -gt 0 ]; then
-            probe_iperf=$(parallel_hosts _worker_check_iperf 2>/dev/null)
-            probe_servers=$(parallel_hosts _worker_check_servers 2>/dev/null)
-        fi
-    fi
-
-    if [ "$emit_json" = "1" ]; then
-        local first=1 s
-        printf '{'
-        printf '"results_base":"%s","server_list":"%s","latest":"%s","runs":[' \
-            "$RESULTS_BASE" "${SERVER_LIST_FILE:-}" "$latest_target"
-        for s in "${runs[@]}"; do
-            [ "$first" = "1" ] && first=0 || printf ','
-            printf '"%s"' "$s"
-        done
-        printf '],"hosts":['
-        first=1
-        if [ -n "$probe_iperf" ]; then
-            local line
-            while IFS= read -r line; do
-                [ -z "$line" ] && continue
-                # _worker_check_iperf prints: "<host>  <iperf_status>  mpstat=...  <ver>"
-                local host status
-                host=$(printf '%s' "$line" | awk '{print $1}')
-                status=$(printf '%s' "$line" | awk '{print $2}')
-                local server_state="UNKNOWN"
-                local sline
-                while IFS= read -r sline; do
-                    case "$sline" in
-                        "$host"*RUNNING*) server_state="RUNNING" ; break ;;
-                        "$host"*STOPPED*) server_state="STOPPED" ; break ;;
-                    esac
-                done <<< "$probe_servers"
-                [ "$first" = "1" ] && first=0 || printf ','
-                printf '{"host":"%s","iperf":"%s","server":"%s"}' \
-                    "$host" "$status" "$server_state"
-            done <<< "$probe_iperf"
-        fi
-        printf ']}\n'
-        return 0
-    fi
-
-    echo "=== iperf-orchestrator status ==="
-    echo "Results base:   $RESULTS_BASE"
-    echo "Server list:    ${SERVER_LIST_FILE:-(none; pass --servers)}"
-    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
-        echo "Hosts:          $(read_servers | wc -l)"
-    fi
+    echo "Results base: $RESULTS_BASE"
+    echo "Server list:  ${SERVER_LIST_FILE:-(none; pass --servers)}"
     echo
-
-    if [ ${#runs[@]} -eq 0 ]; then
-        echo "Runs: (none)"
-    else
-        echo "Runs (oldest -> newest):"
-        for r in "${runs[@]}"; do
+    echo "Runs:"
+    if [ -d "$RESULTS_BASE" ]; then
+        local latest=""
+        [ -L "$RESULTS_BASE/latest" ] && latest=$(readlink "$RESULTS_BASE/latest" 2>/dev/null)
+        local d found=0
+        for d in "$RESULTS_BASE"/*/; do
+            [ -d "$d" ] || continue
+            local base="${d%/}"; base="${base##*/}"
+            [ "$base" = "latest" ] && continue
             local marker=""
-            [ "$r" = "$latest_target" ] && marker="  <- latest"
-            echo "  $r$marker"
+            [ "$base" = "$latest" ] && marker="  <- latest"
+            echo "  $base$marker"
+            found=1
         done
-    fi
-
-    if [ -n "$probe_iperf" ]; then
-        echo
-        echo "Hosts (live probe):"
-        echo "$probe_iperf" | sed 's/^/  /'
-        echo
-        echo "iperf -s daemon state:"
-        echo "$probe_servers" | sed 's/^/  /'
-    elif [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
-        echo
-        echo "Hosts: (server list is empty)"
+        [ "$found" = "0" ] && echo "  (none)"
     else
+        echo "  (none)"
+    fi
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
         echo
-        echo "Hosts: (skipped; pass --servers <file> to probe)"
+        echo "iperf2 + mpstat:"
+        parallel_hosts _worker_check_iperf | sed 's/^/  /'
+        echo
+        echo "Daemons:"
+        parallel_hosts _worker_check_servers | sed 's/^/  /'
     fi
 }
 
@@ -1363,207 +1173,63 @@ _orchestrator_signal_cleanup() {
 
 cmd_run_tests() {
     local mode="${1:-parallel}"
+    case "$mode" in
+        parallel|sequential-host|sequential-pair) ;;
+        *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair)" ;;
+    esac
     _ensure_run_id
     _validate_server_list
     trap '_orchestrator_signal_cleanup' INT TERM
-    local _n_hosts
-    _n_hosts=$(read_servers | wc -l)
-    [ "$_n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts for a full-mesh test (got $_n_hosts)"
-    log "Run ID: $RUN_ID"
-    log "Results dir: $RESULTS_DIR"
+    local n_hosts; n_hosts=$(read_servers | wc -l)
+    [ "$n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts (got $n_hosts)"
+    log "Mode: $mode  Run ID: $RUN_ID"
+
     case "$mode" in
-        parallel)        _run_parallel ;;
-        sequential-host) _run_sequential_host ;;
-        sequential-pair) _run_sequential_pair ;;
-        *) die "Unknown mode: $mode (expected: parallel | sequential-host | sequential-pair)" ;;
+        parallel)         _run_one_round "$(( $(date +%s) + START_DELAY ))" "" ;;
+        sequential-host)  while IFS= read -r h; do [ -n "$h" ] && _run_one_round 0 "" "$h"; done < <(read_servers) ;;
+        sequential-pair)
+            build_host_idx
+            local hosts=()
+            while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
+            local s d
+            for s in "${hosts[@]}"; do
+                for d in "${hosts[@]}"; do
+                    is_client_for "$s" "$d" || continue
+                    _run_one_round 0 "$d" "$s"
+                done
+            done
+            ;;
     esac
-    # Record the mode used so make-pivot/make-heatmap can label charts.
-    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
-        printf '%s\n' "$mode" > "$RESULTS_DIR/.run_mode"
-    fi
+
+    printf '%s\n' "$mode" > "$RESULTS_DIR/.run_mode"
     trap - INT TERM
 }
 
-# parallel: every host runs its full test sequence at the same synchronized
-# start time. Fastest wall-clock, but flows compete with each other on the
-# wire so per-pair numbers will be lower than line rate.
-_run_parallel() {
-    local hosts; hosts=$(read_servers)
-    [ -n "$hosts" ] || die "No hosts"
-
-    local n_hosts
-    n_hosts=$(echo "$hosts" | wc -l)
-    local n_pairs=$(( n_hosts * (n_hosts - 1) / 2 ))
-
-    local start_time=$(( $(date +%s) + START_DELAY ))
-    local human_start
-    human_start=$(date -d "@$start_time" '+%F %T' 2>/dev/null || date -r "$start_time" '+%F %T')
-
-    # Per-host iperf2 calls are launched in parallel on the remote side, so
-    # each host's wall-clock is roughly DURATION regardless of mesh size.
-    local est=$(( IPERF_DURATION + START_DELAY + 10 ))
-    log "Mode: parallel (canonical pairs, full-duplex)"
-    log "Synchronized start at $human_start (epoch $start_time)"
-    log "$n_pairs pairs tested simultaneously for ${IPERF_DURATION}s; estimated total ~${est}s"
-
-    # Two parallel arrays instead of "$pid:$host" strings, so an IPv6
-    # hostname (which contains colons) doesn't get truncated when we
-    # try to recover it for the per-host log line.
-    local pids=()
-    local hosts_for_pids=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        local host_safe; host_safe=$(_sanitize_host "$host")
-        local hostlog="$LOGS_DIR/run_${host_safe}.log"
-        local remote_script="$REMOTE_DIR/run_iperf_${host_safe}_${RUN_ID}.sh"
-        ssh_run "$host" "'$remote_script' $start_time" \
-            > "$hostlog" 2>&1 &
+# Run one batch: each named source host invokes its remote run script with
+# the given start_time and (optional) single target. With no source list,
+# fan out to every host in the server list (this is what `parallel` mode
+# uses). With one source, run just it (sequential-host / sequential-pair).
+_run_one_round() {
+    local start_time="$1" target="$2"; shift 2
+    local sources=()
+    if [ "$#" -gt 0 ]; then
+        sources=("$@")
+    else
+        local h
+        while IFS= read -r h; do [ -n "$h" ] && sources+=("$h"); done < <(read_servers)
+    fi
+    local pids=() src
+    for src in "${sources[@]}"; do
+        local safe; safe=$(_sanitize_host "$src")
+        local hostlog="$LOGS_DIR/run_${safe}.log"
+        local script="$REMOTE_DIR/run_iperf_${safe}_${RUN_ID}.sh"
+        local arg=""
+        [ -n "$target" ] && arg=" '$target'"
+        ssh_run "$src" "'$script' $start_time$arg" > "$hostlog" 2>&1 &
         pids+=("$!")
-        hosts_for_pids+=("$host")
-    done <<< "$hosts"
-
-    log "Launched ${#pids[@]} remote sessions; waiting for completion..."
-
-    # Live progress poller: every 5s, count how many of the launched pids
-    # have exited and print a counter when it changes. Also emit a
-    # watchdog warning if the run hasn't finished by the estimated time
-    # plus a 30s grace, listing which hosts are still outstanding -- this
-    # is usually a clock-skew issue past START_DELAY, or a stuck SSH.
-    local total=${#pids[@]}
-    local last_done=0 elapsed=0 done_count
-    local watchdog_at=$((est + 30))
-    while :; do
-        done_count=0
-        for p in "${pids[@]}"; do
-            kill -0 "$p" 2>/dev/null || done_count=$((done_count + 1))
-        done
-        if [ "$done_count" -ne "$last_done" ]; then
-            log "  progress: $done_count/$total hosts finished"
-            last_done=$done_count
-        fi
-        [ "$done_count" -eq "$total" ] && break
-        sleep 5
-        elapsed=$((elapsed + 5))
-        if [ "$elapsed" -ge "$watchdog_at" ]; then
-            local hung=()
-            local i_w
-            for i_w in "${!pids[@]}"; do
-                kill -0 "${pids[$i_w]}" 2>/dev/null && hung+=("${hosts_for_pids[$i_w]}")
-            done
-            warn "  watchdog: ${#hung[@]} host(s) still running after ${elapsed}s: ${hung[*]:-(none)}"
-            warn "  (likely cause: clock skew past START_DELAY, or a stuck SSH session)"
-            watchdog_at=$((elapsed + 60))
-        fi
     done
-
-    local failed=()
-    local i p h
-    for i in "${!pids[@]}"; do
-        p="${pids[$i]}"
-        h="${hosts_for_pids[$i]}"
-        if wait "$p"; then
-            log "  finished: $h"
-        else
-            warn "  finished with errors: $h (see $LOGS_DIR/run_${h}.log)"
-            failed+=("$h")
-        fi
-    done
-
-    if [ ${#failed[@]} -eq 0 ]; then
-        log "All hosts completed (parallel)"
-    else
-        warn "run-tests had ${#failed[@]} failure(s); collect-results will still try"
-    fi
-}
-
-# sequential-host: hosts run their full sequences one at a time. Each host's
-# numbers are clean (no other host is generating traffic), but a single host
-# is still pushing on multiple targets back-to-back, so any cross-target
-# interference within that host's stack still exists.
-_run_sequential_host() {
-    local hosts; hosts=$(read_servers)
-    [ -n "$hosts" ] || die "No hosts"
-
-    local n
-    n=$(echo "$hosts" | wc -l)
-    local est_per_host=$(( IPERF_DURATION + 5 ))
-    local est_total=$(( n * est_per_host ))
-    log "Mode: sequential-host (canonical pairs, full-duplex)"
-    log "$n hosts; each runs its canonical-client tests in parallel for ${IPERF_DURATION}s; estimated total ~${est_total}s"
-
-    local i=0
-    local failed=()
-    while IFS= read -r host; do
-        [ -z "$host" ] && continue
-        i=$((i + 1))
-        log "[$i/$n] running on $host (~${est_per_host}s)..."
-        local host_safe; host_safe=$(_sanitize_host "$host")
-        local hostlog="$LOGS_DIR/run_${host_safe}.log"
-        local remote_script="$REMOTE_DIR/run_iperf_${host_safe}_${RUN_ID}.sh"
-        if ssh_run "$host" "'$remote_script' 0" > "$hostlog" 2>&1; then
-            log "  finished: $host"
-        else
-            warn "  finished with errors: $host (see $hostlog)"
-            failed+=("$host")
-        fi
-    done <<< "$hosts"
-
-    if [ ${#failed[@]} -eq 0 ]; then
-        log "All hosts completed (sequential-host)"
-    else
-        warn "sequential-host had ${#failed[@]} failure(s); collect-results will still try"
-    fi
-}
-
-# sequential-pair: exactly one full-duplex connection on the wire at any
-# moment. Cleanest per-pair numbers. Iterates canonical pairs only -- each
-# test loads both directions, so we don't need to revisit the pair from
-# the other side. Total tests = N*(N-1)/2.
-_run_sequential_pair() {
-    local hosts; hosts=$(read_servers)
-    [ -n "$hosts" ] || die "No hosts"
-
-    build_host_idx
-    local host_arr=()
-    while IFS= read -r h; do
-        [ -z "$h" ] && continue
-        host_arr+=("$h")
-    done <<< "$hosts"
-
-    local n=${#host_arr[@]}
-    local total=$(( n * (n - 1) / 2 ))
-    local est=$(( total * (IPERF_DURATION + 2) ))
-    log "Mode: sequential-pair (balanced pair assignment, full-duplex)"
-    log "$total tests, one at a time; estimated total ~${est}s"
-
-    local i=0
-    local failed=()
-    for src in "${host_arr[@]}"; do
-        for dst in "${host_arr[@]}"; do
-            # Same parity rule used by create-scripts: visit each pair
-            # once, with src as the client iff is_client_for says so.
-            is_client_for "$src" "$dst" || continue
-            i=$((i + 1))
-            local src_safe dst_safe
-            src_safe=$(_sanitize_host "$src")
-            dst_safe=$(_sanitize_host "$dst")
-            local pairlog="$LOGS_DIR/run_${src_safe}_to_${dst_safe}.log"
-            local remote_script="$REMOTE_DIR/run_iperf_${src_safe}_${RUN_ID}.sh"
-            log "[$i/$total] $src <-> $dst"
-            if ssh_run "$src" "'$remote_script' 0 '$dst'" > "$pairlog" 2>&1; then
-                :
-            else
-                warn "  failed: $src <-> $dst (see $pairlog)"
-                failed+=("$src<->$dst")
-            fi
-        done
-    done
-
-    if [ ${#failed[@]} -eq 0 ]; then
-        log "All pairs completed (sequential-pair)"
-    else
-        warn "sequential-pair had ${#failed[@]} failure(s); collect-results will still try"
-    fi
+    local p
+    for p in "${pids[@]}"; do wait "$p" || true; done
 }
 
 #------------------------------------------------------------------------------
@@ -2779,154 +2445,12 @@ cmd_all() {
     trap - INT TERM
 }
 
-#==============================================================================
-# Per-subcommand help
-#
-# When the user runs `<subcmd> --help` we print a focused snippet for that
-# subcommand instead of the full usage. Returns 0 if a snippet was printed.
-#==============================================================================
-_subcmd_help() {
-    local sub="$1"
-    case "$sub" in
-        ssh-setup)
-            cat <<'EOF'
-ssh-setup [--ask-password | --password-file=PATH | --password-env=VAR]
-    Generate ~/.ssh/id_ed25519 if missing, then run ssh-copy-id against
-    every host in the list. Default: prompts you per-host (sequential).
-    With --password-file / --password-env / --ask-password, drives
-    ssh-copy-id non-interactively via 'expect', in parallel (--jobs).
-    Both global-flag form (before the subcommand) and subcommand form
-    (after) work; --ask-password prompts exactly once.
-EOF
-            ;;
-        check-iperf)
-            cat <<'EOF'
-check-iperf
-    Probe every host for `iperf -v` (must report version 2) and `mpstat`.
-    Prints one line per host. Hosts without iperf2 fail the run;
-    missing mpstat is tolerated (CPU parser falls back to /proc/stat
-    for box-wide CPU only).
-EOF
-            ;;
-        check-servers)
-            cat <<'EOF'
-check-servers
-    Probe every host for any running `iperf` daemon (informational).
-    Useful for verifying the cleanup state of a fleet before a fresh run.
-EOF
-            ;;
-        start-servers)
-            cat <<'EOF'
-start-servers
-    Start `iperf -s -p $IPERF_PORT` in daemon mode on every host. The
-    pkill scope is "iperf -s -p $IPERF_PORT" so unrelated iperf clients
-    or other-port servers are left alone.
-EOF
-            ;;
-        run-tests)
-            cat <<'EOF'
-run-tests [parallel|sequential-host|sequential-pair]
-    Run the iperf2 mesh tests. Modes:
-      parallel        (default) all hosts launch all clients
-                      simultaneously after a synchronized start.
-                      Maximum mesh contention; fastest wall-clock.
-      sequential-host hosts run one at a time; the active host fires
-                      its clients to all targets in parallel.
-      sequential-pair exactly one connection on the wire at any moment.
-                      Cleanest per-pair numbers; takes N*(N-1)/2 *
-                      duration (canonical pairs only).
-    Ctrl-C stops iperf servers on every host before exiting.
-EOF
-            ;;
-        collect-results)
-            cat <<'EOF'
-collect-results
-    Tar+gzip every host's iperf_test_*.log, iperf_run_*.status, and
-    cpu_*.log into results/ on this machine. Idempotent.
-EOF
-            ;;
-        stop-servers)
-            cat <<'EOF'
-stop-servers
-    Kill the iperf -s daemons we started. Scoped to "iperf -s -p $PORT"
-    so other iperf processes on the host aren't disturbed.
-EOF
-            ;;
-        cleanup)
-            cat <<'EOF'
-cleanup --yes [--all]
-    Default: remove only the current run's files (iperf_*_<run-id>.*) from
-    $REMOTE_DIR on every host -- safe when $REMOTE_DIR is on a shared FS
-    and another run is in progress.
-    --all wipes $REMOTE_DIR entirely (legacy behavior).
-    Requires --yes when invoked directly to prevent accidental loss.
-    `all` calls this internally without --yes via an internal bypass.
-EOF
-            ;;
-        parse-csv|parse-cpu|make-pivot|make-heatmap)
-            cat <<'EOF'
-parse-csv / parse-cpu / make-pivot / make-heatmap
-    Local-only analysis steps (no SSH). Read from results/*.log files
-    that collect-results pulled back. Produces:
-      iperf_results.csv, cpu_summary.csv, iperf_pivot.txt, iperf_heatmap.png
-    Pivot and heatmap include a metadata header with run timestamp,
-    mode, and duration.
-EOF
-            ;;
-        all)
-            cat <<'EOF'
-all [parallel|sequential-host|sequential-pair] [--keep-going]
-    Run the full pipeline end-to-end. Generates a fresh run-id, calls
-    `doctor` first, then runs ssh-setup, check-iperf, check-servers,
-    start-servers, create-scripts, distribute-scripts, run-tests,
-    collect-results, stop-servers, cleanup, parse-csv, parse-cpu,
-    make-pivot, make-heatmap. Aborts on per-host failures; pass
-    --keep-going to continue.
-EOF
-            ;;
-        results-summary)
-            cat <<'EOF'
-results-summary
-    Print quick stats from results/iperf_results.csv: P50, P95, min,
-    mean, max throughput, plus the 5 slowest source->target pairs.
-    Run after parse-csv (which `all` runs automatically).
-EOF
-            ;;
-        doctor)
-            cat <<'EOF'
-doctor
-    Probe local prerequisites: ssh tools, expect (when a password flag
-    is set), python3 + numpy + pandas + matplotlib. Returns non-zero
-    on any missing dependency. `all` calls this first.
-EOF
-            ;;
-        status)
-            cat <<'EOF'
-status [--json]
-    Probe each host (iperf installed? server running?) and list the
-    available run directories under $RESULTS_BASE. Pass --json to emit
-    a flat object suitable for scripting / CI.
-EOF
-            ;;
-        *)
-            return 1   # no specific snippet
-            ;;
-    esac
-    return 0
-}
 
 #==============================================================================
 # Dispatcher
 #==============================================================================
 cmd="${1:-}"
 shift || true
-
-# Subcommand-specific help: <subcmd> --help|-h
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    if _subcmd_help "$cmd"; then
-        exit 0
-    fi
-fi
 
 case "$cmd" in
     "")                 first_run_banner ;;

@@ -47,15 +47,7 @@ test_results_summary_dies_without_csv() {
     assert_contains "$RUN_OUT" "No CSV" "should explain missing CSV" || return 1
 }
 
-test_results_summary_help_snippet() {
-    run_orch results-summary --help
-    assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "P50" "snippet should mention P50" || return 1
-    assert_contains "$RUN_OUT" "slowest" "snippet should mention slowest" || return 1
-}
-
 run_test test_results_summary_reports_basic_stats
 run_test test_results_summary_dies_without_csv
-run_test test_results_summary_help_snippet
 
 report_tests

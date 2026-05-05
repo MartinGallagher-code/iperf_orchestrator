@@ -15,7 +15,7 @@ test_status_with_no_servers() {
     unset IPERF_SERVERS
     run_orch status
     assert_status 0 "$RUN_RC" "status should succeed without a server list" || return 1
-    assert_contains "$RUN_OUT" "iperf-orchestrator status" "should print header" || return 1
+    assert_contains "$RUN_OUT" "Results base:" "should print results base" || return 1
     assert_contains "$RUN_OUT" "(none; pass --servers)" || return 1
 }
 
@@ -35,23 +35,18 @@ test_status_probes_hosts_when_servers_provided() {
     write_server_list a b >/dev/null
     PATH="$FAKE_BIN:$PATH" run_orch status
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "Hosts (live probe)" || return 1
-    # The shim makes iperf -v report version 2, so both hosts INSTALLED.
+    assert_contains "$RUN_OUT" "iperf2 + mpstat" || return 1
     assert_contains "$RUN_OUT" "INSTALLED" || return 1
+    assert_contains "$RUN_OUT" "Daemons:" || return 1
 }
 
-test_status_json_emits_object() {
+test_status_marks_latest() {
     mkdir -p "$RESULTS_BASE/run-x"
     ln -sfn run-x "$RESULTS_BASE/latest"
-    run_orch status --json
+    run_orch status
     assert_status 0 "$RUN_RC" || return 1
-    case "$RUN_OUT" in
-        '{'*'}') ;;
-        *) echo "not a JSON object: $RUN_OUT" >&2; return 1 ;;
-    esac
-    assert_contains "$RUN_OUT" '"results_base"' || return 1
-    assert_contains "$RUN_OUT" '"runs":["run-x"]' || return 1
-    assert_contains "$RUN_OUT" '"latest":"run-x"' || return 1
+    assert_contains "$RUN_OUT" "run-x" || return 1
+    assert_contains "$RUN_OUT" "<- latest" || return 1
 }
 
 test_run_tests_dies_without_server_list() {
@@ -61,26 +56,6 @@ test_run_tests_dies_without_server_list() {
     # --servers to a path that doesn't exist.
     run_orch --servers /nope/missing.txt run-tests
     assert_status 1 "$RUN_RC" "should die without a server list" || return 1
-}
-
-test_invalid_server_list_rejected_at_run_tests() {
-    local src="$TEST_TMPDIR/bad.txt"
-    cat > "$src" <<'EOF'
-host-a
-https://10.0.0.1:8080
-host-c
-EOF
-    run_orch --servers "$src" run-tests
-    assert_status 1 "$RUN_RC" "should reject URL entries" || return 1
-    assert_contains "$RUN_OUT" "URL not allowed" || return 1
-}
-
-test_invalid_server_list_rejected_with_path_entries() {
-    local src="$TEST_TMPDIR/bad.txt"
-    printf 'host-a\nfoo/bar\nhost-c\n' > "$src"
-    run_orch --servers "$src" run-tests
-    assert_status 1 "$RUN_RC" "should reject entries with '/'" || return 1
-    assert_contains "$RUN_OUT" "valid hostname" || return 1
 }
 
 test_run_tests_accepts_bracketed_ipv6() {
@@ -94,10 +69,8 @@ test_run_tests_accepts_bracketed_ipv6() {
 run_test test_status_with_no_servers
 run_test test_status_lists_existing_runs
 run_test test_status_probes_hosts_when_servers_provided
-run_test test_status_json_emits_object
+run_test test_status_marks_latest
 run_test test_run_tests_dies_without_server_list
-run_test test_invalid_server_list_rejected_at_run_tests
-run_test test_invalid_server_list_rejected_with_path_entries
 run_test test_run_tests_accepts_bracketed_ipv6
 
 report_tests

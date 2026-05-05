@@ -208,7 +208,7 @@ test_status_works_with_no_runs_yet() {
     rm -rf "$RESULTS_BASE"
     run_orch status
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "Runs: (none)" || return 1
+    assert_contains "$RUN_OUT" "(none)" || return 1
 }
 
 test_create_scripts_handles_50_hosts() {

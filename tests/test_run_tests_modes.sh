@@ -32,7 +32,7 @@ test_run_tests_unknown_mode_is_rejected() {
     prep_workflow alpha bravo
     run_with_fake_path run-tests gibberish
     assert_status 1 "$RUN_RC" "unknown mode should die" || return 1
-    assert_contains "$RUN_OUT" "Unknown mode" || return 1
+    assert_contains "$RUN_OUT" "unknown mode" || return 1
 }
 
 test_run_tests_parallel_default_mode() {

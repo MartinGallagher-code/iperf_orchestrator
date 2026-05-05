@@ -158,21 +158,8 @@ test_quiet_flag_accepted() {
     assert_status 0 "$RUN_RC" "--quiet should be accepted" || return 1
 }
 
-test_retries_flag_accepted() {
-    run_orch --retries 3 help
-    assert_status 0 "$RUN_RC" "--retries 3 should be accepted" || return 1
-}
-
-test_retries_must_be_non_negative_integer() {
-    run_orch --retries -1 help
-    assert_status 2 "$RUN_RC" "negative --retries should be rejected" || return 1
-}
-
 run_test test_subcommand_flag_passes_through_pre_pass
 run_test test_dry_run_flag_accepted
 run_test test_verbose_flag_accepted
 run_test test_quiet_flag_accepted
-run_test test_retries_flag_accepted
-run_test test_retries_must_be_non_negative_integer
-
 report_tests

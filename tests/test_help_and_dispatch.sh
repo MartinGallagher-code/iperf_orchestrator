@@ -48,37 +48,10 @@ test_unknown_subcommand_is_rejected() {
     assert_contains "$RUN_OUT" "Unknown command" "should mention unknown command" || return 1
 }
 
-test_subcommand_help_prints_focused_snippet() {
-    run_orch run-tests --help
-    assert_status 0 "$RUN_RC" "subcommand --help should exit 0" || return 1
-    assert_contains "$RUN_OUT" "parallel" "should mention parallel mode" || return 1
-    assert_contains "$RUN_OUT" "sequential-host" "should mention sequential-host" || return 1
-    # Should NOT print the full usage.
-    if echo "$RUN_OUT" | grep -q '^USAGE:$'; then
-        echo "subcommand --help should be focused, not the full usage" >&2
-        return 1
-    fi
-}
-
-test_subcommand_help_status() {
-    run_orch status --help
-    assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "Probe" "status help should mention probing" || return 1
-}
-
-test_subcommand_help_doctor() {
-    run_orch doctor --help
-    assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "prerequisites" "doctor help should mention prerequisites" || return 1
-}
-
 run_test test_help_with_no_args_prints_first_run_banner
 run_test test_help_explicit_subcommand
 run_test test_help_dash_h_flag
 run_test test_help_double_dash_help_flag
 run_test test_unknown_subcommand_is_rejected
-run_test test_subcommand_help_prints_focused_snippet
-run_test test_subcommand_help_status
-run_test test_subcommand_help_doctor
 
 report_tests

@@ -260,19 +260,6 @@ for row in csv.DictReader(open('$csv')):
     assert_eq "'' ''" "$v" "per-core fields should be blank when no per-core rows" || return 1
 }
 
-# ---- #7: _run_parallel parallel-arrays (sanity check on code shape) -------
-
-test_run_parallel_uses_parallel_arrays() {
-    if grep -E 'pid_to_host\+=' "$ORCH" >/dev/null; then
-        echo "old pid_to_host=\"\$p:\$host\" pattern still present" >&2
-        return 1
-    fi
-    grep -q 'hosts_for_pids' "$ORCH" || {
-        echo "expected hosts_for_pids parallel array" >&2
-        return 1
-    }
-}
-
 run_test test_check_iperf_dies_when_no_server_list
 run_test test_check_servers_dies_when_no_server_list
 run_test test_start_servers_dies_when_no_server_list
@@ -294,6 +281,5 @@ run_test test_parse_csv_ip_prefix_addresses
 run_test test_parse_csv_picks_sum_row_with_parallel_streams
 run_test test_parse_csv_handles_parallel_without_explicit_sum_marker
 run_test test_parse_cpu_blanks_per_core_when_only_all_row
-run_test test_run_parallel_uses_parallel_arrays
 
 report_tests
