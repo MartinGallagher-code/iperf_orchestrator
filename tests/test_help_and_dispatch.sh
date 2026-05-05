@@ -14,8 +14,8 @@ test_help_with_no_args_prints_first_run_banner() {
     assert_status 0 "$RUN_RC" "no-args invocation should exit 0" || return 1
     assert_contains "$RUN_OUT" "iperf-orchestrator.sh" "banner missing program name" || return 1
     assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
-    assert_contains "$RUN_OUT" "init" "banner should mention init" || return 1
     assert_contains "$RUN_OUT" "ssh-setup" "banner should mention ssh-setup" || return 1
+    assert_contains "$RUN_OUT" "--servers" "banner should mention --servers" || return 1
     assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
     # Banner should be terse, not the full usage.
     if echo "$RUN_OUT" | grep -q '^USAGE:$'; then
@@ -60,10 +60,10 @@ test_subcommand_help_prints_focused_snippet() {
     fi
 }
 
-test_subcommand_help_init() {
-    run_orch init --help
+test_subcommand_help_status() {
+    run_orch status --help
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "server_list" "init help should mention server_list" || return 1
+    assert_contains "$RUN_OUT" "Probe" "status help should mention probing" || return 1
 }
 
 test_subcommand_help_doctor() {
@@ -78,7 +78,7 @@ run_test test_help_dash_h_flag
 run_test test_help_double_dash_help_flag
 run_test test_unknown_subcommand_is_rejected
 run_test test_subcommand_help_prints_focused_snippet
-run_test test_subcommand_help_init
+run_test test_subcommand_help_status
 run_test test_subcommand_help_doctor
 
 report_tests

@@ -41,7 +41,7 @@ test_orchestrator_uses_set_u() {
 # exiting 2 (the "unknown command" sentinel).
 test_every_documented_subcommand_is_dispatched() {
     local subcommands=(
-        init status ssh-setup
+        status ssh-setup
         check-iperf check-servers
         start-servers create-scripts distribute-scripts
         run-tests collect-results stop-servers cleanup
@@ -50,11 +50,8 @@ test_every_documented_subcommand_is_dispatched() {
     )
     local cmd
     for cmd in "${subcommands[@]}"; do
-        # Fresh tmpdir so cmds that write state don't bleed.
-        rm -rf "$IPERF_DIR"
+        rm -rf "$RESULTS_BASE"
         run_orch "$cmd" 2>/dev/null
-        # We don't assert success (most need a server list) -- only
-        # that the dispatcher did NOT print "Unknown command".
         if echo "$RUN_OUT" | grep -q "Unknown command"; then
             echo "subcommand '$cmd' was rejected as unknown" >&2
             return 1
@@ -123,33 +120,6 @@ test_help_text_documents_every_long_flag() {
     fi
 }
 
-# ---- Status / state cross-check -------------------------------------------
-
-test_status_lists_every_pipeline_state_key() {
-    # The keys printed by `status` should cover every set_state call
-    # in the script. If a new state key gets added without updating
-    # the status display, the user can't see it.
-    local set_keys
-    set_keys=$(grep -oE 'set_state [A-Z_]+' "$ORCH" | awk '{print $2}' | sort -u)
-    # TESTS_RUN_MODE is a value-store (mode string), not a yes/no
-    # progression flag. Excluded from the status list by design.
-    set_keys=$(echo "$set_keys" | grep -v '^TESTS_RUN_MODE$')
-
-    run_orch status
-    local key missing=()
-    while IFS= read -r key; do
-        [ -z "$key" ] && continue
-        if ! echo "$RUN_OUT" | grep -q -E "^[[:space:]]*$key[[:space:]]"; then
-            missing+=("$key")
-        fi
-    done <<< "$set_keys"
-    if [ "${#missing[@]}" -gt 0 ]; then
-        echo "state keys not displayed in status output:" >&2
-        printf '  %s\n' "${missing[@]}" >&2
-        return 1
-    fi
-}
-
 # ---- Help text content ----------------------------------------------------
 
 test_help_includes_all_three_run_modes() {
@@ -163,14 +133,13 @@ test_help_includes_files_section() {
     run_orch help
     assert_contains "$RUN_OUT" "FILES:" "should have a FILES: section" || return 1
     assert_contains "$RUN_OUT" "Server list:" || return 1
-    assert_contains "$RUN_OUT" "Results:" || return 1
+    assert_contains "$RUN_OUT" "Results base:" || return 1
 }
 
 test_help_includes_setup_quickstart() {
     run_orch help
-    # The README points at a 3-step quickstart we want exposed in help.
-    assert_contains "$RUN_OUT" "init" "help should mention init" || return 1
     assert_contains "$RUN_OUT" "ssh-setup" "help should mention ssh-setup" || return 1
+    assert_contains "$RUN_OUT" "--servers" "help should mention --servers flag" || return 1
 }
 
 run_test test_orchestrator_passes_bash_n
@@ -179,7 +148,6 @@ run_test test_orchestrator_uses_set_u
 run_test test_every_documented_subcommand_is_dispatched
 run_test test_help_text_lists_every_subcommand
 run_test test_help_text_documents_every_long_flag
-run_test test_status_lists_every_pipeline_state_key
 run_test test_help_includes_all_three_run_modes
 run_test test_help_includes_files_section
 run_test test_help_includes_setup_quickstart

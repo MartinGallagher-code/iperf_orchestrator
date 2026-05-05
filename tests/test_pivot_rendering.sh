@@ -23,14 +23,14 @@ csv_row() {
 }
 
 prep_results_dir() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     {
         echo "timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error"
         local r
         for r in "$@"; do
             echo "$r"
         done
-    } > "$IPERF_DIR/results/iperf_results.csv"
+    } > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv"
 }
 
 # ---- Column widths ----------------------------------------------------
@@ -40,7 +40,7 @@ test_pivot_column_width_scales_to_longest_hostname() {
         "$(csv_row short other 100)" \
         "$(csv_row other short 200)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Hostnames "short", "other" -- both 5 chars. host_w defaults
     # to 8 minimum.
     # Verify the header line begins with 8+ spaces of left padding.
@@ -56,7 +56,7 @@ test_pivot_long_hostname_widens_columns() {
         "$(csv_row "$long" peer 100)" \
         "$(csv_row peer "$long" 200)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Long hostname should appear at least once verbatim.
     grep -q "$long" "$pivot" || {
         echo "long hostname missing from pivot" >&2; return 1; }
@@ -69,7 +69,7 @@ test_pivot_diagonal_renders_as_dash() {
         "$(csv_row a b 100)" \
         "$(csv_row b a 200)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Find row "a |" and verify column for "a" is "-".
     local row_a
     row_a=$(grep -E '^a\s' "$pivot" | head -n1)
@@ -88,11 +88,11 @@ test_pivot_missing_data_renders_as_dash() {
         "$(csv_row a b 100)" \
         "$(csv_row b a 200)"
     # Add c without any tests by adding a self-NaN row to introduce it.
-    cat >> "$IPERF_DIR/results/iperf_results.csv" <<EOF
-20260101120000,c,c,DIRECTION_MISSING,TCP,10,1,,,,,,c,c,iperf_test_c_to_c.log,no data
+    cat >> "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+20260101120000,c,c,DIRECTION_MISSING,TCP,10,1,,,,,,c,c,iperf_test_c_to_c_${IPERF_RUN_ID}.log,no data
 EOF
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Check that `c` row exists and a/b columns for c are '-' (no data).
     local row_c
     row_c=$(grep -E '^c\s' "$pivot" | head -n1)
@@ -117,7 +117,7 @@ test_pivot_per_source_ranking_sorted_descending() {
         "$(csv_row b a 50)"  "$(csv_row b c 50)"  \
         "$(csv_row c a 10)"  "$(csv_row c b 30)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Extract just the per-source ranking section.
     local section
     section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
@@ -153,7 +153,7 @@ test_pivot_bar_chart_max_is_40_chars() {
         "$(csv_row low peer 100)"  \
         "$(csv_row peer low 100)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     local section
     section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
     local first
@@ -171,7 +171,7 @@ test_pivot_bar_scales_proportionally() {
         "$(csv_row small peer 100)" \
         "$(csv_row peer small 100)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     local section
     section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
     # big mean = (1000+100)/2 = 550. peer mean = (1000+100+1000+100)/4 = 550.
@@ -195,7 +195,7 @@ test_pivot_includes_required_header_text() {
         "$(csv_row a b 100)" \
         "$(csv_row b a 200)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     assert_contains "$(cat "$pivot")" "iperf2 full-duplex mesh throughput" || return 1
     assert_contains "$(cat "$pivot")" "Rows = source" || return 1
     assert_contains "$(cat "$pivot")" "Columns = target" || return 1
@@ -211,7 +211,7 @@ test_pivot_two_host_pair_renders_correctly() {
         "$(csv_row a b 1234)" \
         "$(csv_row b a 5678)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # Both values should appear with .00 formatting.
     grep -q "1234.00" "$pivot" || {
         echo "expected 1234.00 in pivot" >&2; cat "$pivot" >&2; return 1; }
@@ -228,7 +228,7 @@ test_pivot_handles_asymmetric_throughput() {
         "$(csv_row a b 1000)" \
         "$(csv_row b a 100)"
     run_orch make-pivot >/dev/null 2>&1
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     grep -q "1000.00" "$pivot" || return 1
     grep -q "100.00" "$pivot" || return 1
 }

@@ -17,19 +17,16 @@ cat > servers.txt <<EOF
 10.0.0.13
 EOF
 
-# 2. Initialize and distribute SSH keys
-./iperf-orchestrator.sh init servers.txt
-./iperf-orchestrator.sh ssh-setup            # default: prompt per host
-# ...or drive it non-interactively in parallel via expect:
-./iperf-orchestrator.sh --ask-password ssh-setup
-./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
+# 2. Distribute SSH keys (one-time; --ask-password prompts once for all)
+./iperf-orchestrator.sh --servers servers.txt ssh-setup --ask-password
 
-# 3. Check local prerequisites, then run everything end-to-end
-./iperf-orchestrator.sh doctor
-./iperf-orchestrator.sh all                  # add --keep-going to soldier on past per-host failures
+# 3. Run everything end-to-end
+./iperf-orchestrator.sh --servers servers.txt all
 ```
 
-Results land in `~/.iperf_orchestrator/results/`:
+Each invocation that produces results creates a fresh timestamped run directory under `./results/<run-id>/`, and a `./results/latest` symlink is updated to point at it. Analysis subcommands default to following `latest`; pass `--run-id <id>` to address an older run.
+
+Results in `./results/<run-id>/`:
 - `iperf_results.csv` — every test, both directions, fully parsed
 - `cpu_summary.csv` — per-host CPU peaks during the run
 - `iperf_pivot.txt` — text pivot table of throughput
@@ -61,11 +58,9 @@ iperf3's server is single-threaded and accepts only one client at a time. A full
 
 ```
 SETUP:
-  init <server_list>     Set the server list
-  ssh-setup              Generate (if needed) and distribute SSH keys.
-                         Default: per-host password prompt (sequential).
-                         With --password-file/--password-env/--ask-password:
-                         expect-driven, parallel, capped by --jobs.
+  ssh-setup              Generate (if needed) and distribute SSH keys
+                         (--ask-password / --password-file / --password-env
+                         drive ssh-copy-id non-interactively)
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
 
@@ -76,7 +71,8 @@ EXECUTION:
   run-tests [MODE]       Run the tests; MODE is parallel|sequential-host|sequential-pair
   collect-results        Pull logs back as a tar archive per host
   stop-servers           Kill iperf -s on every host
-  cleanup                Remove the remote working directory on every host
+  cleanup [--all] [--yes]  Remove this run's files from $REMOTE_DIR (or
+                           --all to wipe the whole dir)
 
 ANALYSIS:
   parse-csv              Parse iperf2 CSV logs into iperf_results.csv (2 rows per test)
@@ -86,15 +82,12 @@ ANALYSIS:
   results-summary        P50/P95/min/mean/max throughput + 5 slowest pairs
 
 CONVENIENCE:
-  all [MODE] [--keep-going] [--resume]
-                         Run the full sequence end-to-end. Runs `doctor` first.
-                         --keep-going continues past per-host failures.
-                         --resume skips pipeline steps already marked done in state.
-  doctor                 Probe local prerequisites (ssh tools, expect, python deps)
-                         and print install hints
-  status                 Show what's been done so far
-  help                   Show command help
+  all [MODE] [--keep-going]  Run the full sequence end-to-end
+  status [--json]            Probe hosts live + list available runs
+  help                       Show command help
 ```
+
+The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. There is no `init` step (server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`), and there is no `--resume` flag (each `all` invocation creates a fresh run-id).
 
 ### Configuration
 
@@ -108,6 +101,9 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 
 | Env var | Flag | Default | Purpose |
 |---|---|---|---|
+| `IPERF_SERVERS` | `--servers`, `-s` | `<script-dir>/servers.txt` | server list path |
+| `RESULTS_BASE` | `--output`, `-o` | `<script-dir>/results` | base directory for run subdirs |
+| `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address |
 | `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
 | `IPERF_PARALLEL` | `--parallel`, `-P` | `1` | parallel streams within each test |
@@ -121,8 +117,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `SSH_PASSWORD_ENV` | `--password-env` | — | env var name to read the SSH password from; enables expect-driven `ssh-setup` |
 | `SSH_ASK_PASSWORD` | `--ask-password` | `no` | prompt once and reuse for every host; enables expect-driven `ssh-setup` |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `IPERF_DIR` | `--iperf-dir` | `~/.iperf_orchestrator` | local working directory |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working directory |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; safe to point at a shared FS (every remote-side file embeds `<host>_<run-id>`) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 
 #### `--jobs` and capped-concurrency parallel SSH
@@ -258,47 +253,34 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 
 ---
 
-## State and idempotence
+## Stateless mode and run directories
 
-State is tracked in `~/.iperf_orchestrator/state` as `KEY=value` lines. After every successful step, the corresponding key is set. `status` reads back exactly what's been done:
-
-```
-=== iperf-orchestrator status ===
-...
-Pipeline state:
-  SERVER_LIST_LOADED             yes
-  SSH_KEYS_DISTRIBUTED           yes
-  SERVERS_STARTED                yes
-  SCRIPTS_CREATED                yes
-  TESTS_RUN                      yes
-  TESTS_RUN_MODE                 parallel
-  RESULTS_COLLECTED              yes
-  CSV_BUILT                      yes
-  CPU_PARSED                     yes
-  PIVOT_BUILT                    yes
-  HEATMAP_BUILT                  yes
-```
+There is no state file. Each invocation that produces results creates a fresh `./results/<run-id>/` directory (run-id = timestamp), and `./results/latest` is updated to point at it. Read-side commands (`parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`, `results-summary`) follow `latest` by default, or take `--run-id <id>` to address a specific run. `status` derives state by probing hosts live (running `iperf -v` and `pgrep iperf` on each).
 
 Every subcommand is safe to re-run individually. Common workflows:
 
 ```bash
-# Full pipeline
-./iperf-orchestrator.sh all
+# Full pipeline (creates a new run-id)
+./iperf-orchestrator.sh --servers servers.txt all
 
-# Re-run just the analysis after editing parsing logic
+# Re-run just the analysis on the most recent run
 ./iperf-orchestrator.sh parse-csv
 ./iperf-orchestrator.sh parse-cpu
 ./iperf-orchestrator.sh make-pivot
 ./iperf-orchestrator.sh make-heatmap
 
-# Run one mode, collect, then run a second mode against the same servers
-./iperf-orchestrator.sh all parallel
-mv ~/.iperf_orchestrator/results ~/.iperf_orchestrator/results.parallel
-./iperf-orchestrator.sh run-tests sequential-host
-./iperf-orchestrator.sh collect-results
-./iperf-orchestrator.sh parse-csv
-# etc.
+# Re-render the heatmap for an older run
+./iperf-orchestrator.sh --run-id 2026-05-05_14-22-01 make-heatmap
+
+# Run two modes back-to-back; each gets its own results subdir
+./iperf-orchestrator.sh --servers servers.txt all parallel
+./iperf-orchestrator.sh --servers servers.txt all sequential-host
+ls results/
 ```
+
+### Shared-FS safety on the remotes
+
+`REMOTE_DIR` (default `/tmp/iperf_orchestrator`) can safely point at a shared filesystem (NFS home, GPFS, etc.). Every remote-side file the orchestrator creates embeds both the sanitized hostname and the run-id, so simultaneous runs (or back-to-back runs sharing the same `REMOTE_DIR`) never overwrite each other. `cleanup` (without `--all`) only removes files matching the active run-id, leaving prior runs untouched.
 
 ---
 
@@ -342,6 +324,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 ## Limitations and known gaps
 
+- **No automatic retry on transient SSH failures by default.** If `start-servers` fails on one host, the orchestrator reports it and moves on. Pass `--retries N` to retry each parallel-fan-out worker N extra times with linear back-off, or re-run the subcommand to pick up stragglers.
 - **`sequential-pair` at N=100 takes ~14 hours.** The cleanest mode is also the slowest. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack all `N(N-1)/2` edges into ~N-1 rounds where every host has at most one flow per round). Not implemented; would be moderate complexity.
 - **Heatmap above ~60 hosts loses cell labels.** This is by design — they're unreadable at that density — but it means you have to read the colormap or the CSV for exact values.
 - **Asymmetric NIC speeds aren't auto-handled.** If half your fleet is 1G and half is 10G, the heatmap colormap is dominated by the 10G hosts and the 1G hosts all look very red. Acceptable for our use case ("uniform fleet"); for a heterogeneous fleet you'd want per-pair expected-bandwidth normalization.
@@ -357,7 +340,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **`run-tests` finishes but logs are full of "the server is busy" errors.** Confirms an iperf3 instance is still listening on port 5001. `pkill -x iperf3` and re-run `start-servers`.
 
-**One host's row is all NaN in the pivot.** Either it failed to start its iperf2 server, or it failed to run its client script. Check `~/.iperf_orchestrator/logs/run_<host>.log` and `~/.iperf_orchestrator/results/iperf_run_<host>.status`.
+**One host's row is all NaN in the pivot.** Either it failed to start its iperf2 server, or it failed to run its client script. Check `./results/latest/logs/run_<host>.log` and `./results/latest/iperf_run_<host>_<run-id>.status`.
 
 **Heatmap shows surprisingly low numbers everywhere.** Look at `cpu_summary.csv`. If `peak_total_pct` is near 100%, you're CPU-bound, not network-bound. Possible fixes: bigger hosts, more cores, RSS tuning, or run in `sequential-host` mode to see what each host can do without contention.
 
@@ -369,29 +352,44 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 ---
 
-## File layout (working directory `~/.iperf_orchestrator/`)
+## File layout
+
+### Local: `<script-dir>/results/<run-id>/`
 
 ```
-servers.list            # the server list (after init)
-state                   # KEY=value pipeline state
-iperf_installed.txt     # check-iperf output
-iperf_running.txt       # check-servers output
-scripts/
-  run_<host>.sh         # generated per-host run scripts
-logs/
-  orchestrator.log      # everything the orchestrator did
-  run_<host>.log        # stdout/stderr of each host's run-tests session
-  run_<src>_to_<dst>.log  # sequential-pair only
 results/
-  iperf_test_<src>_to_<dst>.log    # raw iperf2 CSV with header
-  iperf_server_<host>.log           # server-side iperf log per host
-  iperf_run_<host>.status           # per-host status timeline
-  cpu_<host>.log                    # mpstat or proc_stat samples
-  iperf_results.csv                 # parsed throughput data
-  cpu_summary.csv                   # parsed CPU data
-  iperf_pivot.txt                   # text pivot
-  iperf_heatmap.png                 # heatmap + bar chart
+  latest -> 2026-05-05_14-22-01    # symlink to most recent run
+  2026-05-05_14-22-01/
+    iperf_installed.txt            # check-iperf output (this run only)
+    iperf_running.txt              # check-servers output (this run only)
+    .run_mode                      # parallel | sequential-host | sequential-pair
+    scripts/
+      run_<host>_<run-id>.sh       # generated per-host run scripts
+    logs/
+      orchestrator.log             # everything the orchestrator did this run
+      run_<host>.log               # stdout/stderr of each host's run-tests session
+      run_<src>_to_<dst>.log       # sequential-pair only
+    iperf_test_<src>_to_<dst>_<run-id>.log    # raw iperf2 CSV with header
+    iperf_server_<host>_<run-id>.log          # server-side iperf log per host
+    iperf_run_<host>_<run-id>.status          # per-host status timeline
+    cpu_<host>_<run-id>.log                   # mpstat or proc_stat samples
+    iperf_results.csv                          # parsed throughput data
+    cpu_summary.csv                            # parsed CPU data
+    iperf_pivot.txt                            # text pivot
+    iperf_heatmap.png                          # heatmap + bar chart
 ```
+
+### Remote: `$REMOTE_DIR/` (default `/tmp/iperf_orchestrator/`)
+
+```
+run_iperf_<host>_<run-id>.sh
+iperf_test_<src>_to_<dst>_<run-id>.log
+iperf_server_<host>_<run-id>.log
+iperf_run_<host>_<run-id>.status
+cpu_<host>_<run-id>.log
+```
+
+Hostnames are sanitized: `:`, `/`, `[`, `]`, whitespace are replaced with `_` so bracketed-IPv6 names like `[fe80::1]` produce safe filenames. The unsanitized name is preserved inside file headers (`# pair_a=...`, `# host=...`).
 
 ---
 

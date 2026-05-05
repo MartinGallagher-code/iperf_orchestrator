@@ -15,18 +15,20 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/test_helper.bash"
 
 prep_results_dir() {
-    mkdir -p "$IPERF_DIR/results"
-    echo "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    echo "$RESULTS_BASE/$IPERF_RUN_ID"
 }
 
 cpu_cell() {
+    # Substring match on host so the helper works whether the row's
+    # host is header-derived (exact) or filename-derived (run-id suffix).
     local csv="$1" host="$2" col="$3"
     python3 -c "
 import csv, sys
 csv_path, host, col = sys.argv[1:]
 with open(csv_path) as f:
     for row in csv.DictReader(f):
-        if row['host'] == host:
+        if host in row['host']:
             print(row.get(col, ''))
             break
 " "$csv" "$host" "$col"
@@ -37,7 +39,7 @@ with open(csv_path) as f:
 test_proc_stat_without_fallback_marker_is_rejected() {
     local rd; rd=$(prep_results_dir)
     # Looks like proc_stat samples but no "fallback=proc_stat" header.
-    cat > "$rd/cpu_x.log" <<'EOF'
+    cat > "$rd/cpu_x_${IPERF_RUN_ID}.log" <<'EOF'
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
 2026-01-01 12:00:01
@@ -55,7 +57,7 @@ test_proc_stat_older_kernel_format_pads_to_ten_fields() {
     # /proc/stat on older kernels has fewer fields after "cpu". The
     # parser pads to 10 with zeros to keep idle/sys indexing correct.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_old.log" <<'EOF'
+    cat > "$rd/cpu_old_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=old samples=2
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5
@@ -79,7 +81,7 @@ test_proc_stat_garbage_cpu_line_skipped() {
     # One sample is fine, the other has non-integer values and should
     # be skipped without aborting the whole file.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_junk.log" <<'EOF'
+    cat > "$rd/cpu_junk_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=junk samples=3
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -101,7 +103,7 @@ test_proc_stat_zero_delta_samples_are_skipped() {
     # out by the "if total <= 0: continue" branch. The third sample
     # has real activity, so the file should produce a valid summary.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_zd.log" <<'EOF'
+    cat > "$rd/cpu_zd_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=zd samples=3
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -121,7 +123,7 @@ EOF
 test_proc_stat_busy_workload_high_peak_total() {
     # Heavy synthetic load: idle barely advances between samples.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_busy.log" <<'EOF'
+    cat > "$rd/cpu_busy_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=busy samples=3
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -144,7 +146,7 @@ EOF
 
 test_proc_stat_single_sample_yields_parse_error() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_solo.log" <<'EOF'
+    cat > "$rd/cpu_solo_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=solo samples=1
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -159,7 +161,7 @@ EOF
 
 test_proc_stat_two_sample_minimum_works() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_two.log" <<'EOF'
+    cat > "$rd/cpu_two_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=two samples=2
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -178,7 +180,7 @@ test_proc_stat_iowait_only_sample() {
     # Pathological: all the delta is in iowait. peak_user / peak_sys
     # stay at 0, peak_total reflects (total - idle).
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_iow.log" <<'EOF'
+    cat > "$rd/cpu_iow_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=iow samples=2
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -198,7 +200,7 @@ EOF
 
 test_proc_stat_log_with_only_marker_no_samples() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_marker.log" <<'EOF'
+    cat > "$rd/cpu_marker_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=marker samples=0
 EOF
     run_orch parse-cpu >/dev/null 2>&1

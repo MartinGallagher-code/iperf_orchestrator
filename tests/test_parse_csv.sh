@@ -11,8 +11,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/test_helper.bash"
 
 prep_results_dir() {
-    mkdir -p "$IPERF_DIR/results"
-    echo "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    echo "$RESULTS_BASE/$IPERF_RUN_ID"
 }
 
 # Helper: emit a "good" fixture log with two CSV summary lines (one per
@@ -59,7 +59,7 @@ test_parse_csv_no_logs_produces_error() {
     # no false CSV_BUILT=yes flag in state.
     assert_ne 0 "$RUN_RC" "should fail when no logs present" || return 1
     assert_contains "$RUN_OUT" "No log files found" || return 1
-    [ ! -f "$IPERF_DIR/results/iperf_results.csv" ] || {
+    [ ! -f "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" ] || {
         echo "iperf_results.csv should not exist when there were no input logs" >&2
         return 1
     }
@@ -72,7 +72,7 @@ test_parse_csv_no_logs_produces_error() {
 test_parse_csv_extracts_both_directions() {
     local rd; rd=$(prep_results_dir)
     # 1000 Mbps a->b, 880 Mbps b->a
-    write_ok_log "$rd/iperf_test_host-a_to_host-b.log" host-a host-b 1000000000 880000000
+    write_ok_log "$rd/iperf_test_host-a_to_host-b_${IPERF_RUN_ID}.log" host-a host-b 1000000000 880000000
     run_orch parse-csv
     assert_status 0 "$RUN_RC" "parse-csv should succeed" || return 1
     local csv="$rd/iperf_results.csv"
@@ -97,9 +97,9 @@ test_parse_csv_extracts_both_directions() {
 
 test_parse_csv_handles_multiple_logs() {
     local rd; rd=$(prep_results_dir)
-    write_ok_log "$rd/iperf_test_a_to_b.log" a b 1000000000 900000000
-    write_ok_log "$rd/iperf_test_a_to_c.log" a c 800000000  700000000
-    write_ok_log "$rd/iperf_test_b_to_c.log" b c 600000000  500000000
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
+    write_ok_log "$rd/iperf_test_a_to_c_${IPERF_RUN_ID}.log" a c 800000000  700000000
+    write_ok_log "$rd/iperf_test_b_to_c_${IPERF_RUN_ID}.log" b c 600000000  500000000
     run_orch parse-csv
     assert_status 0 "$RUN_RC" || return 1
     local csv="$rd/iperf_results.csv"
@@ -115,7 +115,7 @@ test_parse_csv_handles_multiple_logs() {
 test_parse_csv_missing_header_marks_no_header() {
     local rd; rd=$(prep_results_dir)
     # No leading "# pair_a=..." header line.
-    cat > "$rd/iperf_test_x_to_y.log" <<'EOF'
+    cat > "$rd/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1000,1000
 EOF
     run_orch parse-csv
@@ -130,7 +130,7 @@ EOF
 
 test_parse_csv_missing_summary_marks_no_summary() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_x_to_y.log" <<'EOF'
+    cat > "$rd/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=x pair_b=y duration=10 port=5001 parallel=1 test_start=1700000000
 EOF
     run_orch parse-csv
@@ -144,7 +144,7 @@ EOF
 
 test_parse_csv_propagates_iperf_error_text() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_x_to_y.log" <<'EOF'
+    cat > "$rd/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=x pair_b=y duration=10 port=5001 parallel=1 test_start=1700000000
 connect failed: Connection refused
 EOF
@@ -160,7 +160,7 @@ EOF
 test_parse_csv_non_default_port_still_detects_directions() {
     local rd; rd=$(prep_results_dir)
     # Listening on 7777 instead of 5001.
-    write_ok_log "$rd/iperf_test_a_to_b.log" a b 100000000 200000000 7777
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 100000000 200000000 7777
     run_orch parse-csv
     assert_status 0 "$RUN_RC" || return 1
     local csv="$rd/iperf_results.csv"
@@ -175,7 +175,7 @@ test_parse_csv_skips_per_stream_lines_with_parallel_streams() {
     # short interval (wrong duration) plus one full-duration aggregate
     # per direction.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,1,0.0-1.0,12500000,100000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,2,0.0-1.0,12500000,100000000
@@ -190,19 +190,19 @@ EOF
     assert_eq "1000.0" "$v" "should pick the 0.0-10.0 aggregate, not 0.0-1.0" || return 1
 }
 
-test_parse_csv_sets_csv_built_state() {
+test_parse_csv_writes_results_csv_in_run_dir() {
     local rd; rd=$(prep_results_dir)
-    write_ok_log "$rd/iperf_test_a_to_b.log" a b 1000000000 900000000
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
     run_orch parse-csv >/dev/null 2>&1
-    grep -q '^CSV_BUILT=yes$' "$IPERF_DIR/state" || {
-        echo "CSV_BUILT not flagged in state" >&2
+    [ -f "$rd/iperf_results.csv" ] || {
+        echo "iperf_results.csv missing in run dir" >&2
         return 1
     }
 }
 
 test_parse_csv_includes_required_columns() {
     local rd; rd=$(prep_results_dir)
-    write_ok_log "$rd/iperf_test_a_to_b.log" a b 1000000000 900000000
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
     run_orch parse-csv >/dev/null 2>&1
     local csv="$rd/iperf_results.csv"
     local header
@@ -220,7 +220,7 @@ run_test test_parse_csv_missing_summary_marks_no_summary
 run_test test_parse_csv_propagates_iperf_error_text
 run_test test_parse_csv_non_default_port_still_detects_directions
 run_test test_parse_csv_skips_per_stream_lines_with_parallel_streams
-run_test test_parse_csv_sets_csv_built_state
+run_test test_parse_csv_writes_results_csv_in_run_dir
 run_test test_parse_csv_includes_required_columns
 
 report_tests

@@ -65,14 +65,15 @@ host3" "$out"
 }
 
 test_read_servers_dies_when_file_missing() {
+    unset IPERF_SERVERS
+    SERVER_LIST_FILE=""
     source_orch
-    rm -f "$SERVER_LIST_FILE"
-    # Run in a subshell so the die() exit doesn't kill our test process.
+    SERVER_LIST_FILE=""
     local out rc
     out=$(read_servers 2>&1)
     rc=$?
     assert_ne 0 "$rc" "missing file should cause non-zero exit" || return 1
-    assert_contains "$out" "No server list" "should mention missing list" || return 1
+    assert_contains "$out" "no server list" "should mention missing list" || return 1
 }
 
 test_read_servers_handles_ipv4_and_hostnames() {

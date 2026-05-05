@@ -11,8 +11,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/test_helper.bash"
 
 prep_results_dir() {
-    mkdir -p "$IPERF_DIR/results"
-    echo "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    echo "$RESULTS_BASE/$IPERF_RUN_ID"
 }
 
 csv_cell() {
@@ -33,7 +33,7 @@ PY
 test_parse_csv_handles_zero_throughput() {
     # bps=0 (failed/idle test) should still emit OK rows.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,0,0
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,0,0
@@ -48,7 +48,7 @@ EOF
 test_parse_csv_handles_scientific_notation_in_bps() {
     # Some iperf2 builds emit scientific-notation bps values.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1.25e9,1.0e9
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1.1e9,8.8e8
@@ -64,12 +64,12 @@ test_parse_csv_handles_mixed_ok_and_failed_logs() {
     # Two log files: one normal, one with a connection-refused error
     # body and no summary lines. Output should have rows for both.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
 EOF
-    cat > "$rd/iperf_test_a_to_c.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_c_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=c duration=10 port=5001 parallel=1 test_start=1700000000
 connect failed: Connection refused
 EOF
@@ -91,7 +91,7 @@ EOF
 
 test_parse_csv_includes_filename_column() {
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
@@ -99,14 +99,14 @@ EOF
     run_orch parse-csv >/dev/null 2>&1
     local v
     v=$(csv_cell "$rd/iperf_results.csv" a b filename)
-    assert_eq "iperf_test_a_to_b.log" "$v" "filename should be the source log" || return 1
+    assert_eq "iperf_test_a_to_b_${IPERF_RUN_ID}.log" "$v" "filename should be the source log" || return 1
 }
 
 test_parse_csv_picks_correct_aggregate_when_per_stream_first() {
     # Per-stream rows appear before SUM rows in the iperf2 output;
     # parser should still pick the SUM row regardless of order.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=2 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,1,0.0-10.0,500000000,400000000
 20260101120000.000,10.0.0.1,SUM,10.0.0.2,5001,-1,0.0-10.0,1000000000,800000000
@@ -129,7 +129,8 @@ test_parse_cpu_proc_stat_with_only_one_sample() {
     # Need at least 2 samples to compute a delta. With 1 sample the
     # parser should return None -> PARSE_ERROR row.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_x.log" <<'EOF'
+    cat > "$rd/cpu_x_${IPERF_RUN_ID}.log" <<'EOF'
+# host=x
 # fallback=proc_stat host=x samples=1
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -149,7 +150,8 @@ test_parse_cpu_handles_idle_proc_stat_run() {
     # All samples report only idle ticks accumulating. Total cpu work
     # is zero each delta -> "if total <= 0: continue" path.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_idle.log" <<'EOF'
+    cat > "$rd/cpu_idle_${IPERF_RUN_ID}.log" <<'EOF'
+# host=idle
 # fallback=proc_stat host=idle samples=3
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -171,7 +173,7 @@ EOF
 test_parse_cpu_skips_unrelated_files_in_results_dir() {
     # The glob `cpu_*.log` should only pick cpu logs, not stray files.
     local rd; rd=$(prep_results_dir)
-    cat > "$rd/cpu_real.log" <<'EOF'
+    cat > "$rd/cpu_real_${IPERF_RUN_ID}.log" <<'EOF'
 # fallback=proc_stat host=real samples=3
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
@@ -182,7 +184,7 @@ cpu  150 0 90 900 0 0 20 0 0 0
 EOF
     # Decoy files
     echo "stray data" > "$rd/something_else.log"
-    echo "more decoys" > "$rd/iperf_test_x_to_y.log"
+    echo "more decoys" > "$rd/iperf_test_x_to_y_${IPERF_RUN_ID}.log"
     run_orch parse-cpu >/dev/null 2>&1
     local n
     n=$(($(wc -l < "$rd/cpu_summary.csv") - 1))
@@ -191,105 +193,66 @@ EOF
 
 # ---- Robustness / integration ---------------------------------------------
 
-test_status_with_some_pipeline_steps_completed() {
-    local src="$TEST_TMPDIR/srv.txt"
-    printf 'h1\nh2\nh3\n' > "$src"
-    run_orch init "$src" >/dev/null 2>&1
-    run_orch create-scripts >/dev/null 2>&1
+test_status_lists_existing_run_dirs() {
+    mkdir -p "$RESULTS_BASE/run-a" "$RESULTS_BASE/run-b"
+    ln -sfn run-b "$RESULTS_BASE/latest"
     run_orch status
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "SERVER_LIST_LOADED             yes" \
-        "should show SERVER_LIST_LOADED=yes" || return 1
-    assert_contains "$RUN_OUT" "SCRIPTS_CREATED                yes" \
-        "should show SCRIPTS_CREATED=yes" || return 1
-    assert_contains "$RUN_OUT" "TESTS_RUN                      no" \
-        "should show TESTS_RUN=no (not yet run)" || return 1
+    assert_contains "$RUN_OUT" "run-a" || return 1
+    assert_contains "$RUN_OUT" "run-b" || return 1
+    assert_contains "$RUN_OUT" "<- latest" || return 1
 }
 
-test_status_displays_iperf_install_check_results_inline() {
-    # When iperf_installed.txt exists, status should include its
-    # contents. (Same for iperf_running.txt.)
-    local src="$TEST_TMPDIR/srv.txt"
-    echo h1 > "$src"
-    run_orch init "$src" >/dev/null 2>&1
-    printf 'h1                             INSTALLED   mpstat=yes  iperf version 2.1.9\n' \
-        > "$IPERF_DIR/iperf_installed.txt"
+test_status_works_with_no_runs_yet() {
+    # No results subdir at all: status should still succeed and report nothing.
+    rm -rf "$RESULTS_BASE"
     run_orch status
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "iperf_installed.txt" || return 1
-    assert_contains "$RUN_OUT" "INSTALLED" "should show inline install report" || return 1
-}
-
-test_init_with_empty_file_produces_zero_hosts() {
-    local src="$TEST_TMPDIR/empty.txt"
-    : > "$src"   # empty file
-    run_orch init "$src"
-    assert_status 0 "$RUN_RC" "init with empty list should still succeed" || return 1
-    assert_contains "$RUN_OUT" "Initialized with 0 hosts" || return 1
+    assert_contains "$RUN_OUT" "Runs: (none)" || return 1
 }
 
 test_create_scripts_handles_50_hosts() {
     # Stress: large mesh shouldn't fail, and load balance should hold.
-    local src="$TEST_TMPDIR/big.txt"
+    local src="$IPERF_SERVERS"
     : > "$src"
     local i
     for i in $(seq 1 50); do
         printf 'host%02d\n' "$i" >> "$src"
     done
-    run_orch init "$src" >/dev/null 2>&1
     run_orch create-scripts
     assert_status 0 "$RUN_RC" || return 1
     local n
-    n=$(find "$IPERF_DIR/scripts" -name 'run_*.sh' | wc -l)
+    n=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | wc -l)
     assert_eq "50" "$n" "50 hosts -> 50 scripts" || return 1
-    # Load balance for N=50 (even): spread should be 1.
     assert_contains "$RUN_OUT" "min=24" || return 1
     assert_contains "$RUN_OUT" "max=25" || return 1
-    # Total tests = N*(N-1)/2 = 1225
     assert_contains "$RUN_OUT" "total tests=1225" || return 1
 }
 
 test_create_scripts_with_special_hostname_chars() {
-    # Hostnames with hyphens, dots, and digits -- common in DNS names.
-    local src="$TEST_TMPDIR/special.txt"
-    cat > "$src" <<'EOF'
+    cat > "$IPERF_SERVERS" <<'EOF'
 host-01.dc1.example.com
 host-02.dc1.example.com
 192.168.1.10
 EOF
-    run_orch init "$src" >/dev/null 2>&1
     run_orch create-scripts
     assert_status 0 "$RUN_RC" || return 1
-    [ -f "$IPERF_DIR/scripts/run_host-01.dc1.example.com.sh" ] || {
+    local sd="$RESULTS_BASE/$IPERF_RUN_ID/scripts"
+    [ -f "$sd/run_host-01.dc1.example.com_${IPERF_RUN_ID}.sh" ] || {
         echo "expected script for host-01.dc1.example.com" >&2
         return 1
     }
-    [ -f "$IPERF_DIR/scripts/run_192.168.1.10.sh" ] || {
+    [ -f "$sd/run_192.168.1.10_${IPERF_RUN_ID}.sh" ] || {
         echo "expected script for 192.168.1.10" >&2
         return 1
     }
 }
 
-test_status_after_partial_pipeline_still_succeeds() {
-    # status should never fail, even with weird/partial state.
-    mkdir -p "$IPERF_DIR"
-    cat > "$IPERF_DIR/state" <<'EOF'
-SERVER_LIST_LOADED=yes
-WEIRD_KEY=yes
-EOF
+test_status_after_no_runs_still_succeeds() {
+    # status should never fail, even with no results dir at all.
+    rm -rf "$RESULTS_BASE"
     run_orch status
-    assert_status 0 "$RUN_RC" "status should succeed with extra state keys" || return 1
-}
-
-test_repeated_init_replaces_previous_list() {
-    local s1="$TEST_TMPDIR/list1.txt" s2="$TEST_TMPDIR/list2.txt"
-    printf 'old1\nold2\n' > "$s1"
-    printf 'new1\nnew2\nnew3\n' > "$s2"
-    run_orch init "$s1" >/dev/null 2>&1
-    run_orch init "$s2" >/dev/null 2>&1
-    local out
-    out=$(cat "$IPERF_DIR/servers.list")
-    assert_eq "$(cat $s2)" "$out" "second init should overwrite the first" || return 1
+    assert_status 0 "$RUN_RC" || return 1
 }
 
 test_validate_uint_helper_rejects_negative_via_dash() {
@@ -322,13 +285,11 @@ run_test test_parse_csv_picks_correct_aggregate_when_per_stream_first
 run_test test_parse_cpu_proc_stat_with_only_one_sample
 run_test test_parse_cpu_handles_idle_proc_stat_run
 run_test test_parse_cpu_skips_unrelated_files_in_results_dir
-run_test test_status_with_some_pipeline_steps_completed
-run_test test_status_displays_iperf_install_check_results_inline
-run_test test_init_with_empty_file_produces_zero_hosts
+run_test test_status_lists_existing_run_dirs
+run_test test_status_works_with_no_runs_yet
 run_test test_create_scripts_handles_50_hosts
 run_test test_create_scripts_with_special_hostname_chars
-run_test test_status_after_partial_pipeline_still_succeeds
-run_test test_repeated_init_replaces_previous_list
+run_test test_status_after_no_runs_still_succeeds
 run_test test_validate_uint_helper_rejects_negative_via_dash
 run_test test_validate_uint_helper_rejects_leading_plus
 run_test test_validate_uint_helper_rejects_decimals

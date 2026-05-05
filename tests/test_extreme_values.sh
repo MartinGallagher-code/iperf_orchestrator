@@ -19,9 +19,9 @@ source "$DIR/test_helper.bash"
 # ---- Extreme bps values ---------------------------------------------------
 
 test_parse_csv_handles_100_gbps() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     # 100 Gbps = 1e11 bps, 100000 Mbps
-    cat > "$IPERF_DIR/results/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,125000000000,100000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,110000000000,88000000000
@@ -31,7 +31,7 @@ EOF
     local v
     v=$(python3 -c "
 import csv
-for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
+for r in csv.DictReader(open('$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv')):
     if r['source']=='a' and r['target']=='b':
         print(r['mbps'])
 ")
@@ -40,8 +40,8 @@ for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
 
 test_parse_csv_handles_very_low_throughput() {
     # Sub-Mbps test (e.g., 100 kbps).
-    mkdir -p "$IPERF_DIR/results"
-    cat > "$IPERF_DIR/results/iperf_test_x_to_y.log" <<'EOF'
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=x pair_b=y duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,125000,100000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,125000,100000
@@ -51,7 +51,7 @@ EOF
     local v
     v=$(python3 -c "
 import csv
-for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
+for r in csv.DictReader(open('$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv')):
     if r['source']=='x' and r['target']=='y':
         print(r['mbps'])
 ")
@@ -65,29 +65,26 @@ test_pivot_with_unicode_in_hostnames() {
     # parsing uses sed/grep with [[:space:]] which is locale-aware.
     # Verify accented hostnames work end-to-end (the script's column
     # width math should still succeed).
-    mkdir -p "$IPERF_DIR/results"
-    cat > "$IPERF_DIR/results/iperf_results.csv" <<'EOF'
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<'EOF'
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
-20260101120000,host-1,host-2,OK,TCP,10,1,1000000,1000000,1000.0,54321,5001,host-1,host-2,iperf_test_host-1_to_host-2.log,
-20260101120000,host-2,host-1,OK,TCP,10,1,1000000,1000000,1000.0,5001,54321,host-1,host-2,iperf_test_host-1_to_host-2.log,
+20260101120000,host-1,host-2,OK,TCP,10,1,1000000,1000000,1000.0,54321,5001,host-1,host-2,iperf_test_host-1_to_host-2_${IPERF_RUN_ID}.log,
+20260101120000,host-2,host-1,OK,TCP,10,1,1000000,1000000,1000.0,5001,54321,host-1,host-2,iperf_test_host-1_to_host-2_${IPERF_RUN_ID}.log,
 EOF
     run_orch make-pivot
     assert_status 0 "$RUN_RC" || return 1
-    [ -f "$IPERF_DIR/results/iperf_pivot.txt" ] || return 1
+    [ -f "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" ] || return 1
 }
 
 # ---- Large mesh ---------------------------------------------------------
 
 test_create_scripts_for_200_hosts_completes_in_bounded_time() {
-    # 200 hosts -> 200 generated scripts, ~19900 client tests
-    # distributed by parity rule.
-    local src="$TEST_TMPDIR/big.txt"
+    local src="$IPERF_SERVERS"
     : > "$src"
     local i
     for i in $(seq 1 200); do
         printf 'host%03d\n' "$i" >> "$src"
     done
-    run_orch init "$src" >/dev/null 2>&1
     local start end
     start=$(date +%s)
     run_orch create-scripts >/dev/null 2>&1
@@ -98,7 +95,7 @@ test_create_scripts_for_200_hosts_completes_in_bounded_time() {
         return 1
     fi
     local n
-    n=$(find "$IPERF_DIR/scripts" -name 'run_*.sh' | wc -l)
+    n=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | wc -l)
     assert_eq "200" "$n" "should generate exactly 200 scripts" || return 1
 }
 
@@ -205,7 +202,7 @@ test_large_duration_accepted() {
 
 test_parse_cpu_handles_large_mpstat_log() {
     # 60 samples (1 minute @ 1Hz) with 16 cores each -> 60 * 17 = 1020 rows
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     {
         echo "Linux fake (host)   01/01/2026  _x86_64_    (16 CPU)"
         echo
@@ -219,14 +216,14 @@ test_parse_cpu_handles_large_mpstat_log() {
             done
             echo
         done
-    } > "$IPERF_DIR/results/cpu_big.log"
+    } > "$RESULTS_BASE/$IPERF_RUN_ID/cpu_big_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" "should parse a 60-sample 16-core log" || return 1
     local v
     v=$(python3 -c "
 import csv
-for r in csv.DictReader(open('$IPERF_DIR/results/cpu_summary.csv')):
-    if r['host'] == 'big':
+for r in csv.DictReader(open('$RESULTS_BASE/$IPERF_RUN_ID/cpu_summary.csv')):
+    if 'big' in r['host']:
         print(r['n_cpus'], r['source'])
 ")
     [ "$v" = "16 mpstat" ] || {
@@ -249,7 +246,7 @@ test_read_servers_handles_5000_lines_with_comments() {
                 printf 'host%05d\n' "$i"
             fi
         done
-    } > "$SERVER_LIST_FILE"
+    } > "$IPERF_SERVERS"
     local n
     n=$(read_servers | wc -l)
     # ~5000 lines minus comments (every 5th) and blanks (every 7th).

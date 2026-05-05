@@ -50,21 +50,19 @@ test_start_delay_env_propagates() {
     assert_contains "$RUN_OUT" "START_DELAY=120" || return 1
 }
 
-test_iperf_dir_env_propagates() {
+test_results_base_env_propagates() {
     local custom="$TEST_TMPDIR/from_env_var"
-    IPERF_DIR="$custom" run_orch help
-    assert_contains "$RUN_OUT" "IPERF_DIR=$custom" || return 1
+    RESULTS_BASE="$custom" run_orch help
+    assert_contains "$RUN_OUT" "RESULTS_BASE=$custom" || return 1
 }
 
 # ---- Env var actually changes behavior in subcommands --------------------
 
 test_iperf_port_env_propagates_into_generated_scripts() {
-    local src="$TEST_TMPDIR/srv.txt"
-    printf 'a\nb\n' > "$src"
-    IPERF_PORT=33333 run_orch init "$src" >/dev/null 2>&1
+    write_server_list a b >/dev/null
     IPERF_PORT=33333 run_orch create-scripts >/dev/null 2>&1
     local s
-    s=$(find "$IPERF_DIR/scripts" -name 'run_*.sh' | head -n1)
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
     grep -q '^PORT=33333$' "$s" || {
         echo "PORT not propagated to generated script" >&2
         return 1
@@ -72,22 +70,18 @@ test_iperf_port_env_propagates_into_generated_scripts() {
 }
 
 test_iperf_duration_env_propagates_into_generated_scripts() {
-    local src="$TEST_TMPDIR/srv.txt"
-    printf 'a\nb\n' > "$src"
-    IPERF_DURATION=42 run_orch init "$src" >/dev/null 2>&1
+    write_server_list a b >/dev/null
     IPERF_DURATION=42 run_orch create-scripts >/dev/null 2>&1
     local s
-    s=$(find "$IPERF_DIR/scripts" -name 'run_*.sh' | head -n1)
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
     grep -q '^DURATION=42$' "$s" || return 1
 }
 
 test_iperf_parallel_env_propagates_into_generated_scripts() {
-    local src="$TEST_TMPDIR/srv.txt"
-    printf 'a\nb\n' > "$src"
-    IPERF_PARALLEL=7 run_orch init "$src" >/dev/null 2>&1
+    write_server_list a b >/dev/null
     IPERF_PARALLEL=7 run_orch create-scripts >/dev/null 2>&1
     local s
-    s=$(find "$IPERF_DIR/scripts" -name 'run_*.sh' | head -n1)
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
     grep -q '^PARALLEL=7$' "$s" || return 1
 }
 
@@ -114,9 +108,7 @@ test_iperf_jobs_env_caps_concurrency() {
 
 test_remote_dir_env_propagates_to_distribute() {
     install_fake_ssh
-    local src="$TEST_TMPDIR/srv.txt"
-    printf 'a\n' > "$src"
-    PATH="$FAKE_BIN:$PATH" run_orch init "$src" >/dev/null 2>&1
+    write_server_list a >/dev/null
     PATH="$FAKE_BIN:$PATH" run_orch create-scripts >/dev/null 2>&1
     : > "$FAKE_SSH_LOG"
     REMOTE_DIR=/from-env-var/remote PATH="$FAKE_BIN:$PATH" run_orch distribute-scripts >/dev/null
@@ -135,8 +127,8 @@ echo "PY_ENV_MARKER" >&2
 exec python3 "$@"
 EOF
     chmod +x "$fakepy"
-    mkdir -p "$IPERF_DIR/results"
-    cat > "$IPERF_DIR/results/iperf_test_a_to_b.log" <<'EOF'
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
@@ -211,7 +203,7 @@ run_test test_iperf_parallel_env_propagates
 run_test test_iperf_jobs_env_propagates
 run_test test_ssh_user_env_propagates
 run_test test_start_delay_env_propagates
-run_test test_iperf_dir_env_propagates
+run_test test_results_base_env_propagates
 run_test test_iperf_port_env_propagates_into_generated_scripts
 run_test test_iperf_duration_env_propagates_into_generated_scripts
 run_test test_iperf_parallel_env_propagates_into_generated_scripts

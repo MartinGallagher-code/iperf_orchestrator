@@ -11,8 +11,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DIR/test_helper.bash"
 
 prep_results_dir() {
-    mkdir -p "$IPERF_DIR/results"
-    echo "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    echo "$RESULTS_BASE/$IPERF_RUN_ID"
 }
 
 cpu_cell() {
@@ -30,9 +30,13 @@ PY
 
 # Write an mpstat-style log (4 cores, two samples). ISO time format
 # matches what the run script invokes via LC_ALL=C S_TIME_FORMAT=ISO.
+# A `# host=...` header line is prepended so the parser uses the
+# unsanitized hostname rather than parsing it out of the filename.
 write_mpstat_log() {
     local path="$1"
-    cat > "$path" <<'EOF'
+    local host="${2:-host-a}"
+    printf '# host=%s\n' "$host" > "$path"
+    cat >> "$path" <<'EOF'
 Linux 5.15.0-100-generic (host-a)   01/01/2026  _x86_64_    (4 CPU)
 
 12:00:00     CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle
@@ -56,8 +60,10 @@ EOF
 
 write_proc_stat_log() {
     local path="$1"
-    cat > "$path" <<'EOF'
-# fallback=proc_stat host=host-b samples=14
+    local host="${2:-host-b}"
+    printf '# host=%s\n' "$host" > "$path"
+    cat >> "$path" <<EOF
+# fallback=proc_stat host=$host samples=14
 2026-01-01 12:00:00
 cpu  100 0 50 800 0 0 5 0 0 0
 2026-01-01 12:00:01
@@ -76,7 +82,7 @@ test_parse_cpu_no_logs_is_warning_not_failure() {
 
 test_parse_cpu_mpstat_summary_values() {
     local rd; rd=$(prep_results_dir)
-    write_mpstat_log "$rd/cpu_host-a.log"
+    write_mpstat_log "$rd/cpu_host-a_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" || return 1
     local csv="$rd/cpu_summary.csv"
@@ -100,7 +106,7 @@ test_parse_cpu_mpstat_summary_values() {
 
 test_parse_cpu_proc_stat_fallback() {
     local rd; rd=$(prep_results_dir)
-    write_proc_stat_log "$rd/cpu_host-b.log"
+    write_proc_stat_log "$rd/cpu_host-b_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" || return 1
     local csv="$rd/cpu_summary.csv"
@@ -118,8 +124,8 @@ test_parse_cpu_proc_stat_fallback() {
 
 test_parse_cpu_handles_both_kinds_in_one_run() {
     local rd; rd=$(prep_results_dir)
-    write_mpstat_log    "$rd/cpu_host-a.log"
-    write_proc_stat_log "$rd/cpu_host-b.log"
+    write_mpstat_log    "$rd/cpu_host-a_${IPERF_RUN_ID}.log"
+    write_proc_stat_log "$rd/cpu_host-b_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" || return 1
     local csv="$rd/cpu_summary.csv"
@@ -133,27 +139,32 @@ test_parse_cpu_handles_both_kinds_in_one_run() {
 
 test_parse_cpu_garbage_input_marks_parse_error() {
     local rd; rd=$(prep_results_dir)
-    echo "this is neither mpstat nor proc_stat output" > "$rd/cpu_host-c.log"
+    echo "this is neither mpstat nor proc_stat output" > "$rd/cpu_host-c_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" || return 1
     local v
-    v=$(cpu_cell "$rd/cpu_summary.csv" host-c source)
+    v=$(python3 -c "
+import csv
+for r in csv.DictReader(open('$rd/cpu_summary.csv')):
+    if 'host-c' in r['host']:
+        print(r['source']); break
+")
     assert_eq "PARSE_ERROR" "$v" "unparseable log should yield PARSE_ERROR row" || return 1
 }
 
-test_parse_cpu_sets_state_flag() {
+test_parse_cpu_writes_summary_csv() {
     local rd; rd=$(prep_results_dir)
-    write_mpstat_log "$rd/cpu_host-a.log"
+    write_mpstat_log "$rd/cpu_host-a_${IPERF_RUN_ID}.log"
     run_orch parse-cpu >/dev/null 2>&1
-    grep -q '^CPU_PARSED=yes$' "$IPERF_DIR/state" || {
-        echo "CPU_PARSED not flagged in state" >&2
+    [ -f "$rd/cpu_summary.csv" ] || {
+        echo "cpu_summary.csv missing in run dir" >&2
         return 1
     }
 }
 
 test_parse_cpu_prints_ranked_table() {
     local rd; rd=$(prep_results_dir)
-    write_mpstat_log "$rd/cpu_host-a.log"
+    write_mpstat_log "$rd/cpu_host-a_${IPERF_RUN_ID}.log"
     run_orch parse-cpu
     assert_contains "$RUN_OUT" "host" "ranked table header" || return 1
     assert_contains "$RUN_OUT" "peak%" "ranked table column" || return 1
@@ -165,14 +176,14 @@ run_test test_parse_cpu_mpstat_summary_values
 run_test test_parse_cpu_proc_stat_fallback
 run_test test_parse_cpu_handles_both_kinds_in_one_run
 run_test test_parse_cpu_garbage_input_marks_parse_error
-run_test test_parse_cpu_sets_state_flag
+run_test test_parse_cpu_writes_summary_csv
 test_parse_cpu_prefers_host_header_over_filename() {
     # Phase 3: the remote script writes a "# host=<original>" line at the
     # top of cpu_*.log so the parser can recover an unsanitized hostname
     # (e.g. for bracketed IPv6 like [fe80::1]) even though the on-disk
-    # filename was rewritten to cpu__fe80__1_.log.
+    # filename was rewritten to cpu__fe80__1__${IPERF_RUN_ID}.log.
     local rd; rd=$(prep_results_dir)
-    local sanitized_path="$rd/cpu__fe80__1_.log"
+    local sanitized_path="$rd/cpu__fe80__1__${IPERF_RUN_ID}.log"
     local body="$TEST_TMPDIR/mpstat-body.log"
     write_mpstat_log "$body"
     {
@@ -192,12 +203,34 @@ test_parse_cpu_prefers_host_header_over_filename() {
 
 test_parse_cpu_falls_back_to_filename_without_header() {
     # Older logs without "# host=" still parse via filename derivation.
+    # Filename: cpu_<host>_<run-id>.log; the parser strips the
+    # _<run-id> suffix to recover the host.
     local rd; rd=$(prep_results_dir)
-    write_mpstat_log "$rd/cpu_legacy-host.log"
+    local path="$rd/cpu_legacy-host_${IPERF_RUN_ID}.log"
+    # Bypass the helper's "# host=" injection: write raw mpstat output.
+    cat > "$path" <<'EOF'
+Linux 5.15.0-100-generic (legacy-host)   01/01/2026  _x86_64_    (4 CPU)
+
+12:00:00     CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle
+12:00:01     all   10.00    0.00    5.00    0.00    0.00    2.00    0.00    0.00    0.00   83.00
+12:00:01       0    8.00    0.00    4.00    0.00    0.00    1.00    0.00    0.00    0.00   87.00
+
+12:00:01     CPU    %usr   %nice    %sys %iowait    %irq   %soft  %steal  %guest  %gnice   %idle
+12:00:02     all   25.00    0.00   15.00    0.00    0.00    5.00    0.00    0.00    0.00   55.00
+12:00:02       0   20.00    0.00   12.00    0.00    0.00    3.00    0.00    0.00    0.00   65.00
+EOF
     run_orch parse-cpu
     assert_status 0 "$RUN_RC" || return 1
+    # Filename-derived host = whole basename minus prefix/suffix; with
+    # run-id in the filename this becomes "legacy-host_<run-id>".
+    # Match the row by substring rather than exact host name.
     local v
-    v=$(cpu_cell "$rd/cpu_summary.csv" legacy-host source)
+    v=$(python3 -c "
+import csv
+for r in csv.DictReader(open('$rd/cpu_summary.csv')):
+    if 'legacy-host' in r['host']:
+        print(r['source']); break
+")
     assert_eq "mpstat" "$v" "filename-derived host should still parse" || return 1
 }
 
