@@ -1163,6 +1163,14 @@ _worker_start_server() {
     # The server log filename embeds both host and run-id so multiple
     # hosts whose $REMOTE_DIR is on a shared filesystem (e.g. NFS
     # home) don't overwrite each other.
+    # iperf -s -D is iperf2's built-in daemon mode. The parent does the
+    # bind, forks the child, and exits with a meaningful return code:
+    # zero if bind succeeded, non-zero if it didn't. We trust that
+    # exit status -- a post-start `pgrep` verification we used to do
+    # turned out to be fragile because some iperf2 builds rewrite the
+    # daemon's argv after daemonization (so the strict pattern stops
+    # matching) and false-positives back to the orchestrator as
+    # "did not stay running" while iperf is in fact serving fine.
     if ssh_run "$host" "
         if ! mkdir -p '$REMOTE_DIR' 2>&1; then
             echo 'iperf-orchestrator: cannot create $REMOTE_DIR on remote' >&2
@@ -1172,10 +1180,10 @@ _worker_start_server() {
         sleep 1
         iperf -s -D -p $IPERF_PORT > '$server_log_remote' 2>&1
         rc=\$?
-        if [ \$rc -eq 0 ] && pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null; then
+        if [ \$rc -eq 0 ]; then
             exit 0
         fi
-        echo \"iperf-orchestrator: iperf -s -D failed (rc=\$rc) or did not stay running.\" >&2
+        echo \"iperf-orchestrator: iperf -s -D failed (rc=\$rc).\" >&2
         if [ -s '$server_log_remote' ]; then
             echo '--- remote $server_log_remote (tail) ---' >&2
             tail -n 20 '$server_log_remote' >&2
@@ -1183,7 +1191,7 @@ _worker_start_server() {
         else
             # Empty log is the classic non-interactive PATH symptom:
             # the shell failed to even exec iperf, so nothing was written.
-            echo '(remote iperf_server.log is empty)' >&2
+            echo '(remote server log is empty)' >&2
             echo \"remote PATH=\$PATH\" >&2
             if ! command -v iperf >/dev/null 2>&1; then
                 echo 'iperf is not on the non-interactive PATH; fix the remote login PATH (e.g. /etc/environment) or symlink iperf into /usr/local/bin' >&2
