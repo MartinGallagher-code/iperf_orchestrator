@@ -130,9 +130,8 @@ case "$remote_cmd" in
         touch "$FAKE_BIN/iperf_running_$host"
         exit 0
         ;;
-    *"! pgrep"*)
-        # cmd_stop_servers: pkill + sleep + ! pgrep. Clear the flag
-        # then return 0 (success means no iperf running).
+    *"pkill -f"*"^iperf -s"*)
+        # cmd_stop_servers: pkill the iperf -s daemon. Clear the flag.
         rm -f "$FAKE_BIN/iperf_running_$host"
         exit 0
         ;;

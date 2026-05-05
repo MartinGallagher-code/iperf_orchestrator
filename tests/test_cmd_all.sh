@@ -160,9 +160,9 @@ test_cmd_all_runs_full_pipeline() {
     run_with_fakes --start-delay=0 --duration=1 -- all --keep-going
     local rd; rd=$(run_dir)
     [ -d "$rd" ] || { echo "no run dir" >&2; return 1; }
-    # Verify each pipeline step left its artifact behind.
-    [ -f "$rd/iperf_installed.txt" ] || { echo "missing iperf_installed.txt"; return 1; }
-    [ -f "$rd/iperf_running.txt" ]   || { echo "missing iperf_running.txt"; return 1; }
+    # check-iperf and check-servers print to stdout (no files); verify
+    # the rest of the pipeline left its artifacts.
+    assert_contains "$RUN_OUT" "INSTALLED" "check-iperf should report INSTALLED" || return 1
     find "$rd/scripts" -name 'run_*.sh' | grep -q . || { echo "missing generated scripts"; return 1; }
     find "$rd/logs" -name 'run_*.log' | grep -q . || { echo "missing per-host logs"; return 1; }
     [ -f "$rd/iperf_results.csv" ]   || { echo "missing iperf_results.csv"; return 1; }

@@ -331,8 +331,8 @@ read_servers() {
 # typos / URLs / whitespace-laden hostnames before we generate scripts
 # or fan out SSH connections.
 _validate_server_list() {
-    [ -n "$SERVER_LIST_FILE" ] || return 0
-    [ -f "$SERVER_LIST_FILE" ] || return 0
+    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
+        || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
     local cleaned
     cleaned=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
         "$SERVER_LIST_FILE" | grep -v '^$' || true)
@@ -1098,20 +1098,9 @@ _worker_check_iperf() {
 }
 
 cmd_check_iperf() {
-    # Buffered output via a temp file so parallel_hosts isn't piped
-    # through a subshell (a subshell would drop PARALLEL_FAILED).
-    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
-        || die "no server list. Pass --servers <file>"
-    local tmp
-    tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-check.XXXXXX")
-    log "Checking iperf2 + mpstat availability on all hosts (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_iperf > "$tmp"
-    cat "$tmp"
-    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
-        cp "$tmp" "$RESULTS_DIR/iperf_installed.txt"
-        log "Wrote $RESULTS_DIR/iperf_installed.txt"
-    fi
-    rm -f "$tmp"
+    _validate_server_list
+    log "Checking iperf2 + mpstat on every host..."
+    parallel_hosts _worker_check_iperf
 }
 
 #------------------------------------------------------------------------------
@@ -1129,100 +1118,22 @@ _worker_check_servers() {
 }
 
 cmd_check_servers() {
-    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
-        || die "no server list. Pass --servers <file>"
-    local tmp
-    tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-check.XXXXXX")
-    log "Checking iperf2 daemon status on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_servers > "$tmp"
-    cat "$tmp"
-    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
-        cp "$tmp" "$RESULTS_DIR/iperf_running.txt"
-        log "Wrote $RESULTS_DIR/iperf_running.txt"
-    fi
-    rm -f "$tmp"
+    _validate_server_list
+    log "Checking iperf2 daemon status on port $IPERF_PORT..."
+    parallel_hosts _worker_check_servers
 }
 
 #------------------------------------------------------------------------------
 _worker_start_server() {
     local host="$1"
-    local host_safe; host_safe=$(_sanitize_host "$host")
-    local errlog="$LOGS_DIR/start_${host_safe}.err"
-    local server_log_remote="$REMOTE_DIR/iperf_server_${host_safe}_${RUN_ID}.log"
-    # pkill -f scopes to "iperf -s -p $IPERF_PORT" so we don't disturb
-    # the user's unrelated iperf -c clients or iperf servers on other
-    # ports. The [i]perf trick keeps pgrep from matching its own argv.
-    #
-    # iperf -D is iperf2's built-in daemon mode: the parent binds the
-    # port, forks, and exits with a meaningful return code (non-zero if
-    # bind failed before fork). That is exactly the semantics we want,
-    # so we use it instead of nohup + & + disown -- which fakes the same
-    # thing but loses the bind error and is fragile across remote
-    # shells.
-    #
-    # The server log filename embeds both host and run-id so multiple
-    # hosts whose $REMOTE_DIR is on a shared filesystem (e.g. NFS
-    # home) don't overwrite each other.
-    # iperf -s -D is iperf2's built-in daemon mode. The parent does the
-    # bind, forks the child, and exits with a meaningful return code:
-    # zero if bind succeeded, non-zero if it didn't. We trust that
-    # exit status -- a post-start `pgrep` verification we used to do
-    # turned out to be fragile because some iperf2 builds rewrite the
-    # daemon's argv after daemonization (so the strict pattern stops
-    # matching) and false-positives back to the orchestrator as
-    # "did not stay running" while iperf is in fact serving fine.
-    if ssh_run "$host" "
-        if ! mkdir -p '$REMOTE_DIR' 2>&1; then
-            echo 'iperf-orchestrator: cannot create $REMOTE_DIR on remote' >&2
-            exit 1
-        fi
-        # The pattern is anchored with ^ so pkill matches the actual
-        # iperf process and NOT the parent bash running this script
-        # (whose /proc/PID/cmdline contains the literal pattern text).
-        # Same trick is used for stop-servers.
-        pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null || true
-        sleep 1
-        iperf -s -D -p $IPERF_PORT > '$server_log_remote' 2>&1
-        rc=\$?
-        if [ \$rc -eq 0 ]; then
-            exit 0
-        fi
-        echo \"iperf-orchestrator: iperf -s -D failed (rc=\$rc).\" >&2
-        if [ -s '$server_log_remote' ]; then
-            echo '--- remote $server_log_remote (tail) ---' >&2
-            tail -n 20 '$server_log_remote' >&2
-            echo '--- end ---' >&2
-        else
-            # Empty log is the classic non-interactive PATH symptom:
-            # the shell failed to even exec iperf, so nothing was written.
-            echo '(remote server log is empty)' >&2
-            echo \"remote PATH=\$PATH\" >&2
-            if ! command -v iperf >/dev/null 2>&1; then
-                echo 'iperf is not on the non-interactive PATH; fix the remote login PATH (e.g. /etc/environment) or symlink iperf into /usr/local/bin' >&2
-            fi
-        fi
-        exit 1
-    " 2>"$errlog"; then
-        log "  OK: $host"
-        rm -f "$errlog"   # nothing useful, drop it
-    else
-        warn "  FAILED to start on $host (see $errlog)"
-        return 1
-    fi
+    ssh_run "$host" "mkdir -p '$REMOTE_DIR' && iperf -s -D -p $IPERF_PORT"
 }
 
 cmd_start_servers() {
-    _ensure_run_id
     _validate_server_list
-    log "Starting iperf2 -s on port $IPERF_PORT on every host (parallel x$IPERF_JOBS)..."
-    log "Run ID: $RUN_ID"
+    log "Starting iperf2 -s on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_start_server
-
-    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        log "All iperf2 servers started"
-    else
-        warn "start-servers completed with ${#PARALLEL_FAILED[@]} failure(s)"
-    fi
+    [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "start-servers: ${#PARALLEL_FAILED[@]} failure(s)"
 }
 
 #------------------------------------------------------------------------------
@@ -1722,98 +1633,38 @@ cmd_collect_results() {
 #------------------------------------------------------------------------------
 _worker_stop_server() {
     local host="$1"
-    # Anchor the pkill pattern so it doesn't match the parent bash whose
-    # /proc/PID/cmdline contains the literal pattern text.
-    if ssh_run "$host" "pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null; sleep 0.5; ! pgrep -f '^iperf -s -p $IPERF_PORT\b' >/dev/null"; then
-        log "  stopped: $host"
-    else
-        warn "  $host still has iperf running"
-        return 1
-    fi
+    # Anchor with ^ so we don't match the bash running this script.
+    # `|| true` keeps "no matching process" from looking like a failure.
+    ssh_run "$host" "pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null; true"
 }
 
 cmd_stop_servers() {
     _validate_server_list
-    log "Stopping iperf2 servers on every host (parallel x$IPERF_JOBS)..."
+    log "Stopping iperf2 servers on port $IPERF_PORT..."
     parallel_hosts _worker_stop_server
-    if [ ${#PARALLEL_FAILED[@]} -ne 0 ]; then
-        warn "stop-servers had ${#PARALLEL_FAILED[@]} failure(s)"
-    fi
 }
 
 #------------------------------------------------------------------------------
-# cleanup modes:
-#   default:     remove only this run's files (iperf_*_<run>.log etc.)
-#   --all:       remove $REMOTE_DIR entirely (legacy behavior)
-# Both forms require --yes when invoked directly (cmd_all bypasses via
-# _IPERF_ORCH_INTERNAL=1).
-_worker_cleanup_run() {
+_worker_cleanup() {
     local host="$1"
-    local host_safe; host_safe=$(_sanitize_host "$host")
-    # Glob the run-id-suffixed files. Tolerant of an empty $REMOTE_DIR.
-    if ssh_run "$host" "
-        cd '$REMOTE_DIR' 2>/dev/null || exit 0
-        rm -f \
-            iperf_test_*_${RUN_ID}.log \
-            'iperf_server_${host_safe}_${RUN_ID}.log' \
-            'iperf_run_${host_safe}_${RUN_ID}.status' \
-            'cpu_${host_safe}_${RUN_ID}.log' \
-            'run_iperf_${host_safe}_${RUN_ID}.sh' \
-            '_results_${host_safe}_${RUN_ID}.tar.gz'
-    "; then
-        log "  cleaned: $host (run $RUN_ID)"
-    else
-        warn "  cleanup failed: $host"
-        return 1
-    fi
-}
-
-_worker_cleanup_all() {
-    local host="$1"
-    if ssh_run "$host" "rm -rf '$REMOTE_DIR'"; then
-        log "  cleaned: $host (full $REMOTE_DIR)"
-    else
-        warn "  cleanup failed: $host"
-        return 1
-    fi
+    ssh_run "$host" "rm -rf '$REMOTE_DIR'"
 }
 
 cmd_cleanup() {
-    local seen_yes=0 wipe_all=0 a
+    local seen_yes=0 a
     for a in "$@"; do
         case "$a" in
             --yes) seen_yes=1 ;;
-            --all) wipe_all=1 ;;
-            *) die "cleanup: unknown argument: $a (expected --yes / --all)" ;;
+            *) die "cleanup: unknown argument: $a (expected --yes)" ;;
         esac
     done
     if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ] && [ "$seen_yes" -ne 1 ]; then
-        if [ "$wipe_all" = "1" ]; then
-            err "cleanup --all will run 'rm -rf $REMOTE_DIR' on every host."
-        else
-            err "cleanup will remove this run's files from $REMOTE_DIR on every host."
-        fi
-        die "pass --yes to confirm (e.g. $0 cleanup --yes)"
+        die "cleanup will run 'rm -rf $REMOTE_DIR' on every host. Pass --yes to confirm."
     fi
     _validate_server_list
-    if [ "$wipe_all" = "1" ]; then
-        log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
-        parallel_hosts _worker_cleanup_all
-    else
-        # Need a RUN_ID to know what to scrub. If none was given, target
-        # the latest run.
-        if [ -z "$RUN_ID" ]; then
-            if [ -L "$RESULTS_BASE/latest" ]; then
-                RUN_ID=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
-            fi
-        fi
-        [ -n "$RUN_ID" ] || die "cleanup needs a run-id (pass --run-id <id> or --all)"
-        log "Removing run $RUN_ID files from $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
-        parallel_hosts _worker_cleanup_run
-    fi
-    if [ ${#PARALLEL_FAILED[@]} -ne 0 ]; then
-        warn "cleanup had ${#PARALLEL_FAILED[@]} failure(s)"
-    fi
+    log "Removing $REMOTE_DIR on every host..."
+    parallel_hosts _worker_cleanup
+    [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "cleanup: ${#PARALLEL_FAILED[@]} failure(s)"
 }
 
 #------------------------------------------------------------------------------
@@ -2861,20 +2712,11 @@ cmd_all() {
         esac
     done
 
-    # One run-id covers the whole pipeline so every artifact lands in
-    # the same results subdirectory.
-    _ensure_run_id
-    _validate_server_list
-
     # Stop iperf daemons across the fleet on Ctrl-C / SIGTERM.
     trap '_orchestrator_signal_cleanup' INT TERM
 
-    log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
-    log "Run ID: $RUN_ID"
-    log "Results dir: $RESULTS_DIR"
-
-    # Fail fast on missing local prereqs instead of crashing 90s into the
-    # pipeline at parse-csv / make-heatmap.
+    # Run doctor up front so missing local prereqs fail fast (before we
+    # touch any host or even check the server list).
     if ! cmd_doctor; then
         if [ "$keep_going" = "1" ]; then
             warn "doctor reported issues; continuing because --keep-going was passed"
@@ -2882,6 +2724,13 @@ cmd_all() {
             die "doctor reported issues; install missing tools or pass --keep-going"
         fi
     fi
+
+    _ensure_run_id
+    _validate_server_list
+
+    log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
+    log "Run ID: $RUN_ID"
+    log "Results dir: $RESULTS_DIR"
 
     _all_gate() {
         local step="$1"
@@ -2927,19 +2776,6 @@ cmd_all() {
         fi
     fi
 
-    # If any hosts lack mpstat, the parser falls back to /proc/stat
-    # (box-wide CPU only, no per-core). Surface this so users know why
-    # the heatmap's CPU-overlay annotations may look coarser.
-    local installed="$RESULTS_DIR/iperf_installed.txt"
-    if [ -f "$installed" ] && grep -q 'mpstat=no' "$installed"; then
-        local n_no
-        n_no=$(grep -c 'mpstat=no' "$installed")
-        echo
-        echo "Note: $n_no host(s) lack mpstat; CPU samples on those used"
-        echo "      /proc/stat fallback (box-wide only). Install sysstat for"
-        echo "      per-core data: apt install sysstat / dnf install sysstat"
-    fi
-
     trap - INT TERM
 }
 
@@ -2967,9 +2803,9 @@ EOF
             cat <<'EOF'
 check-iperf
     Probe every host for `iperf -v` (must report version 2) and `mpstat`.
-    Writes results/iperf_installed.txt with per-host status. Hosts
-    without iperf2 fail the run; missing mpstat is tolerated (CPU
-    parser falls back to /proc/stat for box-wide CPU only).
+    Prints one line per host. Hosts without iperf2 fail the run;
+    missing mpstat is tolerated (CPU parser falls back to /proc/stat
+    for box-wide CPU only).
 EOF
             ;;
         check-servers)

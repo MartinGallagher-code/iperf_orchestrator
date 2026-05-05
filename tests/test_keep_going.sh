@@ -85,11 +85,11 @@ test_cmd_all_dies_without_keep_going_when_doctor_fails() {
     run_with_fakes -- all
     assert_ne 0 "$RUN_RC" "cmd_all should die when doctor fails" || return 1
     assert_contains "$RUN_OUT" "doctor reported issues" || return 1
-    # No iperf_installed.txt should have been written: pipeline didn't reach check-iperf.
-    [ ! -f "$(run_dir)/iperf_installed.txt" ] || {
+    # Pipeline should NOT have reached check-iperf -> no INSTALLED line.
+    if echo "$RUN_OUT" | grep -q "INSTALLED"; then
         echo "doctor failure should have stopped cmd_all before check-iperf" >&2
         return 1
-    }
+    fi
 }
 
 test_cmd_all_continues_with_keep_going_when_doctor_fails() {
@@ -98,12 +98,10 @@ test_cmd_all_continues_with_keep_going_when_doctor_fails() {
         return 0
     fi
     prep_workflow a b
-    run_with_fakes --start-delay=0 --duration=1 -- all --keep-going >/dev/null 2>&1
-    # Pipeline should reach at least check-iperf, which writes a file.
-    [ -f "$(run_dir)/iperf_installed.txt" ] || {
-        echo "expected pipeline to continue past doctor with --keep-going" >&2
-        return 1
-    }
+    run_with_fakes --start-delay=0 --duration=1 -- all --keep-going
+    # Pipeline should reach check-iperf -> "INSTALLED" appears in output.
+    assert_contains "$RUN_OUT" "INSTALLED" \
+        "expected pipeline to continue past doctor with --keep-going" || return 1
 }
 
 # ---- Per-step gate behavior -----------------------------------------------
@@ -111,11 +109,9 @@ test_cmd_all_continues_with_keep_going_when_doctor_fails() {
 test_keep_going_continues_past_per_host_failure() {
     prep_workflow good bad
     echo "bad" > "$FAKE_BIN/unreachable"
-    run_with_fakes --start-delay=0 --duration=1 -- all --keep-going >/dev/null 2>&1
-    [ -f "$(run_dir)/iperf_installed.txt" ] || {
-        echo "expected check-iperf to write its output" >&2
-        return 1
-    }
+    run_with_fakes --start-delay=0 --duration=1 -- all --keep-going
+    assert_contains "$RUN_OUT" "INSTALLED" \
+        "expected check-iperf to run and report INSTALLED" || return 1
 }
 
 run_test test_keep_going_flag_is_recognized_by_cmd_all

@@ -94,11 +94,10 @@ test_stop_servers_kills_iperf_on_each_host() {
     done
 }
 
-test_cleanup_all_removes_remote_dir() {
+test_cleanup_removes_remote_dir() {
     prep_workflow a b
-    # cleanup --all wipes $REMOTE_DIR entirely; requires --yes when run
-    # directly (not via cmd_all).
-    run_with_fake_path cleanup --all --yes
+    # cleanup wipes $REMOTE_DIR; requires --yes when run directly.
+    run_with_fake_path cleanup --yes
     assert_status 0 "$RUN_RC" || return 1
     local rm_count
     rm_count=$(grep -c "rm -rf" "$FAKE_SSH_LOG")
@@ -144,7 +143,7 @@ run_test test_check_servers_reports_stopped_when_none_running
 run_test test_check_servers_reports_running_when_pgrep_finds_proc
 run_test test_start_servers_dispatches_per_host
 run_test test_stop_servers_kills_iperf_on_each_host
-run_test test_cleanup_all_removes_remote_dir
+run_test test_cleanup_removes_remote_dir
 run_test test_cleanup_without_yes_dies
 run_test test_check_iperf_uses_parallel_jobs
 run_test test_workflow_subcommands_are_idempotent
