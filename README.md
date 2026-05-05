@@ -19,10 +19,14 @@ EOF
 
 # 2. Initialize and distribute SSH keys
 ./iperf-orchestrator.sh init servers.txt
-./iperf-orchestrator.sh ssh-setup     # one-time; may prompt for passwords
+./iperf-orchestrator.sh ssh-setup            # default: prompt per host
+# ...or drive it non-interactively in parallel via expect:
+./iperf-orchestrator.sh --ask-password ssh-setup
+./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
 
-# 3. Run everything end-to-end
-./iperf-orchestrator.sh all
+# 3. Check local prerequisites, then run everything end-to-end
+./iperf-orchestrator.sh doctor
+./iperf-orchestrator.sh all                  # add --keep-going to soldier on past per-host failures
 ```
 
 Results land in `~/.iperf_orchestrator/results/`:
@@ -58,7 +62,10 @@ iperf3's server is single-threaded and accepts only one client at a time. A full
 ```
 SETUP:
   init <server_list>     Set the server list
-  ssh-setup              Generate (if needed) and distribute SSH keys
+  ssh-setup              Generate (if needed) and distribute SSH keys.
+                         Default: per-host password prompt (sequential).
+                         With --password-file/--password-env/--ask-password:
+                         expect-driven, parallel, capped by --jobs.
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
 
@@ -76,9 +83,15 @@ ANALYSIS:
   parse-cpu              Parse mpstat samples into cpu_summary.csv
   make-pivot             Text pivot table at iperf_pivot.txt
   make-heatmap           Heatmap + bar chart at iperf_heatmap.png
+  results-summary        P50/P95/min/mean/max throughput + 5 slowest pairs
 
 CONVENIENCE:
-  all [MODE]             Run the full sequence end-to-end
+  all [MODE] [--keep-going] [--resume]
+                         Run the full sequence end-to-end. Runs `doctor` first.
+                         --keep-going continues past per-host failures.
+                         --resume skips pipeline steps already marked done in state.
+  doctor                 Probe local prerequisites (ssh tools, expect, python deps)
+                         and print install hints
   status                 Show what's been done so far
   help                   Show command help
 ```
@@ -99,7 +112,14 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
 | `IPERF_PARALLEL` | `--parallel`, `-P` | `1` | parallel streams within each test |
 | `IPERF_JOBS` | `--jobs`, `-j` | `16` | max concurrent SSH/SCP fan-out (capped concurrency) |
+| `IPERF_RETRIES` | `--retries` | `0` | extra retries for parallel-fan-out workers, with linear back-off |
+| `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
+| `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
+| `IPERF_PROGRESS` | — | `1` | live progress on stderr; set `0` to disable |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
+| `SSH_PASSWORD_FILE` | `--password-file` | — | path to a file with the SSH password (single line; `chmod 600`); enables expect-driven `ssh-setup` |
+| `SSH_PASSWORD_ENV` | `--password-env` | — | env var name to read the SSH password from; enables expect-driven `ssh-setup` |
+| `SSH_ASK_PASSWORD` | `--ask-password` | `no` | prompt once and reuse for every host; enables expect-driven `ssh-setup` |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
 | `IPERF_DIR` | `--iperf-dir` | `~/.iperf_orchestrator` | local working directory |
 | `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working directory |
@@ -112,6 +132,25 @@ Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`,
 The default of `16` keeps the orchestrator host's SSH agent and the per-host sshd happy on most fleets. Bump it (e.g. `--jobs 64`) when you have hundreds of hosts and the orchestrator's CPU/network can absorb it; lower it if `MaxStartups` on your sshds rejects connections.
 
 The actual `run-tests parallel` mode is *not* throttled by `--jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--jobs` only caps the setup/teardown fan-outs.
+
+#### Expect-driven, parallel `ssh-setup`
+
+By default `ssh-setup` is sequential and prompts you for a password per host. When you supply any of `--password-file`, `--password-env`, or `--ask-password`, the orchestrator drives `ssh-copy-id` non-interactively via `expect(1)` and runs the fan-out in parallel (capped by `--jobs`). On a 100-host fleet this turns ~15 minutes of typing into a handful of seconds. `expect` is required only when one of these password sources is set; `doctor` checks for it.
+
+Password-file mode is the recommended one for automation:
+
+```bash
+echo 'mypassword' > ~/.ssh-fleet-pw && chmod 600 ~/.ssh-fleet-pw
+./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
+```
+
+#### `--keep-going` and `--resume` for `all`
+
+`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). `all --resume` consults the pipeline state and skips steps already marked `yes`, which is what you want after killing a partial run and starting over.
+
+#### `--dry-run`, `--verbose`, `--quiet`
+
+`--dry-run` prints every SSH/SCP command without executing — useful for inspecting what `all` would do before unleashing it on a fleet. `--verbose` echoes every ssh/scp invocation as it runs; `--quiet` drops normal INFO logs and keeps only WARN/ERROR.
 
 ---
 
@@ -159,6 +198,9 @@ The bar chart annotates each host's bar with peak CPU. Three patterns to watch f
 
 ### Result collection
 For each host, one ssh + one scp + one local untar — instead of N-1 individual scp calls. At N=100 that's roughly 300 SSH/SCP operations across the whole pipeline instead of 5,000.
+
+### Hostname sanitization in filenames
+Server-list entries like `host.example.com`, `2001:db8::1`, or `user@10.0.0.1` are sanitized when used in filenames (`iperf_test_<src>_to_<dst>.log`, `cpu_<host>.log`, `run_<host>.sh`, the per-host tarballs). Slashes, colons, and `@` are replaced so the path is well-formed on every filesystem; the parser reverses the mapping when reading filenames back into the CSV. This means an IPv6 address or a `user@host` entry no longer produces broken paths or silently dropped logs.
 
 ### Heatmap auto-degradation
 Cell annotations, axis labels, and figure size adapt to N:
@@ -300,12 +342,12 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 ## Limitations and known gaps
 
-- **Other serial SSH loops (`start-servers`, `distribute-scripts`, `stop-servers`, `cleanup`, `check-iperf`, `check-servers`) iterate one host at a time.** At N=100 with ~1s per SSH, that's ~100s per command. Tolerable but not great — the fix is capped-concurrency parallel SSH (`xargs -P 20` or a bash job pool). Not implemented yet because doing it sloppily makes failure handling harder; doing it well adds 100+ lines.
-- **No retry on transient SSH failures.** If `start-servers` fails on one host, the orchestrator reports it and moves on. You can re-run the subcommand to pick up the stragglers, but there's no automatic retry.
 - **`sequential-pair` at N=100 takes ~14 hours.** The cleanest mode is also the slowest. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack all `N(N-1)/2` edges into ~N-1 rounds where every host has at most one flow per round). Not implemented; would be moderate complexity.
 - **Heatmap above ~60 hosts loses cell labels.** This is by design — they're unreadable at that density — but it means you have to read the colormap or the CSV for exact values.
 - **Asymmetric NIC speeds aren't auto-handled.** If half your fleet is 1G and half is 10G, the heatmap colormap is dominated by the 10G hosts and the 1G hosts all look very red. Acceptable for our use case ("uniform fleet"); for a heterogeneous fleet you'd want per-pair expected-bandwidth normalization.
 - **No UDP testing.** Fabric stress testing usually wants TCP because that's what real workloads do; if you specifically need UDP loss/jitter measurements, the iperf invocation in the generated run script needs `-u` and the parser needs to read different CSV columns.
+
+> **Resolved**: setup/teardown fan-out is now capped-concurrency parallel SSH (see `--jobs`); workers gain optional retries with linear back-off via `--retries`.
 
 ---
 
@@ -319,7 +361,11 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **Heatmap shows surprisingly low numbers everywhere.** Look at `cpu_summary.csv`. If `peak_total_pct` is near 100%, you're CPU-bound, not network-bound. Possible fixes: bigger hosts, more cores, RSS tuning, or run in `sequential-host` mode to see what each host can do without contention.
 
-**`make-heatmap` errors out with `Missing Python package`.** `pip install matplotlib numpy` (or your distro's equivalent). Only the `make-heatmap` step needs these — the other steps work without them.
+**`make-heatmap` errors out with `Missing Python package`.** `pip install matplotlib numpy` (or your distro's equivalent). Only the `make-heatmap` step needs these — the other steps work without them. Run `./iperf-orchestrator.sh doctor` to get a single report of every missing local prerequisite plus install hints.
+
+**`ssh-setup` says `expect: not found` after I passed `--password-file`.** Expect-driven `ssh-setup` requires `expect(1)` on the orchestrator host. Install it (`apt install expect` on Debian/Ubuntu, `dnf install expect` on RHEL family). Without a password source, `ssh-setup` falls back to its sequential per-host prompt and doesn't need expect.
+
+**A run aborted halfway and I want to pick up where it left off.** `./iperf-orchestrator.sh all --resume` consults `~/.iperf_orchestrator/state` and skips the steps already marked done. If the failure was on a single flaky host and you want to barrel past it instead, add `--keep-going`.
 
 ---
 
@@ -346,6 +392,36 @@ results/
   iperf_pivot.txt                   # text pivot
   iperf_heatmap.png                 # heatmap + bar chart
 ```
+
+---
+
+## Shell completions
+
+Tab-completion stubs for the subcommand and global flags live in `completions/`:
+
+```bash
+# bash
+source completions/iperf_orchestrator.bash
+# or install system-wide:
+sudo cp completions/iperf_orchestrator.bash /etc/bash_completion.d/
+
+# zsh
+fpath+=("$PWD/completions")
+autoload -Uz compinit && compinit
+```
+
+---
+
+## Tests
+
+The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `expect`-driven ssh-setup path, the `doctor` command, the `--keep-going`/`--resume` semantics on `all`, and a long tail of edge cases.
+
+```bash
+./tests/run_tests.sh                           # everything
+./tests/test_pair_assignment.sh                # one suite
+```
+
+The expect-integration suite drives the real `expect` interpreter (no mocks), so it requires `expect(1)` on the test host.
 
 ---
 
