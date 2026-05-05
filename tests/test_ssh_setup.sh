@@ -48,15 +48,9 @@ SHIM
     export HOME="$TEST_TMPDIR/home"
 }
 
-# Helper: prep a fresh server list and run init.
+# Helper: prep a fresh server list (no init in stateless mode).
 prep_servers() {
-    local src="$TEST_TMPDIR/srv.txt"
-    : > "$src"
-    local h
-    for h in "$@"; do
-        printf '%s\n' "$h" >> "$src"
-    done
-    PATH="$FAKE_BIN:$PATH" run_orch init "$src" >/dev/null 2>&1
+    write_server_list "$@" >/dev/null
 }
 
 run_with_fakes() {
@@ -77,10 +71,8 @@ test_ssh_setup_with_password_file_uses_expect() {
     local n
     n=$(wc -l < "$FAKE_BIN/expect_calls.log")
     assert_eq "3" "$n" "expect should run once per host" || return 1
-    grep -q '^SSH_KEYS_DISTRIBUTED=yes$' "$IPERF_DIR/state" || {
-        echo "SSH_KEYS_DISTRIBUTED not flagged" >&2
-        return 1
-    }
+    assert_contains "$RUN_OUT" "SSH keys distributed to all hosts" \
+        "expected success log line" || return 1
 }
 
 test_ssh_setup_password_file_missing_dies() {
@@ -192,7 +184,8 @@ test_ssh_setup_without_password_uses_interactive_ssh_copy_id() {
     local e
     e=$(wc -l < "$FAKE_BIN/expect_calls.log")
     assert_eq "0" "$e" "expect should NOT be invoked when no password source" || return 1
-    grep -q '^SSH_KEYS_DISTRIBUTED=yes$' "$IPERF_DIR/state" || return 1
+    assert_contains "$RUN_OUT" "SSH keys distributed to all hosts" \
+        "expected success log line" || return 1
 }
 
 # ---- --ask-password flag -------------------------------------------------
@@ -229,8 +222,8 @@ test_ssh_setup_does_not_pass_password_in_argv() {
 
 test_ssh_setup_dies_with_no_server_list() {
     install_fake_setup_tools
-    # Don't init.
-    run_with_fakes ssh-setup
+    unset IPERF_SERVERS
+    PATH="$FAKE_BIN:$PATH" run_orch --servers /no/such.txt ssh-setup
     assert_ne 0 "$RUN_RC" "ssh-setup should fail without a server list" || return 1
 }
 

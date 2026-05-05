@@ -33,6 +33,7 @@ test_ts_returns_iso8601_like_format() {
 
 test_log_writes_to_stdout_and_logfile() {
     source_orch
+    _ensure_run_id
     local msg="hello-from-log-$$"
     log "$msg" >"$TEST_TMPDIR/log.out"
     grep -qF "$msg" "$TEST_TMPDIR/log.out" || {
@@ -46,6 +47,7 @@ test_log_writes_to_stdout_and_logfile() {
 
 test_warn_goes_to_stderr_and_logfile() {
     source_orch
+    _ensure_run_id
     local msg="warning-from-test-$$"
     warn "$msg" 2>"$TEST_TMPDIR/warn.err"
     grep -qF "$msg" "$TEST_TMPDIR/warn.err" || {
@@ -59,6 +61,7 @@ test_warn_goes_to_stderr_and_logfile() {
 
 test_err_goes_to_stderr_and_logfile() {
     source_orch
+    _ensure_run_id
     local msg="err-from-test-$$"
     err "$msg" 2>"$TEST_TMPDIR/err.err"
     grep -qF "$msg" "$TEST_TMPDIR/err.err" || return 1
@@ -67,6 +70,7 @@ test_err_goes_to_stderr_and_logfile() {
 
 test_die_exits_nonzero_and_logs_error() {
     source_orch
+    _ensure_run_id
     # Must run in a subshell so the exit doesn't kill the test.
     (
         die "fatal-test-$$" 2>"$TEST_TMPDIR/die.err"
@@ -91,16 +95,15 @@ test_build_host_idx_populates_zero_based_indices() {
 }
 
 test_build_host_idx_skips_blank_lines() {
-    source_orch
-    cat > "$SERVER_LIST_FILE" <<'EOF'
+    cat > "$IPERF_SERVERS" <<'EOF'
 host-a
 
 host-b
 EOF
+    source_orch
     build_host_idx
     [ "${HOST_IDX[host-a]}" = "0" ] || return 1
     [ "${HOST_IDX[host-b]}" = "1" ] || return 1
-    # No blank-string key.
     if [ -n "${HOST_IDX[''+]:-}" ]; then
         echo "blank line ended up in HOST_IDX" >&2
         return 1
@@ -171,6 +174,7 @@ test_ssh_run_interactive_uses_non_batch_opts() {
 
 test_log_includes_timestamp_prefix() {
     source_orch
+    _ensure_run_id
     local msg="logfmt-$$"
     log "$msg" >"$TEST_TMPDIR/log.out"
     # Format: "[YYYY-MM-DD HH:MM:SS] msg"

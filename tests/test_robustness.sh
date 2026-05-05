@@ -60,29 +60,29 @@ test_read_servers_handles_long_input() {
 # ---- Parser robustness ---------------------------------------------------
 
 test_parse_csv_ignores_logs_in_subdirectories() {
-    mkdir -p "$IPERF_DIR/results/sub"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID/sub"
     # iperf_test_*.log under a subdirectory should NOT be picked up.
-    cat > "$IPERF_DIR/results/sub/iperf_test_x_to_y.log" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/sub/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=x pair_b=y duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
 EOF
     # Top-level legitimate log to compare against.
-    cat > "$IPERF_DIR/results/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
 EOF
     run_orch parse-csv >/dev/null 2>&1
     local n
-    n=$(($(wc -l < "$IPERF_DIR/results/iperf_results.csv") - 1))
+    n=$(($(wc -l < "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv") - 1))
     assert_eq "2" "$n" "should only pick up the top-level log (2 rows)" || return 1
 }
 
 test_parse_csv_handles_log_with_only_comments() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     # All-comment log file (no CSV body).
-    cat > "$IPERF_DIR/results/iperf_test_x_to_y.log" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_x_to_y_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=x pair_b=y duration=10 port=5001 parallel=1 test_start=1700000000
 # additional comment lines
 # only here for context
@@ -90,14 +90,14 @@ EOF
     run_orch parse-csv >/dev/null 2>&1
     # Should produce 2 NO_SUMMARY rows.
     local n
-    n=$(grep -c NO_SUMMARY "$IPERF_DIR/results/iperf_results.csv")
+    n=$(grep -c NO_SUMMARY "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv")
     assert_eq "2" "$n" "comment-only log should give 2 NO_SUMMARY rows" || return 1
 }
 
 test_parse_csv_handles_corrupt_csv_lines_gracefully() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     # Mix of valid and broken CSV lines.
-    cat > "$IPERF_DIR/results/iperf_test_a_to_b.log" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
 # pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000
 this,is,not,a,valid,csv,row,really,really
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,bad-interval,1250000000,1000000000
@@ -110,7 +110,7 @@ EOF
     local v
     v=$(python3 -c "
 import csv
-for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
+for r in csv.DictReader(open('$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv')):
     if r['source']=='a' and r['target']=='b':
         print(r['mbps'])
 ")
@@ -119,20 +119,20 @@ for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
 
 test_parse_csv_handles_very_large_log() {
     # 200 KB of garbage + 2 valid summaries should still parse.
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     {
         echo "# pair_a=a pair_b=b duration=10 port=5001 parallel=1 test_start=1700000000"
         # Dump 200 KB of noise.
         head -c 200000 /dev/urandom | base64 | head -n 4000
         echo "20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000"
         echo "20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000"
-    } > "$IPERF_DIR/results/iperf_test_a_to_b.log"
+    } > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_test_a_to_b_${IPERF_RUN_ID}.log"
     run_orch parse-csv
     assert_status 0 "$RUN_RC" || return 1
     local v
     v=$(python3 -c "
 import csv
-for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
+for r in csv.DictReader(open('$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv')):
     if r['source']=='a' and r['target']=='b':
         print(r['mbps'])
 ")
@@ -141,38 +141,12 @@ for r in csv.DictReader(open('$IPERF_DIR/results/iperf_results.csv')):
 
 # ---- Concurrency / atomicity --------------------------------------------
 
-test_concurrent_set_state_does_not_corrupt_file() {
-    # Two writers racing on STATE_FILE. Each set_state call writes to
-    # STATE_FILE.tmp then atomically renames into place, so the file
-    # never ends up half-written. With set -u and tee-style appends
-    # this is also what the README claims.
-    source_orch
-    # Run 20 concurrent set_state operations.
-    local i pids=()
-    for i in $(seq 1 20); do
-        ( set_state "KEY$i" "value$i" ) &
-        pids+=("$!")
-    done
-    for p in "${pids[@]}"; do
-        wait "$p"
-    done
-    # The file is internally consistent (line-per-key, no partial lines).
-    local bad
-    bad=$(grep -v '^[A-Z][A-Z0-9_]*=' "$STATE_FILE" | wc -l)
-    assert_eq "0" "$bad" "no malformed lines after concurrent writes" || return 1
-    # Final file is at least readable.
-    [ -s "$STATE_FILE" ] || {
-        echo "state file empty after concurrent writes" >&2
-        return 1
-    }
-}
-
 # ---- Empty-but-existing server list -------------------------------------
 
 test_parallel_hosts_users_succeed_quietly_with_empty_server_list() {
     # The server list FILE exists but contains zero hosts. parallel_hosts
     # users should treat that as "nothing to do", not a failure.
-    : > "$IPERF_DIR/servers.list"
+    : > "$IPERF_SERVERS"
     install_fake_ssh
     PATH="$FAKE_BIN:$PATH" run_orch check-iperf
     assert_status 0 "$RUN_RC" "empty list -> exit 0 (nothing to do)" || return 1
@@ -185,30 +159,30 @@ test_parallel_hosts_users_succeed_quietly_with_empty_server_list() {
 # ---- Pivot/heatmap edge cases -------------------------------------------
 
 test_make_pivot_handles_single_host_csv_gracefully() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     # Self-test row (same source and target). Pivot should still
     # render without crashing -- diagonal is just '-'.
-    cat > "$IPERF_DIR/results/iperf_results.csv" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<'EOF'
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
-20260101120000,a,a,OK,TCP,10,1,0,0,0,54321,5001,a,a,iperf_test_a_to_a.log,
+20260101120000,a,a,OK,TCP,10,1,0,0,0,54321,5001,a,a,iperf_test_a_to_a_${IPERF_RUN_ID}.log,
 EOF
     run_orch make-pivot
     assert_status 0 "$RUN_RC" || return 1
-    [ -f "$IPERF_DIR/results/iperf_pivot.txt" ] || return 1
+    [ -f "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" ] || return 1
 }
 
 test_make_pivot_handles_all_missing_data() {
-    mkdir -p "$IPERF_DIR/results"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     # Two pairs, both with empty mbps (never measured).
-    cat > "$IPERF_DIR/results/iperf_results.csv" <<'EOF'
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<'EOF'
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
-,a,b,DIRECTION_MISSING,TCP,10,1,,,,,,a,b,iperf_test_a_to_b.log,no data
-,b,a,DIRECTION_MISSING,TCP,10,1,,,,,,a,b,iperf_test_a_to_b.log,no data
+,a,b,DIRECTION_MISSING,TCP,10,1,,,,,,a,b,iperf_test_a_to_b_${IPERF_RUN_ID}.log,no data
+,b,a,DIRECTION_MISSING,TCP,10,1,,,,,,a,b,iperf_test_a_to_b_${IPERF_RUN_ID}.log,no data
 EOF
     run_orch make-pivot
     assert_status 0 "$RUN_RC" "pivot should not crash on all-NaN data" || return 1
     # Output should mark every cell as '-'
-    local pivot="$IPERF_DIR/results/iperf_pivot.txt"
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     grep -q "Per-source mean outgoing" "$pivot" || return 1
 }
 
@@ -234,7 +208,6 @@ run_test test_parse_csv_ignores_logs_in_subdirectories
 run_test test_parse_csv_handles_log_with_only_comments
 run_test test_parse_csv_handles_corrupt_csv_lines_gracefully
 run_test test_parse_csv_handles_very_large_log
-run_test test_concurrent_set_state_does_not_corrupt_file
 run_test test_parallel_hosts_users_succeed_quietly_with_empty_server_list
 run_test test_make_pivot_handles_single_host_csv_gracefully
 run_test test_make_pivot_handles_all_missing_data

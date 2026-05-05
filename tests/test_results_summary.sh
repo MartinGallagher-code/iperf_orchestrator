@@ -9,8 +9,8 @@ source "$DIR/test_helper.bash"
 
 # Build a synthetic results CSV with controllable mbps values.
 write_results_csv() {
-    local csv="$IPERF_DIR/results/iperf_results.csv"
-    mkdir -p "$IPERF_DIR/results"
+    local csv="$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv"
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     {
         echo "source,target,mbps,error,filename"
         # 10 measured rows: 100, 200, ... 1000 Mbps
@@ -20,7 +20,7 @@ write_results_csv() {
                 "$v" "$v" "$v" "$v" "$v"
         done
         # One blank-mbps row should be ignored
-        printf 'sX,tX,,READ_ERROR,iperf_test_sX_to_tX.log\n'
+        printf 'sX,tX,,READ_ERROR,iperf_test_sX_to_tX_${IPERF_RUN_ID}.log\n'
     } > "$csv"
 }
 
@@ -39,7 +39,9 @@ test_results_summary_reports_basic_stats() {
 }
 
 test_results_summary_dies_without_csv() {
-    # No CSV present
+    # Run dir exists but no CSV inside.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
     run_orch results-summary
     assert_status 1 "$RUN_RC" "should die when CSV missing" || return 1
     assert_contains "$RUN_OUT" "No CSV" "should explain missing CSV" || return 1

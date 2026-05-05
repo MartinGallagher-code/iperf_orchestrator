@@ -83,13 +83,12 @@ test_ssh_user_override() {
     assert_contains "$RUN_OUT" "SSH_USER=alice" "usage should reflect ssh user" || return 1
 }
 
-test_iperf_dir_override_is_used() {
-    # When --iperf-dir is given, status output should reference that dir.
-    local custom="$TEST_TMPDIR/custom-iperf-dir"
-    run_orch --iperf-dir "$custom" status
-    assert_status 0 "$RUN_RC" "status with --iperf-dir should succeed" || return 1
+test_output_override_is_used() {
+    # When --output is given, status output should reference that dir.
+    local custom="$TEST_TMPDIR/custom-output-dir"
+    run_orch --output "$custom" status
+    assert_status 0 "$RUN_RC" "status with --output should succeed" || return 1
     assert_contains "$RUN_OUT" "$custom" "status should mention the custom dir" || return 1
-    [ -d "$custom" ] || { echo "expected $custom to be created" >&2; return 1; }
 }
 
 test_double_dash_terminates_flag_parsing() {
@@ -129,7 +128,7 @@ run_test test_short_flag_jobs
 run_test test_short_flag_duration
 run_test test_short_flag_parallel
 run_test test_ssh_user_override
-run_test test_iperf_dir_override_is_used
+run_test test_output_override_is_used
 run_test test_double_dash_terminates_flag_parsing
 run_test test_env_var_used_when_no_flag
 run_test test_flag_overrides_env

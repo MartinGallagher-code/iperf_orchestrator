@@ -51,23 +51,17 @@ SHIM
 # path of the generated script for the named host.
 generate_scripts_for() {
     local hosts=("$@")
-    local src="$TEST_TMPDIR/srv.txt"
-    : > "$src"
-    local h
-    for h in "${hosts[@]}"; do
-        printf '%s\n' "$h" >> "$src"
-    done
-    run_orch init "$src" >/dev/null 2>&1
-    # Use --duration=1 so generated scripts run for ~5s each rather
-    # than the 14s default; the sampler runs DURATION+4 seconds.
+    write_server_list "${hosts[@]}" >/dev/null
     run_orch --duration=1 create-scripts >/dev/null 2>&1
 }
+
+scripts_dir() { echo "$RESULTS_BASE/$IPERF_RUN_ID/scripts"; }
 
 # Run the generated script for $host in a working dir, with $FAKE_BIN
 # (which has fake iperf etc.) on PATH.
 run_remote_script() {
     local host="$1"; shift
-    local script="$IPERF_DIR/scripts/run_${host}.sh"
+    local script="$(scripts_dir)/run_${host}_${IPERF_RUN_ID}.sh"
     [ -f "$script" ] || { echo "missing script for $host" >&2; return 2; }
     local workdir="$TEST_TMPDIR/work-$host"
     mkdir -p "$workdir"
@@ -88,7 +82,7 @@ test_generated_script_executes_iperf_for_each_target() {
     # Determine which host has clients (depends on parity rule).
     local script
     for h in src target1 target2; do
-        if grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_$h.sh" >/dev/null; then
+        if grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh" >/dev/null; then
             script="$h"; break
         fi
     done
@@ -118,7 +112,7 @@ test_generated_script_writes_pair_header_into_log() {
     install_fake_iperf
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_src.sh" >/dev/null \
+    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
         || script="dst"
     run_remote_script "$script" 0
     # Look for a "# pair_a=..." header in any of the generated logs.
@@ -139,22 +133,22 @@ test_generated_script_falls_back_to_proc_stat_when_mpstat_missing() {
     # PATH so mpstat truly isn't found.
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_src.sh" >/dev/null \
+    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
         || script="dst"
     local workdir="$TEST_TMPDIR/work-fallback"
     mkdir -p "$workdir"
-    cp "$IPERF_DIR/scripts/run_$script.sh" "$workdir/run_iperf.sh"
+    cp "$(scripts_dir)/run_${script}_${IPERF_RUN_ID}.sh" "$workdir/run_iperf.sh"
     chmod +x "$workdir/run_iperf.sh"
     # Restricted PATH: only fake bin + system core so coreutils still work
     # but mpstat is unavailable.
     PATH="$FAKE_BIN:/usr/bin:/bin" bash "$workdir/run_iperf.sh" 0 >"$workdir/out" 2>&1
-    [ -f "$workdir/cpu_$script.log" ] || {
-        echo "expected cpu_$script.log to be created" >&2
+    [ -f "$workdir/cpu_${script}_${IPERF_RUN_ID}.log" ] || {
+        echo "expected cpu_${script}_${IPERF_RUN_ID}.log to be created" >&2
         return 1
     }
-    grep -q '^# fallback=proc_stat' "$workdir/cpu_$script.log" || {
+    grep -q '^# fallback=proc_stat' "$workdir/cpu_${script}_${IPERF_RUN_ID}.log" || {
         echo "fallback marker not present in cpu log" >&2
-        head "$workdir/cpu_$script.log" >&2
+        head "$workdir/cpu_${script}_${IPERF_RUN_ID}.log" >&2
         return 1
     }
 }
@@ -164,19 +158,19 @@ test_generated_script_uses_mpstat_when_available() {
     install_fake_mpstat
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_src.sh" >/dev/null \
+    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
         || script="dst"
     run_remote_script "$script" 0
-    [ -f "$REMOTE_WORKDIR/cpu_$script.log" ] || {
+    [ -f "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" ] || {
         echo "expected cpu log file" >&2
         return 1
     }
     # mpstat path produces a "%idle" line; fallback uses fallback marker.
-    grep -q "%idle" "$REMOTE_WORKDIR/cpu_$script.log" || {
+    grep -q "%idle" "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" || {
         echo "expected mpstat output (with %idle) in cpu log" >&2
         return 1
     }
-    grep -q '^# fallback=' "$REMOTE_WORKDIR/cpu_$script.log" && {
+    grep -q '^# fallback=' "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" && {
         echo "should NOT have fallback marker when mpstat is on PATH" >&2
         return 1
     }
@@ -188,7 +182,7 @@ test_generated_script_zero_start_time_no_sleep() {
     install_fake_mpstat
     generate_scripts_for a b
     local script="a"
-    grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_a.sh" >/dev/null || script="b"
+    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_a_${IPERF_RUN_ID}.sh" >/dev/null || script="b"
     local before after
     before=$(date +%s)
     run_remote_script "$script" 0
@@ -210,7 +204,7 @@ test_generated_script_single_target_overrides_full_list() {
     local script
     for h in h0 h1 h2 h3; do
         local n
-        n=$(grep -E '^TARGETS=\(' "$IPERF_DIR/scripts/run_$h.sh" \
+        n=$(grep -E '^TARGETS=\(' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh" \
             | tr ' ' '\n' | grep -c '"')
         if [ "$n" -ge 4 ]; then  # at least 2 targets (4 quote chars)
             script="$h"; break
@@ -222,7 +216,7 @@ test_generated_script_single_target_overrides_full_list() {
     fi
     # Pick a single target that actually appears in this host's TARGETS=.
     local target
-    target=$(grep -E '^TARGETS=\(' "$IPERF_DIR/scripts/run_$script.sh" \
+    target=$(grep -E '^TARGETS=\(' "$(scripts_dir)/run_${script}_${IPERF_RUN_ID}.sh" \
              | tr ' ' '\n' | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
     [ -n "$target" ] || { echo "could not extract a target from script" >&2; return 1; }
 
@@ -231,8 +225,8 @@ test_generated_script_single_target_overrides_full_list() {
     local n
     n=$(find "$REMOTE_WORKDIR" -maxdepth 1 -name 'iperf_test_*.log' | wc -l)
     assert_eq "1" "$n" "SINGLE_TARGET should produce exactly one log" || return 1
-    [ -f "$REMOTE_WORKDIR/iperf_test_${script}_to_${target}.log" ] || {
-        echo "expected file iperf_test_${script}_to_${target}.log not found" >&2
+    [ -f "$REMOTE_WORKDIR/iperf_test_${script}_to_${target}_${IPERF_RUN_ID}.log" ] || {
+        echo "expected file iperf_test_${script}_to_${target}_${IPERF_RUN_ID}.log not found" >&2
         ls "$REMOTE_WORKDIR" >&2
         return 1
     }
@@ -243,18 +237,18 @@ test_generated_script_writes_status_file() {
     install_fake_mpstat
     generate_scripts_for x y
     local script="x"
-    grep -E '^TARGETS=\( "[^"]+"' "$IPERF_DIR/scripts/run_x.sh" >/dev/null || script="y"
+    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_x_${IPERF_RUN_ID}.sh" >/dev/null || script="y"
     run_remote_script "$script" 0
-    [ -f "$REMOTE_WORKDIR/iperf_run_$script.status" ] || {
-        echo "missing iperf_run_$script.status" >&2
+    [ -f "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" ] || {
+        echo "missing iperf_run_${script}_${IPERF_RUN_ID}.status" >&2
         return 1
     }
-    grep -q "^.*START $script ->" "$REMOTE_WORKDIR/iperf_run_$script.status" || {
+    grep -q "^.*START $script ->" "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" || {
         echo "status file missing START line" >&2
-        cat "$REMOTE_WORKDIR/iperf_run_$script.status" >&2
+        cat "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" >&2
         return 1
     }
-    grep -q "DONE$" "$REMOTE_WORKDIR/iperf_run_$script.status" || {
+    grep -q "DONE$" "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" || {
         echo "status file missing DONE line" >&2
         return 1
     }
@@ -270,7 +264,7 @@ test_generated_script_lone_host_writes_only_cpu_and_status() {
     # gives the larger index the client role.
     local script
     for h in solo other; do
-        if grep -qE '^TARGETS=\([[:space:]]*\)' "$IPERF_DIR/scripts/run_$h.sh"; then
+        if grep -qE '^TARGETS=\([[:space:]]*\)' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh"; then
             script="$h"; break
         fi
     done
@@ -282,8 +276,8 @@ test_generated_script_lone_host_writes_only_cpu_and_status() {
     local n
     n=$(find "$REMOTE_WORKDIR" -maxdepth 1 -name 'iperf_test_*.log' | wc -l)
     assert_eq "0" "$n" "client-less host should not create test logs" || return 1
-    [ -f "$REMOTE_WORKDIR/iperf_run_$script.status" ] || return 1
-    [ -f "$REMOTE_WORKDIR/cpu_$script.log" ] || return 1
+    [ -f "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" ] || return 1
+    [ -f "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" ] || return 1
 }
 
 run_test test_generated_script_executes_iperf_for_each_target

@@ -37,9 +37,12 @@
 # heatmap + bar chart on a single image.
 #
 # Quick start:
-#   ./iperf-orchestrator.sh init  servers.txt
-#   ./iperf-orchestrator.sh ssh-setup
-#   ./iperf-orchestrator.sh all
+#   ./iperf-orchestrator.sh --servers servers.txt ssh-setup
+#   ./iperf-orchestrator.sh --servers servers.txt all
+#
+# The script is stateless: nothing is persisted between invocations except
+# the contents of the results directory. `status` derives state by probing
+# hosts live, not from a state file.
 #==============================================================================
 
 set -u
@@ -47,9 +50,17 @@ set -u
 # so one bad host doesn't abort the whole run.
 
 #------------------------------------------------------------------------------
+# Path resolution: results live under <script-dir>/results/<run-id>/ by
+# default. --output overrides the base, --run-id selects an existing run.
+#------------------------------------------------------------------------------
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+#------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
 #------------------------------------------------------------------------------
-IPERF_DIR="${IPERF_DIR:-$HOME/.iperf_orchestrator}"
+RESULTS_BASE="${RESULTS_BASE:-$SCRIPT_DIR/results}"
+SERVER_LIST_FILE="${IPERF_SERVERS:-}"   # set by --servers, env var, or default lookup
+RUN_ID="${IPERF_RUN_ID:-}"              # set by --run-id; auto-generated for write commands
 REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 
 IPERF_PORT="${IPERF_PORT:-5001}"
@@ -131,8 +142,14 @@ while [ $# -gt 0 ]; do
         --start-delay=*) START_DELAY="${1#*=}"; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
-        --iperf-dir)     _flag_need "$1" "${2:-}"; IPERF_DIR="$2"; shift 2 ;;
-        --iperf-dir=*)   IPERF_DIR="${1#*=}"; shift ;;
+        --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
+        --output=*)      RESULTS_BASE="${1#*=}"; shift ;;
+        -o=*)            RESULTS_BASE="${1#*=}"; shift ;;
+        --run-id)        _flag_need "$1" "${2:-}"; RUN_ID="$2"; shift 2 ;;
+        --run-id=*)      RUN_ID="${1#*=}"; shift ;;
+        --servers|-s)    _flag_need "$1" "${2:-}"; SERVER_LIST_FILE="$2"; shift 2 ;;
+        --servers=*)     SERVER_LIST_FILE="${1#*=}"; shift ;;
+        -s=*)            SERVER_LIST_FILE="${1#*=}"; shift ;;
         --remote-dir)    _flag_need "$1" "${2:-}"; REMOTE_DIR="$2"; shift 2 ;;
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
@@ -182,73 +199,102 @@ if [ "$IPERF_JOBS" -gt 256 ]; then
 fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
 
-# Paths derived from IPERF_DIR (computed AFTER flags so --iperf-dir works).
-STATE_FILE="$IPERF_DIR/state"
-SERVER_LIST_FILE="$IPERF_DIR/servers.list"
-RESULTS_DIR="$IPERF_DIR/results"
-LOGS_DIR="$IPERF_DIR/logs"
-SCRIPTS_DIR="$IPERF_DIR/scripts"
+# Run ID + results directory.
+#
+# Each invocation that produces output writes to "$RESULTS_BASE/$RUN_ID/".
+# Read-side commands (status, parse-csv, parse-cpu, make-pivot, make-heatmap,
+# results-summary) default to following the "latest" symlink under
+# $RESULTS_BASE if --run-id wasn't given.
+#
+# Auto-generation of $RUN_ID is deferred to when a write-side command first
+# needs it (see _ensure_run_id), so just running `--help` or `status` or a
+# read-side command never creates an empty results subdirectory.
+_default_run_id() { date '+%Y-%m-%d_%H-%M-%S'; }
 
-mkdir -p "$IPERF_DIR" "$RESULTS_DIR" "$LOGS_DIR" "$SCRIPTS_DIR"
+_ensure_run_id() {
+    if [ -z "$RUN_ID" ]; then
+        RUN_ID="$(_default_run_id)"
+    fi
+    RESULTS_DIR="$RESULTS_BASE/$RUN_ID"
+    LOGS_DIR="$RESULTS_DIR/logs"
+    SCRIPTS_DIR="$RESULTS_DIR/scripts"
+    mkdir -p "$RESULTS_DIR" "$LOGS_DIR" "$SCRIPTS_DIR"
+    # Update the latest symlink to point at this run. Best effort: a
+    # non-symlink "latest" (a file or directory the user created by hand)
+    # is left alone with a warning.
+    local link="$RESULTS_BASE/latest"
+    if [ -L "$link" ] || [ ! -e "$link" ]; then
+        ln -sfn "$RUN_ID" "$link" 2>/dev/null || true
+    fi
+}
+
+# Resolve $RESULTS_DIR for read-side commands. Order:
+#   1. explicit --run-id <id>                -> $RESULTS_BASE/<id>
+#   2. $RESULTS_BASE/latest symlink target   -> use it
+#   3. else: error with a hint
+_resolve_existing_run() {
+    if [ -n "$RUN_ID" ]; then
+        RESULTS_DIR="$RESULTS_BASE/$RUN_ID"
+    elif [ -L "$RESULTS_BASE/latest" ] || [ -d "$RESULTS_BASE/latest" ]; then
+        RESULTS_DIR="$RESULTS_BASE/latest"
+        # Resolve to the real run-id for log messages.
+        local real
+        real=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
+        [ -n "$real" ] && RUN_ID="$real"
+    else
+        die "no results found at $RESULTS_BASE; run 'run-tests' first or pass --run-id <id>"
+    fi
+    LOGS_DIR="$RESULTS_DIR/logs"
+    SCRIPTS_DIR="$RESULTS_DIR/scripts"
+    [ -d "$RESULTS_DIR" ] || die "results directory not found: $RESULTS_DIR"
+    mkdir -p "$LOGS_DIR" 2>/dev/null || true
+}
+
+# Server list resolution. Priority: --servers / IPERF_SERVERS env; else
+# look for "servers.txt" next to the script. Read commands also accept
+# the file passed via the global flag.
+_resolve_server_list() {
+    if [ -z "$SERVER_LIST_FILE" ]; then
+        if [ -f "$SCRIPT_DIR/servers.txt" ]; then
+            SERVER_LIST_FILE="$SCRIPT_DIR/servers.txt"
+        fi
+    fi
+}
+_resolve_server_list
+
+# Logging targets: written into the active run's logs/ dir when a write
+# command has called _ensure_run_id; otherwise echoed-only. The logging
+# functions below tolerate $LOGS_DIR being unset.
+LOGS_DIR="${LOGS_DIR:-}"
+RESULTS_DIR="${RESULTS_DIR:-}"
+SCRIPTS_DIR="${SCRIPTS_DIR:-}"
 
 #------------------------------------------------------------------------------
 # Logging
 #------------------------------------------------------------------------------
 ts()    { date '+%Y-%m-%d %H:%M:%S'; }
+_log_to_file() {
+    # Append to $LOGS_DIR/orchestrator.log only if a write command has
+    # established a logs directory. Read-only commands skip the file
+    # write so they don't create empty directories.
+    [ -n "${LOGS_DIR:-}" ] && [ -d "${LOGS_DIR}" ] || return 0
+    printf '%s\n' "$1" >> "$LOGS_DIR/orchestrator.log"
+}
 log() {
-    # Suppressed at --quiet (IPERF_VERBOSITY=0). Always written to the
-    # orchestrator log file regardless of verbosity.
     local line="[$(ts)] $*"
-    echo "$line" >> "$LOGS_DIR/orchestrator.log"
+    _log_to_file "$line"
     [ "${IPERF_VERBOSITY:-1}" -ge 1 ] && echo "$line"
     return 0
 }
 vlog() {
-    # Verbose-only: only printed at --verbose (IPERF_VERBOSITY=2). Still
-    # always logged to the file for post-hoc debugging.
     local line="[$(ts)] $*"
-    echo "$line" >> "$LOGS_DIR/orchestrator.log"
+    _log_to_file "$line"
     [ "${IPERF_VERBOSITY:-1}" -ge 2 ] && echo "$line"
     return 0
 }
-warn()  { echo "[$(ts)] WARN: $*"  | tee -a "$LOGS_DIR/orchestrator.log" >&2; }
-err()   { echo "[$(ts)] ERROR: $*" | tee -a "$LOGS_DIR/orchestrator.log" >&2; }
+warn()  { local line="[$(ts)] WARN: $*";  _log_to_file "$line"; echo "$line" >&2; }
+err()   { local line="[$(ts)] ERROR: $*"; _log_to_file "$line"; echo "$line" >&2; }
 die()   { err "$*"; exit 1; }
-
-#------------------------------------------------------------------------------
-# State (key=value file, loaded into associative array)
-#------------------------------------------------------------------------------
-declare -A STATE
-
-load_state() {
-    STATE=()
-    [ -f "$STATE_FILE" ] || return 0
-    while IFS='=' read -r k v; do
-        [ -z "$k" ] && continue
-        case "$k" in \#*) continue ;; esac
-        STATE[$k]="$v"
-    done < "$STATE_FILE"
-}
-
-save_state() {
-    local tmp="$STATE_FILE.tmp"
-    : > "$tmp"
-    for k in "${!STATE[@]}"; do
-        echo "$k=${STATE[$k]}" >> "$tmp"
-    done
-    mv "$tmp" "$STATE_FILE"
-}
-
-set_state() {
-    load_state
-    STATE[$1]="$2"
-    save_state
-}
-
-get_state() {
-    load_state
-    echo "${STATE[$1]:-no}"
-}
 
 #------------------------------------------------------------------------------
 # Hostname sanitization
@@ -272,10 +318,61 @@ _sanitize_host() {
 # Server list helpers
 #------------------------------------------------------------------------------
 read_servers() {
-    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
+    if [ -z "$SERVER_LIST_FILE" ]; then
+        die "no server list. Pass --servers <file> (or set IPERF_SERVERS, or place servers.txt next to the script)"
+    fi
+    [ -f "$SERVER_LIST_FILE" ] || die "server list not found: $SERVER_LIST_FILE"
     # Strip blank lines, comments, and surrounding whitespace
     sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
         "$SERVER_LIST_FILE" | grep -v '^$'
+}
+
+# Validate the server list once, when something needs hosts. Catches
+# typos / URLs / whitespace-laden hostnames before we generate scripts
+# or fan out SSH connections.
+_validate_server_list() {
+    [ -n "$SERVER_LIST_FILE" ] || return 0
+    [ -f "$SERVER_LIST_FILE" ] || return 0
+    local cleaned
+    cleaned=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        "$SERVER_LIST_FILE" | grep -v '^$' || true)
+    local invalid=()
+    if [ -n "$cleaned" ]; then
+        local line
+        while IFS= read -r line; do
+            case "$line" in
+                *://*)         invalid+=("$line  (URL not allowed; use bare hostname or IP)") ; continue ;;
+                */*)           invalid+=("$line  (contains '/'; not a valid hostname)") ; continue ;;
+                *' '*|*$'\t'*) invalid+=("$line  (contains whitespace)") ; continue ;;
+            esac
+            case "$line" in
+                \[*\]) ;;  # bracketed IPv6
+                *)
+                    if ! [[ "$line" =~ ^[a-zA-Z0-9._:-]+$ ]]; then
+                        invalid+=("$line  (contains characters outside [a-zA-Z0-9._:-])")
+                    fi
+                    ;;
+            esac
+        done <<< "$cleaned"
+    fi
+    if [ ${#invalid[@]} -gt 0 ]; then
+        err "invalid entries in $SERVER_LIST_FILE:"
+        local v
+        for v in "${invalid[@]}"; do err "  $v"; done
+        die "fix the server list and re-run"
+    fi
+    # Warn (don't die) on duplicates; they would silently overwrite each
+    # other in HOST_IDX and skew the parity-rule load balance.
+    local dups
+    dups=$(printf '%s\n' "$cleaned" | sort | uniq -d)
+    if [ -n "$dups" ]; then
+        warn "server list contains duplicate hostnames; per-host scripts and"
+        warn "logs would overwrite each other. Duplicates:"
+        local d
+        while IFS= read -r d; do
+            warn "  $d"
+        done <<< "$dups"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -357,9 +454,10 @@ parallel_hosts() {
     # read_servers calls die() when the list is missing, but we invoke
     # it inside a process substitution below -- its exit only kills
     # the subshell, so the parent would silently see an empty host
-    # list and falsely flag the pipeline step as completed. Check
-    # the file up front so the failure surfaces.
-    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
+    # list. Check up front so the failure surfaces.
+    if [ -z "$SERVER_LIST_FILE" ] || [ ! -f "$SERVER_LIST_FILE" ]; then
+        die "no server list. Pass --servers <file> or set IPERF_SERVERS"
+    fi
 
     local hosts=() h
     while IFS= read -r h; do
@@ -511,14 +609,19 @@ first_run_banner() {
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
 Quick start:
-    1. $0 init <server_list_file>   # one IP/host per line; '#' comments OK
-    2. $0 ssh-setup                 # distribute SSH keys
-                                    #   add --ask-password to skip per-host prompts
-    3. $0 all                       # run the full pipeline + render heatmap
+    1. $0 --servers servers.txt ssh-setup --ask-password
+                                  # distribute SSH keys (one prompt for all hosts)
+    2. $0 --servers servers.txt all
+                                  # run the full pipeline + render heatmap.
+                                  # Results land in $RESULTS_BASE/<run-id>/
+
+The script is stateless. Re-running 'all' creates a fresh run-id; the
+'latest' symlink under $RESULTS_BASE is updated each time. To re-analyze
+an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 
 Other useful commands:
     $0 doctor      Check that local prerequisites are installed
-    $0 status      Show progress through the pipeline
+    $0 status      Probe hosts and list available result runs
     $0 help        Full command and flag reference
 
 EOF
@@ -533,10 +636,19 @@ socket carrying traffic in both directions). The CSV parser produces
 two rows per test, one for each direction, so the heatmap is filled
 symmetrically by direction but values can differ.
 
+The script is stateless. Each pipeline run produces a fresh
+\$RESULTS_BASE/<run-id>/ directory; analysis commands default to the
+'latest' symlink, override with --run-id <id>.
+
 USAGE:
     $0 [global flags] <command> [args]
 
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
+    --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
+                               (default: \$IPERF_SERVERS env, else $SCRIPT_DIR/servers.txt)
+    --output, -o DIR           Base directory for results (default $RESULTS_BASE)
+    --run-id ID                Address an existing run for read commands; for write
+                               commands, override the auto-generated timestamp.
     --port PORT                iperf2 listening port (default $IPERF_PORT)
     --duration, -d SECONDS     test duration per pair (default $IPERF_DURATION)
     --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
@@ -548,8 +660,9 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --quiet, -q                suppress non-WARN/ERROR log lines
     --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
-    --iperf-dir PATH           local working dir (default $IPERF_DIR)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
+                               Safe to point at a shared FS (NFS home, etc.):
+                               every remote-side file includes <host>_<run-id>.
     --python PATH              Python interpreter (default $PYTHON_BIN)
     --password-file PATH       Read SSH password from PATH (single line; chmod 600).
                                Enables automated 'expect'-driven ssh-setup.
@@ -560,7 +673,6 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     -h, --help                 show this message
 
 SETUP:
-    init <server_list>     Set the server list (one IP/host per line; '#' comments OK)
     ssh-setup              Generate (if needed) and distribute SSH keys to all hosts.
                            By default prompts you per-host for the SSH password
                            (sequential). Pass --password-file / --password-env /
@@ -585,9 +697,11 @@ EXECUTION:
                                               at any moment. Cleanest per-pair
                                               numbers; takes N*(N-1)/2 * duration
                                               (canonical pairs only).
-    collect-results        Pull every iperf_test_<src>_to_<dst>.log back to results/
+    collect-results        Pull every iperf_test_<src>_to_<dst>_<run>.log back to results/
     stop-servers           Kill iperf -s on every host
-    cleanup                Remove the remote working directory on every host
+    cleanup [--all] [--yes]
+                           Remove the current run's files from \$REMOTE_DIR on
+                           every host. With --all, wipe \$REMOTE_DIR entirely.
 
 ANALYSIS:
     parse-csv              Parse all .log iperf2 CSV files into results/iperf_results.csv
@@ -598,20 +712,19 @@ ANALYSIS:
     make-heatmap           Render results/iperf_heatmap.png (heatmap + bar chart)
 
 CONVENIENCE:
-    all [MODE] [--keep-going] [--resume]
+    all [MODE] [--keep-going]
                            Run the full sequence end-to-end. MODE is forwarded
                            to run-tests (default parallel). With --keep-going,
                            continue past per-host failures instead of aborting.
-                           With --resume, skip pipeline steps whose state is
-                           already "yes" (use after a partial run). Runs
-                           'doctor' first.
+                           Runs 'doctor' first.
     doctor                 Probe local prerequisites (ssh tools, expect when a
                            password source is configured, python3 + numpy +
                            pandas + matplotlib) and print install hints.
     results-summary        Print P50/P95/min/mean/max throughput and the 5
                            slowest source->target pairs. Reads
                            results/iperf_results.csv (run parse-csv first).
-    status                 Show what has been done so far
+    status                 Probe hosts (iperf installed? server running?) and list
+                           available run directories under \$RESULTS_BASE.
     help                   Show this message
 
 CONFIG (env vars; CLI flags above take precedence):
@@ -629,197 +742,138 @@ CONFIG (env vars; CLI flags above take precedence):
     SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}   # see --password-env
     SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD       # see --ask-password
     START_DELAY=$START_DELAY             # seconds in future for sync start
-    IPERF_DIR=$IPERF_DIR
+    IPERF_SERVERS=${IPERF_SERVERS:-}     # see --servers
+    RESULTS_BASE=$RESULTS_BASE
+    REMOTE_DIR=$REMOTE_DIR
 
 FILES:
-    Server list:  $SERVER_LIST_FILE
-    State:        $STATE_FILE
-    Results:      $RESULTS_DIR/
-    Logs:         $LOGS_DIR/
+    Server list:  ${SERVER_LIST_FILE:-(unset)}
+    Results base: $RESULTS_BASE
+    Latest run:   $RESULTS_BASE/latest -> ...
 EOF
 }
 
 #------------------------------------------------------------------------------
-cmd_init() {
-    local src="${1:-}"
-    [ -n "$src" ] || die "Usage: $0 init <server_list_file>"
-    [ -f "$src" ] || die "File not found: $src"
-
-    # Validate the server list before copying it in. Apply the same
-    # comment/whitespace stripping read_servers does, then reject any entry
-    # that isn't a plausible hostname or IP. Bracketed IPv6 ([fe80::1]) is
-    # accepted; unbracketed IPv6 with colons is also accepted because we
-    # need it for run_iperf and the script handles colons elsewhere.
-    local cleaned
-    cleaned=$(sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-        "$src" | grep -v '^$' || true)
-
-    local invalid=()
-    if [ -n "$cleaned" ]; then
-        local line
-        while IFS= read -r line; do
-            case "$line" in
-                *://*)         invalid+=("$line  (URL not allowed; use bare hostname or IP)") ; continue ;;
-                */*)           invalid+=("$line  (contains '/'; not a valid hostname)") ; continue ;;
-                *' '*|*$'\t'*) invalid+=("$line  (contains whitespace)") ; continue ;;
-            esac
-            case "$line" in
-                \[*\]) ;;  # bracketed IPv6
-                *)
-                    if ! [[ "$line" =~ ^[a-zA-Z0-9._:-]+$ ]]; then
-                        invalid+=("$line  (contains characters outside [a-zA-Z0-9._:-])")
-                    fi
-                    ;;
-            esac
-        done <<< "$cleaned"
-    fi
-
-    if [ ${#invalid[@]} -gt 0 ]; then
-        err "Invalid entries in $src:"
-        local v
-        for v in "${invalid[@]}"; do err "  $v"; done
-        die "fix the server list and re-run init"
-    fi
-
-    local n_clean=0
-    if [ -n "$cleaned" ]; then
-        n_clean=$(printf '%s\n' "$cleaned" | wc -l)
-    fi
-    # Don't die on short lists at init time -- single-host lists are
-    # legitimate for diagnostic subcommands. The "need >=2 hosts" check
-    # is enforced inside run-tests where mesh size actually matters.
-    if [ "$n_clean" -lt 2 ]; then
-        warn "server list has $n_clean host(s); run-tests needs at least 2"
-    fi
-
-    cp "$src" "$SERVER_LIST_FILE"
-    : > "$STATE_FILE"
-    set_state SERVER_LIST_LOADED yes
-
-    local n
-    n=$(read_servers | wc -l)
-
-    # Warn on duplicates: the script keys on hostname for HOST_IDX,
-    # output paths, and per-host log files, so duplicates would
-    # silently overwrite each other and skew the parity-rule load
-    # balance.
-    local dups
-    dups=$(read_servers | sort | uniq -d)
-    if [ -n "$dups" ]; then
-        warn "Server list contains duplicate hostnames; per-host scripts and"
-        warn "logs would overwrite each other. Duplicates:"
-        while IFS= read -r d; do
-            warn "  $d"
-        done <<< "$dups"
-    fi
-
-    log "Initialized with $n hosts from $src -> $SERVER_LIST_FILE"
+# cmd_status: probe hosts live (iperf installed? server running?) and list
+# available run directories. No state file is read or written.
+#
+# --json emits a flat object suitable for scripting / CI.
+#------------------------------------------------------------------------------
+_status_collect_run_dirs() {
+    # Print one run-id per line, sorted oldest -> newest, for any direct
+    # subdirectory of $RESULTS_BASE (excluding the 'latest' symlink).
+    [ -d "$RESULTS_BASE" ] || return 0
+    local d
+    for d in "$RESULTS_BASE"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"
+        local base="${d##*/}"
+        [ "$base" = "latest" ] && continue
+        printf '%s\n' "$base"
+    done | sort
 }
 
-#------------------------------------------------------------------------------
 cmd_status() {
-    load_state
-
-    # --json: emit machine-readable status for CI / scripting. Hand-rolled
-    # so we don't pull in jq or python just to emit a flat object.
+    local emit_json=0
     if [ "${1:-}" = "--json" ]; then
-        local n_hosts=0
-        [ -f "$SERVER_LIST_FILE" ] && n_hosts=$(read_servers | wc -l)
-        local steps=(
-            SERVER_LIST_LOADED SSH_KEYS_DISTRIBUTED IPERF_INSTALLED_CHECKED
-            SERVERS_RUNNING_CHECKED SERVERS_STARTED SCRIPTS_CREATED
-            SCRIPTS_DISTRIBUTED TESTS_RUN RESULTS_COLLECTED SERVERS_STOPPED
-            CLEANED_UP CSV_BUILT CPU_PARSED PIVOT_BUILT HEATMAP_BUILT
-        )
+        emit_json=1
+    fi
+
+    local latest_target=""
+    if [ -L "$RESULTS_BASE/latest" ]; then
+        latest_target=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
+    elif [ -d "$RESULTS_BASE/latest" ]; then
+        latest_target="latest"
+    fi
+
+    local runs=()
+    local r
+    while IFS= read -r r; do
+        [ -n "$r" ] && runs+=("$r")
+    done < <(_status_collect_run_dirs)
+
+    # Probe hosts only when a server list is available. Skip cleanly
+    # otherwise so `status` never errors on a fresh checkout.
+    local probe_iperf=""
+    local probe_servers=""
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        local n_hosts
+        n_hosts=$(read_servers | wc -l)
+        if [ "$n_hosts" -gt 0 ]; then
+            probe_iperf=$(parallel_hosts _worker_check_iperf 2>/dev/null)
+            probe_servers=$(parallel_hosts _worker_check_servers 2>/dev/null)
+        fi
+    fi
+
+    if [ "$emit_json" = "1" ]; then
         local first=1 s
         printf '{'
-        printf '"iperf_dir":"%s","server_list":"%s","hosts":%s,"state":{' \
-            "$IPERF_DIR" "$SERVER_LIST_FILE" "$n_hosts"
-        for s in "${steps[@]}"; do
+        printf '"results_base":"%s","server_list":"%s","latest":"%s","runs":[' \
+            "$RESULTS_BASE" "${SERVER_LIST_FILE:-}" "$latest_target"
+        for s in "${runs[@]}"; do
             [ "$first" = "1" ] && first=0 || printf ','
-            printf '"%s":"%s"' "$s" "${STATE[$s]:-no}"
+            printf '"%s"' "$s"
         done
-        printf '},"tests_run_mode":"%s"}\n' "${STATE[TESTS_RUN_MODE]:-}"
+        printf '],"hosts":['
+        first=1
+        if [ -n "$probe_iperf" ]; then
+            local line
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                # _worker_check_iperf prints: "<host>  <iperf_status>  mpstat=...  <ver>"
+                local host status
+                host=$(printf '%s' "$line" | awk '{print $1}')
+                status=$(printf '%s' "$line" | awk '{print $2}')
+                local server_state="UNKNOWN"
+                local sline
+                while IFS= read -r sline; do
+                    case "$sline" in
+                        "$host"*RUNNING*) server_state="RUNNING" ; break ;;
+                        "$host"*STOPPED*) server_state="STOPPED" ; break ;;
+                    esac
+                done <<< "$probe_servers"
+                [ "$first" = "1" ] && first=0 || printf ','
+                printf '{"host":"%s","iperf":"%s","server":"%s"}' \
+                    "$host" "$status" "$server_state"
+            done <<< "$probe_iperf"
+        fi
+        printf ']}\n'
         return 0
     fi
 
     echo "=== iperf-orchestrator status ==="
-    echo "IPERF_DIR:       $IPERF_DIR"
-    echo "Server list:     $SERVER_LIST_FILE"
-    if [ -f "$SERVER_LIST_FILE" ]; then
-        echo "Hosts:           $(read_servers | wc -l)"
-    else
-        echo "Hosts:           (no list yet)"
+    echo "Results base:   $RESULTS_BASE"
+    echo "Server list:    ${SERVER_LIST_FILE:-(none; pass --servers)}"
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        echo "Hosts:          $(read_servers | wc -l)"
     fi
     echo
-    echo "Pipeline state:"
-    local steps=(
-        SERVER_LIST_LOADED
-        SSH_KEYS_DISTRIBUTED
-        IPERF_INSTALLED_CHECKED
-        SERVERS_RUNNING_CHECKED
-        SERVERS_STARTED
-        SCRIPTS_CREATED
-        SCRIPTS_DISTRIBUTED
-        TESTS_RUN
-        RESULTS_COLLECTED
-        SERVERS_STOPPED
-        CLEANED_UP
-        CSV_BUILT
-        CPU_PARSED
-        PIVOT_BUILT
-        HEATMAP_BUILT
-    )
-    for s in "${steps[@]}"; do
-        printf "  %-30s %s\n" "$s" "${STATE[$s]:-no}"
-    done
 
-    # Suggest the next pipeline step. Each state key maps to the
-    # subcommand that flips it to "yes". Find the first one still set
-    # to "no" and surface it so the user doesn't have to memorize the
-    # pipeline order.
-    local first_pending=""
-    local cmd_for_step=(
-        "SERVER_LIST_LOADED:init <server_list>"
-        "SSH_KEYS_DISTRIBUTED:ssh-setup"
-        "IPERF_INSTALLED_CHECKED:check-iperf"
-        "SERVERS_RUNNING_CHECKED:check-servers"
-        "SERVERS_STARTED:start-servers"
-        "SCRIPTS_CREATED:create-scripts"
-        "SCRIPTS_DISTRIBUTED:distribute-scripts"
-        "TESTS_RUN:run-tests"
-        "RESULTS_COLLECTED:collect-results"
-        "SERVERS_STOPPED:stop-servers"
-        "CLEANED_UP:cleanup"
-        "CSV_BUILT:parse-csv"
-        "CPU_PARSED:parse-cpu"
-        "PIVOT_BUILT:make-pivot"
-        "HEATMAP_BUILT:make-heatmap"
-    )
-    local entry key cmd
-    for entry in "${cmd_for_step[@]}"; do
-        key="${entry%%:*}"
-        cmd="${entry#*:}"
-        if [ "${STATE[$key]:-no}" != "yes" ]; then
-            first_pending="$cmd"
-            break
-        fi
-    done
-    echo
-    if [ -n "$first_pending" ]; then
-        echo "Next: $0 $first_pending"
+    if [ ${#runs[@]} -eq 0 ]; then
+        echo "Runs: (none)"
     else
-        echo "Pipeline complete. Results in: $RESULTS_DIR"
+        echo "Runs (oldest -> newest):"
+        for r in "${runs[@]}"; do
+            local marker=""
+            [ "$r" = "$latest_target" ] && marker="  <- latest"
+            echo "  $r$marker"
+        done
     fi
 
-    # Show per-host check results if present
-    for f in "$IPERF_DIR/iperf_installed.txt" "$IPERF_DIR/iperf_running.txt"; do
-        if [ -f "$f" ]; then
-            echo
-            echo "--- $(basename "$f") ---"
-            cat "$f"
-        fi
-    done
+    if [ -n "$probe_iperf" ]; then
+        echo
+        echo "Hosts (live probe):"
+        echo "$probe_iperf" | sed 's/^/  /'
+        echo
+        echo "iperf -s daemon state:"
+        echo "$probe_servers" | sed 's/^/  /'
+    elif [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        echo
+        echo "Hosts: (server list is empty)"
+    else
+        echo
+        echo "Hosts: (skipped; pass --servers <file> to probe)"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -937,10 +991,24 @@ _worker_ssh_copy_id() {
 }
 
 cmd_ssh_setup() {
-    # Up-front: server list must exist. The interactive path below
-    # would otherwise silently no-op (read_servers' die fires inside a
-    # $() subshell) and falsely set SSH_KEYS_DISTRIBUTED=yes.
-    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
+    # Accept the password-source flags here too, not just as global flags.
+    # The mental model is `ssh-setup --ask-password`, and it was easy to
+    # land on the per-host interactive prompt path when the flag came
+    # after the subcommand.
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --ask-password)     SSH_ASK_PASSWORD=yes ;;
+            --password-file=*)  SSH_PASSWORD_FILE="${arg#*=}" ;;
+            --password-env=*)   SSH_PASSWORD_ENV="${arg#*=}" ;;
+            *) die "ssh-setup: unknown argument: $arg (expected --ask-password, --password-file=PATH, --password-env=VAR)" ;;
+        esac
+    done
+
+    # Server list must exist. The interactive path below would otherwise
+    # silently no-op (read_servers' die fires inside a $() subshell).
+    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
+        || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
 
     # Make sure we have a key
     local key="$HOME/.ssh/id_ed25519"
@@ -992,7 +1060,6 @@ cmd_ssh_setup() {
     fi
 
     if [ "$failure_count" -eq 0 ]; then
-        set_state SSH_KEYS_DISTRIBUTED yes
         log "SSH keys distributed to all hosts"
     else
         warn "ssh-setup completed with $failure_count failure(s)"
@@ -1025,27 +1092,20 @@ _worker_check_iperf() {
 }
 
 cmd_check_iperf() {
-    # Up-front check: parallel_hosts itself dies on a missing server
-    # list, but we used to pipe its output through `tee` here, which
-    # forked parallel_hosts into a subshell -- the die's exit only
-    # killed that subshell and the outer command would falsely flag
-    # the step done. The same subshell barrier also dropped the
-    # PARALLEL_FAILED array, which cmd_all then read in _all_gate
-    # (causing an unbound-variable error under set -u when no prior
-    # parallel_hosts call had populated it).
-    #
-    # Fix: write parallel_hosts output to the file directly, then
-    # cat it back to stdout. parallel_hosts already buffers per-host
-    # output and emits in server-list order after every worker
-    # finishes, so this is functionally identical from the user's
-    # perspective AND it preserves PARALLEL_FAILED for the caller.
-    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
-    local out="$IPERF_DIR/iperf_installed.txt"
+    # Buffered output via a temp file so parallel_hosts isn't piped
+    # through a subshell (a subshell would drop PARALLEL_FAILED).
+    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
+        || die "no server list. Pass --servers <file>"
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-check.XXXXXX")
     log "Checking iperf2 + mpstat availability on all hosts (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_iperf > "$out"
-    cat "$out"
-    set_state IPERF_INSTALLED_CHECKED yes
-    log "Wrote $out"
+    parallel_hosts _worker_check_iperf > "$tmp"
+    cat "$tmp"
+    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
+        cp "$tmp" "$RESULTS_DIR/iperf_installed.txt"
+        log "Wrote $RESULTS_DIR/iperf_installed.txt"
+    fi
+    rm -f "$tmp"
 }
 
 #------------------------------------------------------------------------------
@@ -1063,15 +1123,18 @@ _worker_check_servers() {
 }
 
 cmd_check_servers() {
-    # See cmd_check_iperf for why we double-check the server list and
-    # avoid piping through tee (subshell drops PARALLEL_FAILED).
-    [ -f "$SERVER_LIST_FILE" ] || die "No server list. Run: $0 init <server_list_file>"
-    local out="$IPERF_DIR/iperf_running.txt"
+    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
+        || die "no server list. Pass --servers <file>"
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-check.XXXXXX")
     log "Checking iperf2 daemon status on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_check_servers > "$out"
-    cat "$out"
-    set_state SERVERS_RUNNING_CHECKED yes
-    log "Wrote $out"
+    parallel_hosts _worker_check_servers > "$tmp"
+    cat "$tmp"
+    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
+        cp "$tmp" "$RESULTS_DIR/iperf_running.txt"
+        log "Wrote $RESULTS_DIR/iperf_running.txt"
+    fi
+    rm -f "$tmp"
 }
 
 #------------------------------------------------------------------------------
@@ -1079,6 +1142,7 @@ _worker_start_server() {
     local host="$1"
     local host_safe; host_safe=$(_sanitize_host "$host")
     local errlog="$LOGS_DIR/start_${host_safe}.err"
+    local server_log_remote="$REMOTE_DIR/iperf_server_${host_safe}_${RUN_ID}.log"
     # pkill -f scopes to "iperf -s -p $IPERF_PORT" so we don't disturb
     # the user's unrelated iperf -c clients or iperf servers on other
     # ports. The [i]perf trick keeps pgrep from matching its own argv.
@@ -1090,12 +1154,9 @@ _worker_start_server() {
     # thing but loses the bind error and is fragile across remote
     # shells.
     #
-    # iperf's own stderr is still redirected into the remote
-    # iperf_server.log, so a bare "FAILED rc=1" on the orchestrator side
-    # hides the real reason (binary not on non-interactive PATH, port in
-    # TIME_WAIT, permission denied, etc.). On failure we tail that
-    # remote log into ssh's stderr so it lands in $errlog and the user
-    # sees the actual error without having to log into each host.
+    # The server log filename embeds both host and run-id so multiple
+    # hosts whose $REMOTE_DIR is on a shared filesystem (e.g. NFS
+    # home) don't overwrite each other.
     if ssh_run "$host" "
         if ! mkdir -p '$REMOTE_DIR' 2>&1; then
             echo 'iperf-orchestrator: cannot create $REMOTE_DIR on remote' >&2
@@ -1103,15 +1164,15 @@ _worker_start_server() {
         fi
         pkill -f 'iperf -s -p $IPERF_PORT' 2>/dev/null
         sleep 1
-        iperf -s -D -p $IPERF_PORT > '$REMOTE_DIR/iperf_server.log' 2>&1
+        iperf -s -D -p $IPERF_PORT > '$server_log_remote' 2>&1
         rc=\$?
         if [ \$rc -eq 0 ] && pgrep -f '[i]perf -s -p $IPERF_PORT' >/dev/null; then
             exit 0
         fi
         echo \"iperf-orchestrator: iperf -s -D failed (rc=\$rc) or did not stay running.\" >&2
-        if [ -s '$REMOTE_DIR/iperf_server.log' ]; then
-            echo '--- remote iperf_server.log (tail) ---' >&2
-            tail -n 20 '$REMOTE_DIR/iperf_server.log' >&2
+        if [ -s '$server_log_remote' ]; then
+            echo '--- remote $server_log_remote (tail) ---' >&2
+            tail -n 20 '$server_log_remote' >&2
             echo '--- end ---' >&2
         else
             # Empty log is the classic non-interactive PATH symptom:
@@ -1133,11 +1194,13 @@ _worker_start_server() {
 }
 
 cmd_start_servers() {
+    _ensure_run_id
+    _validate_server_list
     log "Starting iperf2 -s on port $IPERF_PORT on every host (parallel x$IPERF_JOBS)..."
+    log "Run ID: $RUN_ID"
     parallel_hosts _worker_start_server
 
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        set_state SERVERS_STARTED yes
         log "All iperf2 servers started"
     else
         warn "start-servers completed with ${#PARALLEL_FAILED[@]} failure(s)"
@@ -1146,7 +1209,10 @@ cmd_start_servers() {
 
 #------------------------------------------------------------------------------
 cmd_create_scripts() {
+    _ensure_run_id
+    _validate_server_list
     log "Generating per-host client run scripts (balanced pair assignment)..."
+    log "Run ID: $RUN_ID"
     local hosts; hosts=$(read_servers)
     [ -n "$hosts" ] || die "No hosts in server list"
 
@@ -1160,7 +1226,7 @@ cmd_create_scripts() {
     while IFS= read -r src; do
         [ -z "$src" ] && continue
         local src_safe; src_safe=$(_sanitize_host "$src")
-        local script="$SCRIPTS_DIR/run_${src_safe}.sh"
+        local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
         # Each unordered pair is tested once, but instead of always making
         # the lex-smaller host the client (which gives a 0..N-1 imbalance),
@@ -1186,17 +1252,19 @@ cmd_create_scripts() {
 #!/usr/bin/env bash
 # Auto-generated by iperf-orchestrator. Do not edit by hand.
 # Source host: $src
+# Run ID:      $RUN_ID
 # Targets:     ${targets[*]}
 #
 # Runs iperf2 --full-duplex against each target. One TCP socket per pair,
-# carrying traffic in both directions concurrently. The log file gets a
-# small header line first so the parser doesn't have to guess which two
-# hosts the test was between based on the filename alone.
+# carrying traffic in both directions concurrently. Filenames embed both
+# host and run-id so multiple hosts whose \$REMOTE_DIR is on a shared
+# filesystem (e.g. NFS home) don't overwrite each other.
 set -u
 
 START_TIME="\${1:-0}"
 SINGLE_TARGET="\${2:-}"
 SOURCE="$src"
+RUN_ID="$RUN_ID"
 PORT=$IPERF_PORT
 DURATION=$IPERF_DURATION
 PARALLEL=$IPERF_PARALLEL
@@ -1221,13 +1289,14 @@ else
 fi
 
 # Sanitizer matching the orchestrator's _sanitize_host(). Keeps file
-# names safe for IPv6 hostnames like [fe80::1] and any host with `:`,
-# `/`, `[`, `]`, or whitespace. Real hostname is preserved inside
+# names safe for IPv6 hostnames like [fe80::1] and any host with \`:\`,
+# \`/\`, \`[\`, \`]\`, or whitespace. Real hostname is preserved inside
 # headers (# pair_a=..., # host=...) so the parser sees the truth.
 _san() { printf '%s' "\$1" | tr ':/[] \\t' '_______'; }
 SOURCE_SAFE=\$(_san "\$SOURCE")
+STATUS_FILE="iperf_run_\${SOURCE_SAFE}_\${RUN_ID}.status"
 
-echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "iperf_run_\${SOURCE_SAFE}.status"
+echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "\$STATUS_FILE"
 
 # Start CPU sampling. We want to capture the test window plus a small tail
 # so the "after" baseline is visible. mpstat with -P ALL gives per-core
@@ -1241,7 +1310,7 @@ echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "iperf_run_\${S
 # knows the unsanitized hostname even if the on-disk filename was
 # rewritten.
 SAMPLE_DURATION=\$(( DURATION + 4 ))
-cpu_log="cpu_\${SOURCE_SAFE}.log"
+cpu_log="cpu_\${SOURCE_SAFE}_\${RUN_ID}.log"
 cpu_pid=""
 
 {
@@ -1269,11 +1338,11 @@ if [ \${#run_targets[@]} -gt 0 ]; then
     pids=()
     for target in "\${run_targets[@]}"; do
         target_safe=\$(_san "\$target")
-        out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}.log"
-        echo "\$(date '+%F %T') testing <-> \$target" >> "iperf_run_\${SOURCE_SAFE}.status"
+        out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_\${RUN_ID}.log"
+        echo "\$(date '+%F %T') testing <-> \$target" >> "\$STATUS_FILE"
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
-            echo "# pair_a=\$SOURCE pair_b=\$target duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
+            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
             iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" --full-duplex -e -y C 2>&1
         } > "\$out" &
         pids+=(\$!)
@@ -1290,7 +1359,7 @@ if [ -n "\$cpu_pid" ]; then
     wait "\$cpu_pid" 2>/dev/null || true
 fi
 
-echo "\$(date '+%F %T') DONE" >> "iperf_run_\${SOURCE_SAFE}.status"
+echo "\$(date '+%F %T') DONE" >> "\$STATUS_FILE"
 EOF
         chmod +x "$script"
         log "  created $script (targets: ${#targets[@]})"
@@ -1311,7 +1380,6 @@ EOF
         log "Client load: min=$mn, max=$mx, mean=$((mean10/10)).$((mean10%10)), total tests=$sum"
     fi
 
-    set_state SCRIPTS_CREATED yes
     log "All run scripts created in $SCRIPTS_DIR"
 }
 
@@ -1319,14 +1387,18 @@ EOF
 _worker_distribute_script() {
     local host="$1"
     local host_safe; host_safe=$(_sanitize_host "$host")
-    local script="$SCRIPTS_DIR/run_${host_safe}.sh"
+    local script="$SCRIPTS_DIR/run_${host_safe}_${RUN_ID}.sh"
+    local remote_name="run_iperf_${host_safe}_${RUN_ID}.sh"
     if [ ! -f "$script" ]; then
         warn "  no script for $host (run create-scripts first)"
         return 1
     fi
-    if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f '$REMOTE_DIR'/iperf_test_*.log '$REMOTE_DIR'/iperf_run_*.status '$REMOTE_DIR'/iperf_run_*.complete" \
-       && scp_to "$script" "$host" "$REMOTE_DIR/run_iperf.sh" \
-       && ssh_run "$host" "chmod +x '$REMOTE_DIR/run_iperf.sh'"; then
+    # Only delete files belonging to this run-id so prior runs sharing
+    # the same $REMOTE_DIR aren't collateral damage.
+    local clean_glob="'$REMOTE_DIR'/iperf_test_*_${RUN_ID}.log '$REMOTE_DIR'/iperf_run_*_${RUN_ID}.status"
+    if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f $clean_glob" \
+       && scp_to "$script" "$host" "$REMOTE_DIR/$remote_name" \
+       && ssh_run "$host" "chmod +x '$REMOTE_DIR/$remote_name'"; then
         log "  OK: $host"
     else
         warn "  FAILED: $host"
@@ -1335,11 +1407,13 @@ _worker_distribute_script() {
 }
 
 cmd_distribute_scripts() {
+    _ensure_run_id
+    _validate_server_list
+    [ -d "$SCRIPTS_DIR" ] || die "no generated scripts at $SCRIPTS_DIR; run create-scripts first"
     log "Distributing run scripts to each host (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_distribute_script
 
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        set_state SCRIPTS_DISTRIBUTED yes
         log "All run scripts distributed"
     else
         warn "distribute-scripts had ${#PARALLEL_FAILED[@]} failure(s)"
@@ -1360,18 +1434,24 @@ _orchestrator_signal_cleanup() {
 
 cmd_run_tests() {
     local mode="${1:-parallel}"
+    _ensure_run_id
+    _validate_server_list
     trap '_orchestrator_signal_cleanup' INT TERM
-    # Mesh size is enforced here, not at init: init is also used to load
-    # diagnostic single-host lists for ad-hoc check-iperf / cleanup runs.
     local _n_hosts
     _n_hosts=$(read_servers | wc -l)
     [ "$_n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts for a full-mesh test (got $_n_hosts)"
+    log "Run ID: $RUN_ID"
+    log "Results dir: $RESULTS_DIR"
     case "$mode" in
         parallel)        _run_parallel ;;
         sequential-host) _run_sequential_host ;;
         sequential-pair) _run_sequential_pair ;;
         *) die "Unknown mode: $mode (expected: parallel | sequential-host | sequential-pair)" ;;
     esac
+    # Record the mode used so make-pivot/make-heatmap can label charts.
+    if [ -n "${RESULTS_DIR:-}" ] && [ -d "${RESULTS_DIR:-}" ]; then
+        printf '%s\n' "$mode" > "$RESULTS_DIR/.run_mode"
+    fi
     trap - INT TERM
 }
 
@@ -1406,7 +1486,8 @@ _run_parallel() {
         [ -z "$host" ] && continue
         local host_safe; host_safe=$(_sanitize_host "$host")
         local hostlog="$LOGS_DIR/run_${host_safe}.log"
-        ssh_run "$host" "'$REMOTE_DIR/run_iperf.sh' $start_time" \
+        local remote_script="$REMOTE_DIR/run_iperf_${host_safe}_${RUN_ID}.sh"
+        ssh_run "$host" "'$remote_script' $start_time" \
             > "$hostlog" 2>&1 &
         pids+=("$!")
         hosts_for_pids+=("$host")
@@ -1460,8 +1541,6 @@ _run_parallel() {
     done
 
     if [ ${#failed[@]} -eq 0 ]; then
-        set_state TESTS_RUN yes
-        set_state TESTS_RUN_MODE parallel
         log "All hosts completed (parallel)"
     else
         warn "run-tests had ${#failed[@]} failure(s); collect-results will still try"
@@ -1491,7 +1570,8 @@ _run_sequential_host() {
         log "[$i/$n] running on $host (~${est_per_host}s)..."
         local host_safe; host_safe=$(_sanitize_host "$host")
         local hostlog="$LOGS_DIR/run_${host_safe}.log"
-        if ssh_run "$host" "'$REMOTE_DIR/run_iperf.sh' 0" > "$hostlog" 2>&1; then
+        local remote_script="$REMOTE_DIR/run_iperf_${host_safe}_${RUN_ID}.sh"
+        if ssh_run "$host" "'$remote_script' 0" > "$hostlog" 2>&1; then
             log "  finished: $host"
         else
             warn "  finished with errors: $host (see $hostlog)"
@@ -1500,8 +1580,6 @@ _run_sequential_host() {
     done <<< "$hosts"
 
     if [ ${#failed[@]} -eq 0 ]; then
-        set_state TESTS_RUN yes
-        set_state TESTS_RUN_MODE sequential-host
         log "All hosts completed (sequential-host)"
     else
         warn "sequential-host had ${#failed[@]} failure(s); collect-results will still try"
@@ -1541,8 +1619,9 @@ _run_sequential_pair() {
             src_safe=$(_sanitize_host "$src")
             dst_safe=$(_sanitize_host "$dst")
             local pairlog="$LOGS_DIR/run_${src_safe}_to_${dst_safe}.log"
+            local remote_script="$REMOTE_DIR/run_iperf_${src_safe}_${RUN_ID}.sh"
             log "[$i/$total] $src <-> $dst"
-            if ssh_run "$src" "'$REMOTE_DIR/run_iperf.sh' 0 '$dst'" > "$pairlog" 2>&1; then
+            if ssh_run "$src" "'$remote_script' 0 '$dst'" > "$pairlog" 2>&1; then
                 :
             else
                 warn "  failed: $src <-> $dst (see $pairlog)"
@@ -1552,8 +1631,6 @@ _run_sequential_pair() {
     done
 
     if [ ${#failed[@]} -eq 0 ]; then
-        set_state TESTS_RUN yes
-        set_state TESTS_RUN_MODE sequential-pair
         log "All pairs completed (sequential-pair)"
     else
         warn "sequential-pair had ${#failed[@]} failure(s); collect-results will still try"
@@ -1563,31 +1640,27 @@ _run_sequential_pair() {
 #------------------------------------------------------------------------------
 _worker_collect_results() {
     local host="$1"
-    local tarball_remote="$REMOTE_DIR/_results_${host}.tar.gz"
-    local tarball_local="$RESULTS_DIR/_results_${host}.tar.gz"
-
-    # Build the tarball remotely. iperf_test_*.log filenames already
-    # include the source host so they don't collide on extract; the
-    # server log gets a host suffix to disambiguate. The status file
-    # is already host-named.
-    #
-    # The last canonical host has no client logs; we still want its
-    # server log and status file, so we tolerate iperf_test_*.log
-    # matching nothing.
     local host_safe; host_safe=$(_sanitize_host "$host")
+    # Tarball name uses sanitized hostname + run-id so two hosts on a
+    # shared FS can write to $REMOTE_DIR concurrently without colliding.
+    local tarball_remote="$REMOTE_DIR/_results_${host_safe}_${RUN_ID}.tar.gz"
+    local tarball_local="$RESULTS_DIR/_results_${host_safe}_${RUN_ID}.tar.gz"
+
+    # Files to grab are scoped to this RUN_ID so we never accidentally
+    # pull files from a concurrent or older run that shares $REMOTE_DIR.
     if ! ssh_run "$host" "
         cd '$REMOTE_DIR' 2>/dev/null || exit 1
-        cp iperf_server.log 'iperf_server_${host_safe}.log' 2>/dev/null || true
+        listfile='_iperf_files_${host_safe}_${RUN_ID}.list'
         {
-            ls iperf_test_*.log 2>/dev/null || true
-            ls 'iperf_server_${host_safe}.log' 2>/dev/null || true
-            ls 'iperf_run_${host_safe}.status' 2>/dev/null || true
-            ls 'cpu_${host_safe}.log' 2>/dev/null || true
-        } > _iperf_files.list
-        if [ -s _iperf_files.list ]; then
-            tar -czf '$tarball_remote' -T _iperf_files.list
+            ls iperf_test_*_${RUN_ID}.log 2>/dev/null || true
+            ls 'iperf_server_${host_safe}_${RUN_ID}.log' 2>/dev/null || true
+            ls 'iperf_run_${host_safe}_${RUN_ID}.status' 2>/dev/null || true
+            ls 'cpu_${host_safe}_${RUN_ID}.log' 2>/dev/null || true
+        } > \"\$listfile\"
+        if [ -s \"\$listfile\" ]; then
+            tar -czf '$tarball_remote' -T \"\$listfile\"
         fi
-        rm -f _iperf_files.list 'iperf_server_${host_safe}.log'
+        rm -f \"\$listfile\"
         test -f '$tarball_remote'
     " 2>/dev/null; then
         warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
@@ -1614,13 +1687,14 @@ _worker_collect_results() {
 }
 
 cmd_collect_results() {
+    _ensure_run_id
+    _validate_server_list
     log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched, parallel x$IPERF_JOBS)"
     parallel_hosts _worker_collect_results
 
     local total
     total=$(ls "$RESULTS_DIR"/iperf_test_*.log 2>/dev/null | wc -l)
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        set_state RESULTS_COLLECTED yes
         log "Collected $total client logs total"
     else
         warn "collect-results: ${#PARALLEL_FAILED[@]} host(s) had transfer failures"
@@ -1639,20 +1713,45 @@ _worker_stop_server() {
 }
 
 cmd_stop_servers() {
+    _validate_server_list
     log "Stopping iperf2 servers on every host (parallel x$IPERF_JOBS)..."
     parallel_hosts _worker_stop_server
-    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        set_state SERVERS_STOPPED yes
-    else
+    if [ ${#PARALLEL_FAILED[@]} -ne 0 ]; then
         warn "stop-servers had ${#PARALLEL_FAILED[@]} failure(s)"
     fi
 }
 
 #------------------------------------------------------------------------------
-_worker_cleanup() {
+# cleanup modes:
+#   default:     remove only this run's files (iperf_*_<run>.log etc.)
+#   --all:       remove $REMOTE_DIR entirely (legacy behavior)
+# Both forms require --yes when invoked directly (cmd_all bypasses via
+# _IPERF_ORCH_INTERNAL=1).
+_worker_cleanup_run() {
+    local host="$1"
+    local host_safe; host_safe=$(_sanitize_host "$host")
+    # Glob the run-id-suffixed files. Tolerant of an empty $REMOTE_DIR.
+    if ssh_run "$host" "
+        cd '$REMOTE_DIR' 2>/dev/null || exit 0
+        rm -f \
+            iperf_test_*_${RUN_ID}.log \
+            'iperf_server_${host_safe}_${RUN_ID}.log' \
+            'iperf_run_${host_safe}_${RUN_ID}.status' \
+            'cpu_${host_safe}_${RUN_ID}.log' \
+            'run_iperf_${host_safe}_${RUN_ID}.sh' \
+            '_results_${host_safe}_${RUN_ID}.tar.gz'
+    "; then
+        log "  cleaned: $host (run $RUN_ID)"
+    else
+        warn "  cleanup failed: $host"
+        return 1
+    fi
+}
+
+_worker_cleanup_all() {
     local host="$1"
     if ssh_run "$host" "rm -rf '$REMOTE_DIR'"; then
-        log "  cleaned: $host"
+        log "  cleaned: $host (full $REMOTE_DIR)"
     else
         warn "  cleanup failed: $host"
         return 1
@@ -1660,31 +1759,46 @@ _worker_cleanup() {
 }
 
 cmd_cleanup() {
-    # Require --yes when invoked directly so a stray ./orch.sh cleanup
-    # doesn't blow away $REMOTE_DIR on every host with no warning.
-    # cmd_all sets _IPERF_ORCH_INTERNAL=1 to bypass this -- the pipeline
-    # is the canonical way to call cleanup.
-    if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ]; then
-        local seen_yes=0 a
-        for a in "$@"; do
-            [ "$a" = "--yes" ] && seen_yes=1
-        done
-        if [ "$seen_yes" -ne 1 ]; then
-            err "cleanup will run 'rm -rf $REMOTE_DIR' on every host."
-            die "pass --yes to confirm (e.g. $0 cleanup --yes)"
+    local seen_yes=0 wipe_all=0 a
+    for a in "$@"; do
+        case "$a" in
+            --yes) seen_yes=1 ;;
+            --all) wipe_all=1 ;;
+            *) die "cleanup: unknown argument: $a (expected --yes / --all)" ;;
+        esac
+    done
+    if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ] && [ "$seen_yes" -ne 1 ]; then
+        if [ "$wipe_all" = "1" ]; then
+            err "cleanup --all will run 'rm -rf $REMOTE_DIR' on every host."
+        else
+            err "cleanup will remove this run's files from $REMOTE_DIR on every host."
         fi
+        die "pass --yes to confirm (e.g. $0 cleanup --yes)"
     fi
-    log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
-    parallel_hosts _worker_cleanup
-    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        set_state CLEANED_UP yes
+    _validate_server_list
+    if [ "$wipe_all" = "1" ]; then
+        log "Removing $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
+        parallel_hosts _worker_cleanup_all
     else
+        # Need a RUN_ID to know what to scrub. If none was given, target
+        # the latest run.
+        if [ -z "$RUN_ID" ]; then
+            if [ -L "$RESULTS_BASE/latest" ]; then
+                RUN_ID=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
+            fi
+        fi
+        [ -n "$RUN_ID" ] || die "cleanup needs a run-id (pass --run-id <id> or --all)"
+        log "Removing run $RUN_ID files from $REMOTE_DIR on every host (parallel x$IPERF_JOBS)..."
+        parallel_hosts _worker_cleanup_run
+    fi
+    if [ ${#PARALLEL_FAILED[@]} -ne 0 ]; then
         warn "cleanup had ${#PARALLEL_FAILED[@]} failure(s)"
     fi
 }
 
 #------------------------------------------------------------------------------
 cmd_parse_csv() {
+    _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     log "Parsing iperf2 CSV logs -> $csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found; install Python 3"
@@ -1972,7 +2086,6 @@ print(f"Wrote {len(rows)} rows ({ok} OK) from {len(set(r['filename'] for r in ro
 PYEOF
     local rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
-    set_state CSV_BUILT yes
 }
 
 #------------------------------------------------------------------------------
@@ -1993,6 +2106,7 @@ PYEOF
 #       (a single-core saturation flag even when box-wide CPU looks fine)
 #------------------------------------------------------------------------------
 cmd_parse_cpu() {
+    _resolve_existing_run
     local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
     log "Parsing CPU sample logs -> $cpu_csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
@@ -2269,11 +2383,11 @@ if ranked:
 PYEOF
     local rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
-    set_state CPU_PARSED yes
 }
 
 #------------------------------------------------------------------------------
 cmd_make_pivot() {
+    _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     local pivot="$RESULTS_DIR/iperf_pivot.txt"
     [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
@@ -2283,13 +2397,13 @@ cmd_make_pivot() {
     # environment, which may have changed since the actual test run).
     local meta_run_at meta_mode meta_duration meta_port meta_parallel meta_n_hosts
     meta_run_at="$(date '+%F %T %z')"
-    meta_mode="$(get_state TESTS_RUN_MODE)"
-    [ -z "$meta_mode" ] || [ "$meta_mode" = "no" ] && meta_mode="(unknown)"
+    meta_mode="(unknown)"
+    [ -f "$RESULTS_DIR/.run_mode" ] && meta_mode=$(cat "$RESULTS_DIR/.run_mode")
     meta_duration="$IPERF_DURATION"
     meta_port="$IPERF_PORT"
     meta_parallel="$IPERF_PARALLEL"
     meta_n_hosts=0
-    [ -f "$SERVER_LIST_FILE" ] && meta_n_hosts=$(read_servers | wc -l)
+    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] && meta_n_hosts=$(read_servers | wc -l)
 
     "$PYTHON_BIN" - "$csv" "$pivot" \
         "$meta_run_at" "$meta_mode" "$meta_duration" "$meta_port" \
@@ -2372,11 +2486,11 @@ print(f"Wrote {out_txt}")
 PYEOF
     local rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
-    set_state PIVOT_BUILT yes
 }
 
 #------------------------------------------------------------------------------
 cmd_make_heatmap() {
+    _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
     local png="$RESULTS_DIR/iperf_heatmap.png"
@@ -2385,8 +2499,8 @@ cmd_make_heatmap() {
 
     local meta_run_at meta_mode meta_duration
     meta_run_at="$(date '+%F %T %z')"
-    meta_mode="$(get_state TESTS_RUN_MODE)"
-    [ -z "$meta_mode" ] || [ "$meta_mode" = "no" ] && meta_mode="(unknown)"
+    meta_mode="(unknown)"
+    [ -f "$RESULTS_DIR/.run_mode" ] && meta_mode=$(cat "$RESULTS_DIR/.run_mode")
     meta_duration="$IPERF_DURATION"
 
     "$PYTHON_BIN" - "$csv" "$png" "$cpu_csv" \
@@ -2597,7 +2711,6 @@ print(f"Wrote {out_png}")
 PYEOF
     local rc=$?
     [ "$rc" -eq 0 ] || return "$rc"
-    set_state HEATMAP_BUILT yes
 }
 
 #------------------------------------------------------------------------------
@@ -2636,6 +2749,7 @@ _doctor_check_python_module() {
 # (host, target) pairs without opening the heatmap PNG. Reads
 # results/iperf_results.csv produced by parse-csv.
 cmd_results_summary() {
+    _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     [ -f "$csv" ] || die "No CSV at $csv; run: $0 parse-csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
@@ -2718,27 +2832,26 @@ cmd_doctor() {
 cmd_all() {
     local mode="parallel"
     local keep_going=0
-    local resume=0
     local arg
     for arg in "$@"; do
         case "$arg" in
             --keep-going)                              keep_going=1 ;;
-            --resume)                                  resume=1 ;;
             parallel|sequential-host|sequential-pair)  mode="$arg" ;;
-            *) die "cmd_all: unknown argument: $arg (expected mode and/or --keep-going / --resume)" ;;
+            *) die "cmd_all: unknown argument: $arg (expected mode and/or --keep-going)" ;;
         esac
     done
 
-    # _resume_skip <state_key>: with --resume, returns true (skip) if the
-    # step is already done. Without --resume, always returns false.
-    _resume_skip() {
-        [ "$resume" = "1" ] && [ "$(get_state "$1")" = "yes" ]
-    }
+    # One run-id covers the whole pipeline so every artifact lands in
+    # the same results subdirectory.
+    _ensure_run_id
+    _validate_server_list
 
     # Stop iperf daemons across the fleet on Ctrl-C / SIGTERM.
     trap '_orchestrator_signal_cleanup' INT TERM
 
     log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
+    log "Run ID: $RUN_ID"
+    log "Results dir: $RESULTS_DIR"
 
     # Fail fast on missing local prereqs instead of crashing 90s into the
     # pipeline at parse-csv / make-heatmap.
@@ -2761,60 +2874,21 @@ cmd_all() {
         fi
     }
 
-    [ "$(get_state SSH_KEYS_DISTRIBUTED)" = "yes" ] || cmd_ssh_setup
-    if _resume_skip IPERF_INSTALLED_CHECKED; then
-        log "Skip check-iperf (--resume; already done)"
-    else
-        cmd_check_iperf;        _all_gate check-iperf
-    fi
-    if _resume_skip SERVERS_RUNNING_CHECKED; then
-        log "Skip check-servers (--resume; already done)"
-    else
-        cmd_check_servers;      _all_gate check-servers
-    fi
-    if _resume_skip SERVERS_STARTED; then
-        log "Skip start-servers (--resume; already done)"
-    else
-        cmd_start_servers;      _all_gate start-servers
-    fi
-    if _resume_skip SCRIPTS_CREATED; then
-        log "Skip create-scripts (--resume; already done)"
-    else
-        cmd_create_scripts
-    fi
-    if _resume_skip SCRIPTS_DISTRIBUTED; then
-        log "Skip distribute-scripts (--resume; already done)"
-    else
-        cmd_distribute_scripts; _all_gate distribute-scripts
-    fi
-    if _resume_skip TESTS_RUN; then
-        log "Skip run-tests (--resume; already done)"
-    else
-        cmd_run_tests "$mode"
-        if [ "$(get_state TESTS_RUN)" != "yes" ] && [ "$keep_going" != "1" ]; then
-            die "run-tests had failure(s); aborting (use --keep-going to continue, or re-run run-tests)"
-        fi
-    fi
-    if _resume_skip RESULTS_COLLECTED; then
-        log "Skip collect-results (--resume; already done)"
-    else
-        cmd_collect_results;    _all_gate collect-results
-    fi
-    if _resume_skip SERVERS_STOPPED; then
-        log "Skip stop-servers (--resume; already done)"
-    else
-        cmd_stop_servers;       _all_gate stop-servers
-    fi
-    if _resume_skip CLEANED_UP; then
-        log "Skip cleanup (--resume; already done)"
-    else
-        _IPERF_ORCH_INTERNAL=1 cmd_cleanup
-        _all_gate cleanup
-    fi
-    if _resume_skip CSV_BUILT;     then log "Skip parse-csv (--resume; already done)";    else cmd_parse_csv;     fi
-    if _resume_skip CPU_PARSED;    then log "Skip parse-cpu (--resume; already done)";    else cmd_parse_cpu;     fi
-    if _resume_skip PIVOT_BUILT;   then log "Skip make-pivot (--resume; already done)";   else cmd_make_pivot;    fi
-    if _resume_skip HEATMAP_BUILT; then log "Skip make-heatmap (--resume; already done)"; else cmd_make_heatmap;  fi
+    cmd_ssh_setup
+    cmd_check_iperf;         _all_gate check-iperf
+    cmd_check_servers;       _all_gate check-servers
+    cmd_start_servers;       _all_gate start-servers
+    cmd_create_scripts
+    cmd_distribute_scripts;  _all_gate distribute-scripts
+    cmd_run_tests "$mode"
+    cmd_collect_results;     _all_gate collect-results
+    cmd_stop_servers;        _all_gate stop-servers
+    _IPERF_ORCH_INTERNAL=1 cmd_cleanup
+    _all_gate cleanup
+    cmd_parse_csv
+    cmd_parse_cpu
+    cmd_make_pivot
+    cmd_make_heatmap
     log "=== Pipeline complete ==="
     echo
     echo "Results in: $RESULTS_DIR"
@@ -2836,7 +2910,7 @@ cmd_all() {
     # If any hosts lack mpstat, the parser falls back to /proc/stat
     # (box-wide CPU only, no per-core). Surface this so users know why
     # the heatmap's CPU-overlay annotations may look coarser.
-    local installed="$IPERF_DIR/iperf_installed.txt"
+    local installed="$RESULTS_DIR/iperf_installed.txt"
     if [ -f "$installed" ] && grep -q 'mpstat=no' "$installed"; then
         local n_no
         n_no=$(grep -c 'mpstat=no' "$installed")
@@ -2858,21 +2932,15 @@ cmd_all() {
 _subcmd_help() {
     local sub="$1"
     case "$sub" in
-        init)
-            cat <<'EOF'
-init <server_list_file>
-    Load a server list. The file should have one IP or hostname per line;
-    '#' comments and blank lines are ignored. Bracketed IPv6 ([fe80::1])
-    is accepted. Resets pipeline state so subsequent steps re-run.
-EOF
-            ;;
         ssh-setup)
             cat <<'EOF'
-ssh-setup
+ssh-setup [--ask-password | --password-file=PATH | --password-env=VAR]
     Generate ~/.ssh/id_ed25519 if missing, then run ssh-copy-id against
     every host in the list. Default: prompts you per-host (sequential).
     With --password-file / --password-env / --ask-password, drives
     ssh-copy-id non-interactively via 'expect', in parallel (--jobs).
+    Both global-flag form (before the subcommand) and subcommand form
+    (after) work; --ask-password prompts exactly once.
 EOF
             ;;
         check-iperf)
@@ -2930,8 +2998,11 @@ EOF
             ;;
         cleanup)
             cat <<'EOF'
-cleanup --yes
-    Remove $REMOTE_DIR (default /tmp/iperf_orchestrator) on every host.
+cleanup --yes [--all]
+    Default: remove only the current run's files (iperf_*_<run-id>.*) from
+    $REMOTE_DIR on every host -- safe when $REMOTE_DIR is on a shared FS
+    and another run is in progress.
+    --all wipes $REMOTE_DIR entirely (legacy behavior).
     Requires --yes when invoked directly to prevent accidental loss.
     `all` calls this internally without --yes via an internal bypass.
 EOF
@@ -2948,14 +3019,13 @@ EOF
             ;;
         all)
             cat <<'EOF'
-all [parallel|sequential-host|sequential-pair] [--keep-going] [--resume]
-    Run the full pipeline end-to-end. Calls `doctor` first to fail
-    fast on missing local prereqs. By default, aborts as soon as any
-    parallel step records per-host failures.
-      --keep-going  continue past per-host failures
-      --resume      skip steps whose state key is already "yes" (use
-                    after a partial run; usually faster than re-running
-                    everything)
+all [parallel|sequential-host|sequential-pair] [--keep-going]
+    Run the full pipeline end-to-end. Generates a fresh run-id, calls
+    `doctor` first, then runs ssh-setup, check-iperf, check-servers,
+    start-servers, create-scripts, distribute-scripts, run-tests,
+    collect-results, stop-servers, cleanup, parse-csv, parse-cpu,
+    make-pivot, make-heatmap. Aborts on per-host failures; pass
+    --keep-going to continue.
 EOF
             ;;
         results-summary)
@@ -2976,9 +3046,10 @@ EOF
             ;;
         status)
             cat <<'EOF'
-status
-    Show pipeline progress (each state key as yes/no), the host count,
-    and a "Next:" hint pointing at the next subcommand to run.
+status [--json]
+    Probe each host (iperf installed? server running?) and list the
+    available run directories under $RESULTS_BASE. Pass --json to emit
+    a flat object suitable for scripting / CI.
 EOF
             ;;
         *)
@@ -3003,9 +3074,8 @@ fi
 
 case "$cmd" in
     "")                 first_run_banner ;;
-    init)               cmd_init "$@" ;;
     status)             cmd_status "$@" ;;
-    ssh-setup)          cmd_ssh_setup ;;
+    ssh-setup)          cmd_ssh_setup "$@" ;;
     check-iperf)        cmd_check_iperf ;;
     check-servers)      cmd_check_servers ;;
     start-servers)      cmd_start_servers ;;

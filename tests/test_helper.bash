@@ -23,13 +23,20 @@ export REPO_ROOT ORCH
 setup_orch_env() {
     TEST_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-tests-XXXXXX")"
     export TEST_TMPDIR
-    export IPERF_DIR="$TEST_TMPDIR/state"
+    export RESULTS_BASE="$TEST_TMPDIR/results"
+    export IPERF_SERVERS="$TEST_TMPDIR/servers.txt"
+    # Pre-set a fixed RUN_ID so tests can predict generated filenames.
+    export IPERF_RUN_ID="test-run"
     export REMOTE_DIR="$TEST_TMPDIR/remote"
     export FAKE_BIN="$TEST_TMPDIR/fakebin"
-    mkdir -p "$FAKE_BIN"
+    mkdir -p "$FAKE_BIN" "$RESULTS_BASE"
     # Reset to a clean SSH user so the script's $USER/$(id -un) fallback
     # can't surprise tests that hardcode usernames.
     export SSH_USER="testuser"
+    # Back-compat for tests that still reference $IPERF_DIR -- point it
+    # at a sub-dir of TEST_TMPDIR so any stray writes are sandboxed.
+    export IPERF_DIR="$TEST_TMPDIR/state"
+    mkdir -p "$IPERF_DIR"
 }
 
 teardown_orch_env() {
@@ -62,15 +69,17 @@ run_orch() {
     export RUN_OUT RUN_RC
 }
 
-# Write a server list to the state dir.
+# Write a server list to the test tmpdir and (re)export IPERF_SERVERS so
+# the orchestrator picks it up. Returns the resolved path on stdout.
 write_server_list() {
-    local out="$IPERF_DIR/servers.list"
-    mkdir -p "$IPERF_DIR"
+    local out="${IPERF_SERVERS:-$TEST_TMPDIR/servers.txt}"
+    mkdir -p "$(dirname "$out")"
     : > "$out"
     local h
     for h in "$@"; do
         printf '%s\n' "$h" >> "$out"
     done
+    export IPERF_SERVERS="$out"
     echo "$out"
 }
 
