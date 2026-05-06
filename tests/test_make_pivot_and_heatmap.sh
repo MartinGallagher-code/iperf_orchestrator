@@ -90,6 +90,30 @@ test_make_pivot_writes_pivot_file() {
     [ -f "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" ] || return 1
 }
 
+test_make_pivot_annotates_failed_only_cells_with_attempt_count() {
+    # For a pair with multiple attempts but no successful samples
+    # (every iperf failed), the cell should read "-(N)" instead of "-".
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+,a,b,OK,TCP,5,1,0,0,1000.0,5001,40000,a,b,r1,
+,a,c,NO_SUMMARY,TCP,5,1,,,,5001,40000,a,c,r2,
+,a,c,NO_SUMMARY,TCP,5,1,,,,5001,40000,a,c,r3,
+,a,c,NO_SUMMARY,TCP,5,1,,,,5001,40000,a,c,r4,
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -q -- "-(3)" "$pivot" || {
+        echo "expected -(3) annotation for the all-failed cell" >&2
+        cat "$pivot" >&2
+        return 1
+    }
+    grep -q "'-(N)'" "$pivot" || {
+        echo "expected legend explaining -(N) annotation" >&2
+        return 1
+    }
+}
+
 test_make_pivot_includes_per_server_total_traffic() {
     prep_csv
     run_orch make-pivot >/dev/null 2>&1
@@ -171,6 +195,7 @@ run_test test_make_pivot_requires_csv
 run_test test_make_pivot_produces_grid
 run_test test_make_pivot_per_source_mean_ranking
 run_test test_make_pivot_writes_pivot_file
+run_test test_make_pivot_annotates_failed_only_cells_with_attempt_count
 run_test test_make_pivot_includes_per_server_total_traffic
 run_test test_make_pivot_means_multiple_samples_per_pair
 run_test test_make_heatmap_requires_csv

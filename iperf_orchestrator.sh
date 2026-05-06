@@ -2133,15 +2133,20 @@ meta_port, meta_parallel, meta_n_hosts = sys.argv[6], sys.argv[7], sys.argv[8]
 
 mat = defaultdict(dict)    # mat[src][dst] = mean mbps across samples
 samples_per = defaultdict(dict)  # samples_per[src][dst] = sample count
+attempts = defaultdict(lambda: defaultdict(int))  # attempts[src][dst] = total tries (incl. failures)
 sources, targets = set(), set()
 
 # Accumulate samples per (source, target). Rolling mode produces many
-# rows per ordered pair; we aggregate by taking the mean.
+# rows per ordered pair; we aggregate by taking the mean. We also count
+# every attempt (including rows with no measured throughput, i.e.
+# failed iperf invocations) so blank cells can be annotated with the
+# attempt count -- "-(5)" means 5 tries, all failed.
 acc = defaultdict(lambda: defaultdict(list))
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
         sources.add(s); targets.add(t)
+        attempts[s][t] += 1
         v = row.get("mbps") or ""
         try:
             f_v = float(v) if v != "" else None
@@ -2180,7 +2185,7 @@ with open(out_txt, "w") as f:
             f"Port: {meta_port}    Parallel: {meta_parallel}    Hosts: {meta_n_hosts}\n")
     f.write(f"Rows = source (sender), Columns = target (receiver)\n")
     f.write(f"Each cell from a single full-duplex test that measured both directions concurrently.\n")
-    f.write(f"Diagonal '-' = no self-test\n\n")
+    f.write(f"Diagonal '-' = no self-test;  '-(N)' = N attempts, none successful\n\n")
 
     # Header
     f.write(" " * host_w + " | ")
@@ -2200,8 +2205,12 @@ with open(out_txt, "w") as f:
                 f.write("-".rjust(num_w) + " ")
             else:
                 v = mat.get(s, {}).get(d)
-                f.write(fmt_num(v) + " ")
-                if v is not None:
+                if v is None:
+                    a = attempts.get(s, {}).get(d, 0)
+                    cell = f"-({a})" if a > 0 else "-"
+                    f.write(cell.rjust(num_w) + " ")
+                else:
+                    f.write(fmt_num(v) + " ")
                     vals.append(v)
         if vals:
             row_means[s] = sum(vals) / len(vals)
