@@ -2114,17 +2114,31 @@ in_csv, out_txt = sys.argv[1], sys.argv[2]
 meta_run_at, meta_mode, meta_duration = sys.argv[3], sys.argv[4], sys.argv[5]
 meta_port, meta_parallel, meta_n_hosts = sys.argv[6], sys.argv[7], sys.argv[8]
 
-mat = defaultdict(dict)   # mat[src][dst] = mbps
+mat = defaultdict(dict)    # mat[src][dst] = mean mbps across samples
+samples_per = defaultdict(dict)  # samples_per[src][dst] = sample count
 sources, targets = set(), set()
 
+# Accumulate samples per (source, target). Rolling mode produces many
+# rows per ordered pair; we aggregate by taking the mean.
+acc = defaultdict(lambda: defaultdict(list))
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
         sources.add(s); targets.add(t)
         v = row.get("mbps") or ""
         try:
-            mat[s][t] = float(v) if v != "" else None
+            f_v = float(v) if v != "" else None
         except ValueError:
+            f_v = None
+        if f_v is not None:
+            acc[s][t].append(f_v)
+for s in acc:
+    for t in acc[s]:
+        vs = acc[s][t]
+        if vs:
+            mat[s][t] = sum(vs) / len(vs)
+            samples_per[s][t] = len(vs)
+        else:
             mat[s][t] = None
 
 # Use the union, sorted, so rows and columns line up regardless of which
@@ -2180,6 +2194,12 @@ with open(out_txt, "w") as f:
     for h, m in sorted(row_means.items(), key=lambda kv: kv[1], reverse=True):
         bar = "#" * int(m / max(row_means.values()) * 40) if row_means else ""
         f.write(f"  {h.ljust(host_w)} {m:9.2f}  {bar}\n")
+
+    # If any cell aggregated more than one sample (rolling mode), summarize.
+    counts = [c for d in samples_per.values() for c in d.values()]
+    if counts and max(counts) > 1:
+        f.write(f"\nSamples per cell: min={min(counts)} max={max(counts)} "
+                f"mean={sum(counts)/len(counts):.1f} (cells reflect mean of N samples)\n")
 
 print(f"Wrote {out_txt}")
 PYEOF
@@ -2243,15 +2263,24 @@ except ImportError as e:
 
 mat = defaultdict(dict)
 sources, targets = set(), set()
+# Accumulate samples per ordered pair and use the mean. Rolling mode
+# can produce many rows per (source, target); other modes produce one.
+acc = defaultdict(lambda: defaultdict(list))
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
         sources.add(s); targets.add(t)
         v = row.get("mbps") or ""
         try:
-            mat[s][t] = float(v) if v != "" else None
+            f_v = float(v) if v != "" else None
         except ValueError:
-            mat[s][t] = None
+            f_v = None
+        if f_v is not None:
+            acc[s][t].append(f_v)
+for s in acc:
+    for t in acc[s]:
+        vs = acc[s][t]
+        mat[s][t] = sum(vs) / len(vs) if vs else None
 
 hosts = sorted(sources | targets)
 n = len(hosts)
