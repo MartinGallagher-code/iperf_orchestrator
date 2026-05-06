@@ -1146,7 +1146,7 @@ _worker_distribute_script() {
 }
 
 cmd_distribute_scripts() {
-    _ensure_run_id
+    _resolve_existing_run
     _validate_server_list
     [ -d "$SCRIPTS_DIR" ] || die "no generated scripts at $SCRIPTS_DIR; run create-scripts first"
     log "Distributing run scripts to each host (parallel x$IPERF_JOBS)..."
@@ -1177,7 +1177,7 @@ cmd_run_tests() {
         parallel|sequential-host|sequential-pair) ;;
         *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair)" ;;
     esac
-    _ensure_run_id
+    _resolve_existing_run
     _validate_server_list
     trap '_orchestrator_signal_cleanup' INT TERM
     local n_hosts; n_hosts=$(read_servers | wc -l)
@@ -1282,7 +1282,7 @@ _worker_collect_results() {
 }
 
 cmd_collect_results() {
-    _ensure_run_id
+    _resolve_existing_run
     _validate_server_list
     log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched, parallel x$IPERF_JOBS)"
     parallel_hosts _worker_collect_results

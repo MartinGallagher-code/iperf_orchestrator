@@ -100,15 +100,16 @@ test_distribute_scripts_uses_remote_dir_flag() {
     }
 }
 
-test_distribute_scripts_warns_when_no_per_host_script() {
-    # Set up server list but DON'T run create-scripts. The worker
-    # should warn for each host and the caller should report failures.
+test_distribute_scripts_dies_without_a_run_to_resolve() {
+    # Server list set but no create-scripts has been run -> no run dir
+    # to resolve. distribute-scripts should die with a clear message.
     install_fake_ssh
     write_server_list x y >/dev/null
+    rm -rf "$RESULTS_BASE"
     : > "$FAKE_SSH_LOG"
     run_with_fakes distribute-scripts
-    assert_contains "$RUN_OUT" "no script for" || return 1
-    assert_contains "$RUN_OUT" "failure" "should report failure(s)" || return 1
+    assert_ne 0 "$RUN_RC" "should fail when no run exists" || return 1
+    assert_contains "$RUN_OUT" "not found" || return 1
 }
 
 run_test test_distribute_scripts_uploads_one_per_host
@@ -118,6 +119,6 @@ run_test test_distribute_scripts_creates_remote_dir
 run_test test_distribute_scripts_removes_only_this_runs_stale_files
 run_test test_distribute_scripts_dies_when_no_server_list
 run_test test_distribute_scripts_uses_remote_dir_flag
-run_test test_distribute_scripts_warns_when_no_per_host_script
+run_test test_distribute_scripts_dies_without_a_run_to_resolve
 
 report_tests
