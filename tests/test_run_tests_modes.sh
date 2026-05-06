@@ -115,7 +115,23 @@ third"
     assert_eq "$expected" "$order" "sequential-host should visit hosts in list order" || return 1
 }
 
+test_run_tests_rolling_mode_dispatches_per_host_loop() {
+    install_fake_ssh
+    write_server_list a b c >/dev/null
+    run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" "rolling mode should succeed" || return 1
+    # One ssh per host, each carrying the inline probe script (look for END_TIME).
+    local n
+    n=$(grep -c "END_TIME=" "$FAKE_SSH_LOG")
+    assert_eq "3" "$n" "rolling should dispatch one inline probe per host" || return 1
+    [ -f "$RESULTS_BASE/$IPERF_RUN_ID/.run_mode" ] || return 1
+    [ "$(cat "$RESULTS_BASE/$IPERF_RUN_ID/.run_mode")" = "rolling" ] || {
+        echo "expected .run_mode=rolling" >&2; return 1
+    }
+}
+
 run_test test_run_tests_unknown_mode_is_rejected
+run_test test_run_tests_rolling_mode_dispatches_per_host_loop
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode
