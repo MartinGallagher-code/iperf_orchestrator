@@ -1273,14 +1273,16 @@ _worker_collect_results() {
 
     local client_count
     client_count=$(tar -tzf "$tarball_local" 2>/dev/null | grep -c '^iperf_test_' || true)
-    if tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>/dev/null; then
-        log "  $host: $client_count client logs + server log + status"
+    # Don't gate on tar's exit code -- it returns 1 on harmless warnings
+    # (e.g. clock skew between hosts producing future-dated timestamps)
+    # but the files are still extracted. Surface any tar output verbatim.
+    local tarout
+    tarout=$(tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>&1)
+    if [ -n "$tarout" ]; then
+        log "  $host: $client_count client logs + server log + status (tar: $tarout)"
     else
-        warn "  $host: local extraction failed"
-        rm -f "$tarball_local"
-        return 1
+        log "  $host: $client_count client logs + server log + status"
     fi
-
     rm -f "$tarball_local"
     ssh_run "$host" "rm -f '$tarball_remote'" 2>/dev/null || true
 }
