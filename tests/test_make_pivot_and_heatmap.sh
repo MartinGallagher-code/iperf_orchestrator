@@ -114,6 +114,16 @@ EOF
     }
 }
 
+test_make_pivot_includes_fleet_aggregate_bandwidth() {
+    prep_csv
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    assert_contains "$(cat "$pivot")" "Fleet aggregate bandwidth" \
+        "pivot should report fleet-wide total" || return 1
+    assert_contains "$(cat "$pivot")" "measured flows:" \
+        "pivot should report flow count" || return 1
+}
+
 test_make_pivot_includes_per_server_total_traffic() {
     prep_csv
     run_orch make-pivot >/dev/null 2>&1
@@ -197,6 +207,7 @@ run_test test_make_pivot_per_source_mean_ranking
 run_test test_make_pivot_writes_pivot_file
 run_test test_make_pivot_annotates_failed_only_cells_with_attempt_count
 run_test test_make_pivot_includes_per_server_total_traffic
+run_test test_make_pivot_includes_fleet_aggregate_bandwidth
 run_test test_make_pivot_means_multiple_samples_per_pair
 run_test test_make_heatmap_requires_csv
 run_test test_make_heatmap_produces_png_or_skips_cleanly

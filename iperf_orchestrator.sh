@@ -2243,6 +2243,21 @@ with open(out_txt, "w") as f:
             f.write(f"  {h.ljust(host_w)} {t:9.2f}  "
                     f"(out={o:8.2f} in={i:8.2f})  {bar}\n")
 
+    # Fleet-wide aggregate: the total bandwidth being moved across the
+    # mesh at any moment, averaged over the run. Sum of every successful
+    # (source -> target) cell value. Each cell is itself a per-pair
+    # mean; summing them gives the total instantaneous flow rate.
+    all_flows = [mat.get(s, {}).get(d)
+                 for s in src_list for d in dst_list if s != d]
+    all_flows = [v for v in all_flows if v is not None]
+    if all_flows:
+        sys_total = sum(all_flows)
+        sys_mean = sys_total / len(all_flows)
+        f.write(f"\nFleet aggregate bandwidth (sum of all directional flows): "
+                f"{sys_total:.2f} Mbps\n")
+        f.write(f"  measured flows: {len(all_flows)} "
+                f"(mean {sys_mean:.2f} Mbps per flow)\n")
+
     # If any cell aggregated more than one sample (rolling mode), summarize.
     counts = [c for d in samples_per.values() for c in d.values()]
     if counts and max(counts) > 1:
