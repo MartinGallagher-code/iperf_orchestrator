@@ -86,12 +86,12 @@ test_duration_zero_rejected() {
 }
 
 test_parallel_zero_rejected() {
-    run_orch --parallel=0 help
+    run_orch --streams=0 help
     assert_status 2 "$RUN_RC" || return 1
 }
 
 test_parallel_garbage_rejected() {
-    run_orch --parallel=foo help
+    run_orch --streams=foo help
     assert_status 2 "$RUN_RC" || return 1
 }
 

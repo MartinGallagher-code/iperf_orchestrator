@@ -4,8 +4,8 @@
 # Tests that every documented config env var is honored. The
 # orchestrator declares these at the top:
 #
-#   IPERF_DIR, REMOTE_DIR, IPERF_PORT, IPERF_DURATION, IPERF_PARALLEL,
-#   IPERF_JOBS, SSH_USER, SSH_OPTS, START_DELAY, PYTHON_BIN
+#   IPERF_DIR, REMOTE_DIR, IPERF_PORT, IPERF_DURATION, IPERF_STREAMS,
+#   IPERF_SSH_JOBS, SSH_USER, SSH_OPTS, START_DELAY, PYTHON_BIN
 #   plus SSH_PASSWORD_FILE / SSH_PASSWORD_ENV / SSH_ASK_PASSWORD
 #
 # We verify each one actually changes behavior (or at least is
@@ -31,13 +31,13 @@ test_iperf_duration_env_propagates() {
 }
 
 test_iperf_parallel_env_propagates() {
-    IPERF_PARALLEL=8 run_orch help-advanced
-    assert_contains "$RUN_OUT" "IPERF_PARALLEL=8" || return 1
+    IPERF_STREAMS=8 run_orch help-advanced
+    assert_contains "$RUN_OUT" "IPERF_STREAMS=8" || return 1
 }
 
 test_iperf_jobs_env_propagates() {
-    IPERF_JOBS=24 run_orch help-advanced
-    assert_contains "$RUN_OUT" "IPERF_JOBS=24" || return 1
+    IPERF_SSH_JOBS=24 run_orch help-advanced
+    assert_contains "$RUN_OUT" "IPERF_SSH_JOBS=24" || return 1
 }
 
 test_ssh_user_env_propagates() {
@@ -79,20 +79,20 @@ test_iperf_duration_env_propagates_into_generated_scripts() {
 
 test_iperf_parallel_env_propagates_into_generated_scripts() {
     write_server_list a b >/dev/null
-    IPERF_PARALLEL=7 run_orch create-scripts >/dev/null 2>&1
+    IPERF_STREAMS=7 run_orch create-scripts >/dev/null 2>&1
     local s
     s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
     grep -q '^PARALLEL=7$' "$s" || return 1
 }
 
 test_iperf_jobs_env_caps_concurrency() {
-    # IPERF_JOBS=2 with 6 sleep-1 workers should take ~3 s, not ~1.
+    # IPERF_SSH_JOBS=2 with 6 sleep-1 workers should take ~3 s, not ~1.
     # NOTE: must `export` so the variable survives the source_orch
     # function call. With the `VAR=val source_orch` env-prefix form,
     # bash restores VAR to its previous value after the function
     # returns, defeating the test.
     write_server_list h1 h2 h3 h4 h5 h6 >/dev/null
-    export IPERF_JOBS=2
+    export IPERF_SSH_JOBS=2
     source_orch
     _w_sleep1() { sleep 1; }
     local start end
@@ -101,7 +101,7 @@ test_iperf_jobs_env_caps_concurrency() {
     end=$(date +%s)
     local elapsed=$((end - start))
     if [ "$elapsed" -lt 2 ] || [ "$elapsed" -gt 5 ]; then
-        echo "expected ~3s with IPERF_JOBS=2, got ${elapsed}s" >&2
+        echo "expected ~3s with IPERF_SSH_JOBS=2, got ${elapsed}s" >&2
         return 1
     fi
 }
@@ -172,8 +172,8 @@ test_all_env_vars_set_at_once_dont_collide() {
     # Smoke test: every env var set together should still work.
     IPERF_PORT=11111 \
     IPERF_DURATION=20 \
-    IPERF_PARALLEL=4 \
-    IPERF_JOBS=8 \
+    IPERF_STREAMS=4 \
+    IPERF_SSH_JOBS=8 \
     SSH_USER=netuser \
     START_DELAY=60 \
     REMOTE_DIR=/some/where \
@@ -181,7 +181,7 @@ test_all_env_vars_set_at_once_dont_collide() {
     assert_status 0 "$RUN_RC" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=11111" || return 1
     assert_contains "$RUN_OUT" "IPERF_DURATION=20" || return 1
-    assert_contains "$RUN_OUT" "IPERF_JOBS=8" || return 1
+    assert_contains "$RUN_OUT" "IPERF_SSH_JOBS=8" || return 1
     assert_contains "$RUN_OUT" "SSH_USER=netuser" || return 1
 }
 
@@ -193,8 +193,8 @@ test_env_var_invalid_int_is_rejected() {
 }
 
 test_env_var_zero_jobs_is_rejected() {
-    IPERF_JOBS=0 run_orch help-advanced
-    assert_status 2 "$RUN_RC" "IPERF_JOBS=0 env var should be rejected" || return 1
+    IPERF_SSH_JOBS=0 run_orch help-advanced
+    assert_status 2 "$RUN_RC" "IPERF_SSH_JOBS=0 env var should be rejected" || return 1
 }
 
 run_test test_iperf_port_env_propagates

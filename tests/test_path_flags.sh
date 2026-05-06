@@ -156,7 +156,7 @@ EOF
 
 test_multiple_global_flags_take_effect_together() {
     local custom="$TEST_TMPDIR/multi"
-    run_orch --output "$custom" --port=7777 --jobs=4 --duration=30 status
+    run_orch --output "$custom" --port=7777 --ssh-jobs=4 --duration=30 status
     assert_status 0 "$RUN_RC" || return 1
     assert_contains "$RUN_OUT" "$custom" || return 1
 }

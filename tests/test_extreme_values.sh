@@ -7,7 +7,7 @@
 #   - very long hostnames in pivot rendering
 #   - very large mesh (200 hosts) script generation timing
 #   - very large CPU log
-#   - parallel_hosts with IPERF_JOBS > host count
+#   - parallel_hosts with IPERF_SSH_JOBS > host count
 #   - extreme port numbers (1, 65535)
 #   - extreme durations (1s, large)
 
@@ -131,13 +131,13 @@ test_pair_assignment_balanced_at_n_200() {
     assert_eq "19900" "$sum" "N=200 total client tests" || return 1
 }
 
-# ---- IPERF_JOBS edge cases ---------------------------------------------
+# ---- IPERF_SSH_JOBS edge cases ---------------------------------------------
 
 test_parallel_hosts_with_jobs_greater_than_host_count() {
-    # IPERF_JOBS=100 but only 3 hosts: should run all 3 in parallel
+    # IPERF_SSH_JOBS=100 but only 3 hosts: should run all 3 in parallel
     # without ever idling, total time ~= one worker's runtime.
     write_server_list a b c >/dev/null
-    export IPERF_JOBS=100
+    export IPERF_SSH_JOBS=100
     source_orch
     _w_sleep1() { sleep 1; }
     local start end
@@ -152,9 +152,9 @@ test_parallel_hosts_with_jobs_greater_than_host_count() {
 }
 
 test_parallel_hosts_with_jobs_equal_one_serializes() {
-    # Strict serialization with IPERF_JOBS=1.
+    # Strict serialization with IPERF_SSH_JOBS=1.
     write_server_list a b c >/dev/null
-    export IPERF_JOBS=1
+    export IPERF_SSH_JOBS=1
     source_orch
     _w_sleep1() { sleep 1; }
     local start end

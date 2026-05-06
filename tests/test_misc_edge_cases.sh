@@ -273,8 +273,8 @@ test_validate_uint_helper_rejects_decimals() {
 }
 
 test_jobs_one_is_minimum_acceptable() {
-    run_orch --jobs=1 help
-    assert_status 0 "$RUN_RC" "--jobs=1 should be accepted" || return 1
+    run_orch --ssh-jobs=1 help
+    assert_status 0 "$RUN_RC" "--ssh-jobs=1 should be accepted" || return 1
 }
 
 run_test test_parse_csv_handles_zero_throughput

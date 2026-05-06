@@ -141,7 +141,7 @@ test_validate_uint_rejects_empty_string() {
 }
 
 test_validate_uint_rejects_huge_garbage() {
-    run_orch --jobs=1abc help
+    run_orch --ssh-jobs=1abc help
     assert_status 2 "$RUN_RC" "trailing garbage should be rejected" || return 1
 }
 

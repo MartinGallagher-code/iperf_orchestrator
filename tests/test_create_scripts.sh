@@ -120,7 +120,7 @@ test_generated_script_writes_pair_header() {
 
 test_generated_script_sets_correct_constants() {
     write_servers_only h0 h1
-    IPERF_PORT=6000 IPERF_DURATION=15 IPERF_PARALLEL=3 \
+    IPERF_PORT=6000 IPERF_DURATION=15 IPERF_STREAMS=3 \
         run_orch create-scripts >/dev/null 2>&1
     local s
     s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)

@@ -68,12 +68,12 @@ REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_TOTAL_TIME="${IPERF_TOTAL_TIME:-300}"  # 'rolling' mode wall-time
-IPERF_FLOWS="${IPERF_FLOWS:-1}"              # 'rolling' mode per-host concurrency
-IPERF_PARALLEL="${IPERF_PARALLEL:-1}"      # parallel streams per test
-# --jobs default: derived from $(nproc) so a 64-core orchestrator host
+IPERF_HOST_FLOWS="${IPERF_HOST_FLOWS:-1}"              # 'rolling' mode per-host concurrency
+IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
+# --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
 # overwhelming SSH on huge fleets without an explicit opt-in. Override
-# via env var or --jobs.
+# via env var or --ssh-jobs.
 _default_jobs() {
     local n
     n=$(getconf _NPROCESSORS_ONLN 2>/dev/null \
@@ -86,7 +86,7 @@ _default_jobs() {
     [ "$d" -gt 32 ] && d=32
     echo "$d"
 }
-IPERF_JOBS="${IPERF_JOBS:-$(_default_jobs)}"  # max concurrent SSH/SCP fan-out
+IPERF_SSH_JOBS="${IPERF_SSH_JOBS:-$(_default_jobs)}"  # max concurrent SSH/SCP fan-out
 
 SSH_USER="${SSH_USER:-${USER:-$(id -un)}}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30}"
@@ -134,16 +134,16 @@ while [ $# -gt 0 ]; do
         --port=*)        IPERF_PORT="${1#*=}"; shift ;;
         --duration|-d)   _flag_need "$1" "${2:-}"; IPERF_DURATION="$2"; shift 2 ;;
         --duration=*)    IPERF_DURATION="${1#*=}"; shift ;;
-        --parallel|-P)   _flag_need "$1" "${2:-}"; IPERF_PARALLEL="$2"; shift 2 ;;
-        --parallel=*)    IPERF_PARALLEL="${1#*=}"; shift ;;
-        --jobs|-j)       _flag_need "$1" "${2:-}"; IPERF_JOBS="$2"; shift 2 ;;
-        --jobs=*)        IPERF_JOBS="${1#*=}"; shift ;;
+        --streams|-P)    _flag_need "$1" "${2:-}"; IPERF_STREAMS="$2"; shift 2 ;;
+        --streams=*)     IPERF_STREAMS="${1#*=}"; shift ;;
+        --ssh-jobs|-j)   _flag_need "$1" "${2:-}"; IPERF_SSH_JOBS="$2"; shift 2 ;;
+        --ssh-jobs=*)    IPERF_SSH_JOBS="${1#*=}"; shift ;;
         --start-delay)   _flag_need "$1" "${2:-}"; START_DELAY="$2"; shift 2 ;;
         --start-delay=*) START_DELAY="${1#*=}"; shift ;;
         --total-time)    _flag_need "$1" "${2:-}"; IPERF_TOTAL_TIME="$2"; shift 2 ;;
         --total-time=*)  IPERF_TOTAL_TIME="${1#*=}"; shift ;;
-        --flows)         _flag_need "$1" "${2:-}"; IPERF_FLOWS="$2"; shift 2 ;;
-        --flows=*)       IPERF_FLOWS="${1#*=}"; shift ;;
+        --host-flows)    _flag_need "$1" "${2:-}"; IPERF_HOST_FLOWS="$2"; shift 2 ;;
+        --host-flows=*)  IPERF_HOST_FLOWS="${1#*=}"; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
@@ -187,19 +187,19 @@ _validate_uint() {
     esac
     [ "$val" -ge "$min" ] || _flag_die "$name must be >= $min (got $val)"
 }
-_validate_uint "IPERF_JOBS / --jobs"           "$IPERF_JOBS"     1
+_validate_uint "IPERF_SSH_JOBS / --ssh-jobs"           "$IPERF_SSH_JOBS"     1
 _validate_uint "IPERF_PORT / --port"           "$IPERF_PORT"     1
 _validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
-_validate_uint "IPERF_PARALLEL / --parallel"   "$IPERF_PARALLEL" 1
+_validate_uint "IPERF_STREAMS / --streams"   "$IPERF_STREAMS" 1
 _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
 _validate_uint "IPERF_TOTAL_TIME / --total-time" "$IPERF_TOTAL_TIME" 1
-_validate_uint "IPERF_FLOWS / --flows"           "$IPERF_FLOWS"      1
+_validate_uint "IPERF_HOST_FLOWS / --host-flows"           "$IPERF_HOST_FLOWS"      1
 _validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
 [ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
-# Sanity-warn (don't die) on suspicious --jobs values. Past ~256 you're
+# Sanity-warn (don't die) on suspicious --ssh-jobs values. Past ~256 you're
 # likely about to OOM the orchestrator host or saturate its FD table.
-if [ "$IPERF_JOBS" -gt 256 ]; then
-    echo "iperf-orchestrator: WARN: --jobs=$IPERF_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
+if [ "$IPERF_SSH_JOBS" -gt 256 ]; then
+    echo "iperf-orchestrator: WARN: --ssh-jobs=$IPERF_SSH_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
 fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
 
@@ -400,7 +400,7 @@ scp_from() {
 #
 # parallel_hosts <worker_fn>
 #   Runs <worker_fn> <host> in the background for every host in the server
-#   list, with at most $IPERF_JOBS concurrent workers. Each worker's stdout
+#   list, with at most $IPERF_SSH_JOBS concurrent workers. Each worker's stdout
 #   and stderr are captured to a per-host buffer and replayed in original
 #   server-list order after all workers finish, so output stays readable
 #   even when 100 hosts are running in parallel.
@@ -417,7 +417,7 @@ scp_from() {
 #------------------------------------------------------------------------------
 parallel_hosts() {
     local fn="$1"
-    local jobs="$IPERF_JOBS"
+    local jobs="$IPERF_SSH_JOBS"
     [ "$jobs" -lt 1 ] && jobs=1
 
     # read_servers calls die() when the list is missing, but we invoke
@@ -566,7 +566,7 @@ COMMON COMMANDS:
     run-tests [MODE]       Run tests. MODE is one of:
                              parallel         (default) every host pairs up at once
                              rolling          random rolling probes; scales to any N
-                                              (--total-time SECONDS, --flows N)
+                                              (--total-time SECONDS, --host-flows N)
     process                Pull results, parse CSV/CPU, render pivot + heatmap
     stop-servers           Kill iperf2 -s daemons
     all [MODE]             ssh-setup + start-servers + run-tests + process + stop
@@ -576,8 +576,8 @@ COMMON FLAGS:
     --servers, -s FILE         server list (one host per line; '#' comments)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
-    --flows N                  concurrent flows per host in rolling mode (default $IPERF_FLOWS)
-    --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --host-flows N             concurrent flows per host in rolling mode (default $IPERF_HOST_FLOWS)
+    --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --ask-password             prompt once for an SSH password, reuse for all hosts
     --output, -o DIR           results directory (default $RESULTS_BASE)
@@ -610,10 +610,10 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --run-id ID                Address an existing run (default: follow 'latest' symlink)
     --port PORT                iperf2 listening port (default $IPERF_PORT)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
-    --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
-    --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --streams, -P N            parallel streams within each test (default $IPERF_STREAMS)
+    --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
-    --flows N                  rolling mode per-host concurrent flows (default $IPERF_FLOWS)
+    --host-flows N             rolling mode per-host concurrent flows (default $IPERF_HOST_FLOWS)
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -632,7 +632,7 @@ SETUP:
     ssh-setup              Generate ~/.ssh/id_ed25519 if needed and distribute the key.
                            Default: per-host password prompt (sequential). With
                            --password-file / --password-env / --ask-password, drive
-                           ssh-copy-id via 'expect' in parallel (capped by --jobs).
+                           ssh-copy-id via 'expect' in parallel (capped by --ssh-jobs).
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts have iperf -s currently running
 
@@ -648,7 +648,7 @@ EXECUTION:
                              sequential-pair  one connection on the wire at any moment
                              rolling          each host independently picks its
                                               least-tested peer, repeats for
-                                              --total-time, with --flows concurrent.
+                                              --total-time, with --host-flows concurrent.
                                               Self-starting (no create-scripts).
     collect-results        Pull each host's logs as a tarball back into the run dir.
     stop-servers           Kill iperf -s daemons on every host.
@@ -679,10 +679,10 @@ CONVENIENCE:
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
     IPERF_DURATION=$IPERF_DURATION
-    IPERF_PARALLEL=$IPERF_PARALLEL
-    IPERF_JOBS=$IPERF_JOBS
+    IPERF_STREAMS=$IPERF_STREAMS
+    IPERF_SSH_JOBS=$IPERF_SSH_JOBS
     IPERF_TOTAL_TIME=$IPERF_TOTAL_TIME
-    IPERF_FLOWS=$IPERF_FLOWS
+    IPERF_HOST_FLOWS=$IPERF_HOST_FLOWS
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
@@ -898,7 +898,7 @@ cmd_ssh_setup() {
 
     local failure_count=0
     if [ "$use_expect" = "1" ]; then
-        log "Distributing keys in parallel (max $IPERF_JOBS concurrent)"
+        log "Distributing keys in parallel (max $IPERF_SSH_JOBS concurrent)"
         parallel_hosts _worker_ssh_copy_id
         failure_count=${#PARALLEL_FAILED[@]}
         _scrub_ssh_password
@@ -986,7 +986,7 @@ _worker_start_server() {
 
 cmd_start_servers() {
     _validate_server_list
-    log "Starting iperf2 -s on port $IPERF_PORT (parallel x$IPERF_JOBS)..."
+    log "Starting iperf2 -s on port $IPERF_PORT (parallel x$IPERF_SSH_JOBS)..."
     parallel_hosts _worker_start_server
     [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "start-servers: ${#PARALLEL_FAILED[@]} failure(s)"
 }
@@ -1051,7 +1051,7 @@ SOURCE="$src"
 RUN_ID="$RUN_ID"
 PORT=$IPERF_PORT
 DURATION=$IPERF_DURATION
-PARALLEL=$IPERF_PARALLEL
+PARALLEL=$IPERF_STREAMS
 TARGETS=( $targets_str )
 
 cd "\$(dirname "\$0")"
@@ -1194,7 +1194,7 @@ cmd_distribute_scripts() {
     _resolve_existing_run
     _validate_server_list
     [ -d "$SCRIPTS_DIR" ] || die "no generated scripts at $SCRIPTS_DIR; run create-scripts first"
-    log "Distributing run scripts to each host (parallel x$IPERF_JOBS)..."
+    log "Distributing run scripts to each host (parallel x$IPERF_SSH_JOBS)..."
     parallel_hosts _worker_distribute_script
 
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
@@ -1266,7 +1266,7 @@ cmd_run_tests() {
 # global scheduler -- per-host probes are independent. Scales to any N
 # because each host has at most one outbound flow at any moment.
 _run_rolling() {
-    log "Rolling: ${IPERF_TOTAL_TIME}s wall-time, ${IPERF_DURATION}s per test, up to ${IPERF_FLOWS} flow(s) per host"
+    log "Rolling: ${IPERF_TOTAL_TIME}s wall-time, ${IPERF_DURATION}s per test, up to ${IPERF_HOST_FLOWS} flow(s) per host"
     local hosts=()
     while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
     local pids=() src
@@ -1290,7 +1290,7 @@ _run_rolling() {
             active=0
             while [ \$(date +%s) -lt \$END_TIME ]; do
                 # Wait for a slot if we're at the per-host concurrency cap.
-                while [ \$active -ge $IPERF_FLOWS ]; do
+                while [ \$active -ge $IPERF_HOST_FLOWS ]; do
                     wait -n 2>/dev/null || wait
                     active=\$((active - 1))
                 done
@@ -1410,7 +1410,7 @@ _worker_collect_results() {
 cmd_collect_results() {
     _resolve_existing_run
     _validate_server_list
-    log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched, parallel x$IPERF_JOBS)"
+    log "Collecting results from all hosts -> $RESULTS_DIR (tar-batched, parallel x$IPERF_SSH_JOBS)"
     parallel_hosts _worker_collect_results
 
     local total
@@ -2061,7 +2061,7 @@ cmd_make_pivot() {
     [ -f "$RESULTS_DIR/.run_mode" ] && meta_mode=$(cat "$RESULTS_DIR/.run_mode")
     meta_duration="$IPERF_DURATION"
     meta_port="$IPERF_PORT"
-    meta_parallel="$IPERF_PARALLEL"
+    meta_parallel="$IPERF_STREAMS"
     meta_n_hosts=0
     [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] && meta_n_hosts=$(read_servers | wc -l)
 

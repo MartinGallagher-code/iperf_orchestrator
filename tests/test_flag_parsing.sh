@@ -27,22 +27,22 @@ test_flag_requiring_value_with_no_value() {
 }
 
 test_jobs_must_be_positive_integer() {
-    run_orch --jobs notanumber help-advanced
-    assert_status 2 "$RUN_RC" "non-integer --jobs should exit 2" || return 1
+    run_orch --ssh-jobs notanumber help-advanced
+    assert_status 2 "$RUN_RC" "non-integer --ssh-jobs should exit 2" || return 1
     assert_contains "$RUN_OUT" "integer" "error message should explain integer requirement" || return 1
 }
 
 test_jobs_zero_is_rejected() {
-    run_orch --jobs 0 help-advanced
-    assert_status 2 "$RUN_RC" "zero --jobs should be rejected" || return 1
+    run_orch --ssh-jobs 0 help-advanced
+    assert_status 2 "$RUN_RC" "zero --ssh-jobs should be rejected" || return 1
     assert_contains "$RUN_OUT" ">= 1" "should require >= 1" || return 1
 }
 
 test_jobs_negative_is_rejected() {
     # The integer validator only accepts digits, so -1 is parsed as
     # non-integer (the leading '-' fails the digit-only check).
-    run_orch --jobs -1 help-advanced
-    assert_status 2 "$RUN_RC" "negative --jobs should be rejected" || return 1
+    run_orch --ssh-jobs -1 help-advanced
+    assert_status 2 "$RUN_RC" "negative --ssh-jobs should be rejected" || return 1
 }
 
 test_long_flag_with_equals() {
@@ -62,7 +62,7 @@ test_long_flag_with_space() {
 test_short_flag_jobs() {
     run_orch -j 7 help-advanced
     assert_status 0 "$RUN_RC" "-j 7 should succeed" || return 1
-    assert_contains "$RUN_OUT" "IPERF_JOBS=7" "usage should reflect jobs=7" || return 1
+    assert_contains "$RUN_OUT" "IPERF_SSH_JOBS=7" "usage should reflect jobs=7" || return 1
 }
 
 test_short_flag_duration() {
@@ -74,7 +74,7 @@ test_short_flag_duration() {
 test_short_flag_parallel() {
     run_orch -P 4 help-advanced
     assert_status 0 "$RUN_RC" "-P 4 should succeed" || return 1
-    assert_contains "$RUN_OUT" "IPERF_PARALLEL=4" "usage should reflect parallel=4" || return 1
+    assert_contains "$RUN_OUT" "IPERF_STREAMS=4" "usage should reflect parallel=4" || return 1
 }
 
 test_ssh_user_override() {

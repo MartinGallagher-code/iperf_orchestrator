@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Martin J. Gallagher
 # Tests for the parallel_hosts() fan-out helper. Verifies:
 #   - it iterates every host in the server list
-#   - it caps concurrency to $IPERF_JOBS
+#   - it caps concurrency to $IPERF_SSH_JOBS
 #   - it captures per-host stdout+stderr
 #   - it records failed hosts in PARALLEL_FAILED
 
@@ -53,11 +53,11 @@ fail2" "$sorted" "PARALLEL_FAILED should list both failures" || return 1
 }
 
 test_parallel_hosts_respects_jobs_cap() {
-    # With IPERF_JOBS=2 and 6 hosts each sleeping 1s, total wall time
+    # With IPERF_SSH_JOBS=2 and 6 hosts each sleeping 1s, total wall time
     # should be ~3s, not ~1s (would be if unconstrained) and not ~6s
     # (would be if serial).
     write_servers h1 h2 h3 h4 h5 h6
-    export IPERF_JOBS=2
+    export IPERF_SSH_JOBS=2
     source_orch
     _worker_sleep1() {
         sleep 1
@@ -80,7 +80,7 @@ test_parallel_hosts_captures_worker_output_in_order() {
     # workers finish out of order. We make later-listed hosts finish
     # first via shorter sleeps and check the replayed order.
     write_servers slow medium fast
-    export IPERF_JOBS=8   # let them all run in parallel
+    export IPERF_SSH_JOBS=8   # let them all run in parallel
     source_orch
     _worker_with_varied_speed() {
         case "$1" in
