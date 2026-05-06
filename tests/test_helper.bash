@@ -124,14 +124,13 @@ fi
 # (e.g. start = mkdir + pkill + iperf -s -D + pgrep), so we match on
 # the most specific signature first.
 case "$remote_cmd" in
-    *"iperf -s -D"*)
-        # cmd_start_servers: mkdir + pkill + iperf -s -D + pgrep.
-        # Record this host as running for subsequent pgrep probes.
+    *"iperf -p"*"-s -D"*)
+        # cmd_start_servers: mkdir + iperf -p PORT -s -D.
         touch "$FAKE_BIN/iperf_running_$host"
         exit 0
         ;;
-    *"pkill -f"*"^iperf -s"*)
-        # cmd_stop_servers: pkill the iperf -s daemon. Clear the flag.
+    *"pkill -f"*"^iperf -p"*)
+        # cmd_stop_servers: pkill the iperf -p PORT daemon. Clear the flag.
         rm -f "$FAKE_BIN/iperf_running_$host"
         exit 0
         ;;

@@ -936,7 +936,7 @@ cmd_check_servers() {
 #------------------------------------------------------------------------------
 _worker_start_server() {
     local host="$1"
-    ssh_run "$host" "mkdir -p '$REMOTE_DIR' && iperf -s -D -p $IPERF_PORT"
+    ssh_run "$host" "mkdir -p '$REMOTE_DIR' && iperf -p $IPERF_PORT -s -D"
 }
 
 cmd_start_servers() {
@@ -1298,10 +1298,7 @@ cmd_collect_results() {
 
 #------------------------------------------------------------------------------
 _worker_stop_server() {
-    local host="$1"
-    # Anchor with ^ so we don't match the bash running this script.
-    # `|| true` keeps "no matching process" from looking like a failure.
-    ssh_run "$host" "pkill -f '^iperf -s -p $IPERF_PORT\b' 2>/dev/null; true"
+    ssh_run "$1" "pkill -f '^iperf -p $IPERF_PORT ' 2>/dev/null; true"
 }
 
 cmd_stop_servers() {
