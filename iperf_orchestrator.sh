@@ -60,7 +60,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 #------------------------------------------------------------------------------
 RESULTS_BASE="${RESULTS_BASE:-$SCRIPT_DIR/results}"
 SERVER_LIST_FILE="${IPERF_SERVERS:-}"   # set by --servers, env var, or default lookup
-RUN_ID="${IPERF_RUN_ID:-}"              # set by --run-id; auto-generated for write commands
+RUN_ID="${IPERF_RUN_ID:-}"              # set by --run-id / IPERF_RUN_ID; auto-generated for create-scripts
+_RUN_ID_EXPLICIT=0                      # 1 when the user asked for a specific run-id; otherwise follow 'latest'
+[ -n "$RUN_ID" ] && _RUN_ID_EXPLICIT=1
 REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 
 IPERF_PORT="${IPERF_PORT:-5001}"
@@ -141,8 +143,8 @@ while [ $# -gt 0 ]; do
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
         --output=*)      RESULTS_BASE="${1#*=}"; shift ;;
         -o=*)            RESULTS_BASE="${1#*=}"; shift ;;
-        --run-id)        _flag_need "$1" "${2:-}"; RUN_ID="$2"; shift 2 ;;
-        --run-id=*)      RUN_ID="${1#*=}"; shift ;;
+        --run-id)        _flag_need "$1" "${2:-}"; RUN_ID="$2"; _RUN_ID_EXPLICIT=1; shift 2 ;;
+        --run-id=*)      RUN_ID="${1#*=}"; _RUN_ID_EXPLICIT=1; shift ;;
         --servers|-s)    _flag_need "$1" "${2:-}"; SERVER_LIST_FILE="$2"; shift 2 ;;
         --servers=*)     SERVER_LIST_FILE="${1#*=}"; shift ;;
         -s=*)            SERVER_LIST_FILE="${1#*=}"; shift ;;
@@ -226,16 +228,18 @@ _ensure_run_id() {
 #   2. $RESULTS_BASE/latest symlink target   -> use it
 #   3. else: error with a hint
 _resolve_existing_run() {
-    if [ -n "$RUN_ID" ]; then
+    # Always follow the 'latest' symlink so each command picks up
+    # whatever create-scripts most recently wrote. --run-id (set
+    # _RUN_ID_EXPLICIT=1) is the only way to pin a different run.
+    if [ "${_RUN_ID_EXPLICIT:-0}" = "1" ] && [ -n "$RUN_ID" ]; then
         RESULTS_DIR="$RESULTS_BASE/$RUN_ID"
     elif [ -L "$RESULTS_BASE/latest" ] || [ -d "$RESULTS_BASE/latest" ]; then
-        RESULTS_DIR="$RESULTS_BASE/latest"
-        # Resolve to the real run-id for log messages.
         local real
-        real=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "")
-        [ -n "$real" ] && RUN_ID="$real"
+        real=$(readlink "$RESULTS_BASE/latest" 2>/dev/null || echo "latest")
+        RUN_ID="$real"
+        RESULTS_DIR="$RESULTS_BASE/$RUN_ID"
     else
-        die "no results found at $RESULTS_BASE; run 'run-tests' first or pass --run-id <id>"
+        die "no results found at $RESULTS_BASE; run 'create-scripts' first or pass --run-id <id>"
     fi
     LOGS_DIR="$RESULTS_DIR/logs"
     SCRIPTS_DIR="$RESULTS_DIR/scripts"
