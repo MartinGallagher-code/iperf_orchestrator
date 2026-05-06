@@ -1288,6 +1288,10 @@ _run_rolling() {
             for t in \"\${PEERS[@]}\"; do counts[\"\$t\"]=0; done
             seq=0
             active=0
+            # Startup jitter: each host begins its loop at a different
+            # fraction of a second so initial target picks don't all
+            # land at the same wall-clock moment across the fleet.
+            sleep 0.\$((RANDOM % 1000))
             while [ \$(date +%s) -lt \$END_TIME ]; do
                 # Wait for a slot if we're at the per-host concurrency cap.
                 while [ \$active -ge $IPERF_HOST_FLOWS ]; do
