@@ -1282,6 +1282,23 @@ _run_rolling() {
             set -u
             mkdir -p '$REMOTE_DIR'
             cd '$REMOTE_DIR'
+            # Background CPU sampler running for the whole rolling window
+            # (mpstat if present, /proc/stat fallback otherwise). Same
+            # filename + header format as the parallel/sequential modes,
+            # so parse-cpu and make-heatmap consume it unchanged.
+            {
+                echo \"# host=$src\"
+                if command -v mpstat >/dev/null 2>&1; then
+                    LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 $IPERF_TOTAL_TIME 2>&1
+                else
+                    echo \"# fallback=proc_stat host=$src samples=$IPERF_TOTAL_TIME\"
+                    for _ in \$(seq 1 $IPERF_TOTAL_TIME); do
+                        date '+%F %T'
+                        head -n1 /proc/stat
+                        sleep 1
+                    done
+                fi
+            } > \"cpu_${src_safe}_$RUN_ID.log\" 2>&1 &
             PEERS=( $peers )
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
             declare -A counts
