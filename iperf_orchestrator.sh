@@ -68,6 +68,7 @@ REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_TOTAL_TIME="${IPERF_TOTAL_TIME:-300}"  # 'rolling' mode wall-time
+IPERF_FLOWS="${IPERF_FLOWS:-1}"              # 'rolling' mode per-host concurrency
 IPERF_PARALLEL="${IPERF_PARALLEL:-1}"      # parallel streams per test
 # --jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -141,6 +142,8 @@ while [ $# -gt 0 ]; do
         --start-delay=*) START_DELAY="${1#*=}"; shift ;;
         --total-time)    _flag_need "$1" "${2:-}"; IPERF_TOTAL_TIME="$2"; shift 2 ;;
         --total-time=*)  IPERF_TOTAL_TIME="${1#*=}"; shift ;;
+        --flows)         _flag_need "$1" "${2:-}"; IPERF_FLOWS="$2"; shift 2 ;;
+        --flows=*)       IPERF_FLOWS="${1#*=}"; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
@@ -189,6 +192,7 @@ _validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
 _validate_uint "IPERF_PARALLEL / --parallel"   "$IPERF_PARALLEL" 1
 _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
 _validate_uint "IPERF_TOTAL_TIME / --total-time" "$IPERF_TOTAL_TIME" 1
+_validate_uint "IPERF_FLOWS / --flows"           "$IPERF_FLOWS"      1
 _validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
 [ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
 # Sanity-warn (don't die) on suspicious --jobs values. Past ~256 you're
@@ -614,8 +618,9 @@ EXECUTION:
                                              rolling          each host independently picks
                                               its least-tested peer, small jitter,
                                               one short iperf, repeats for
-                                              --total-time. No global scheduler;
-                                              scales to any N (one flow per host).
+                                              --total-time. Up to --flows N
+                                              concurrent flows per host (default 1).
+                                              No global scheduler; scales to any N.
                                               Doesn't need create-scripts.
     collect-results        Pull every iperf_test_<src>_to_<dst>_<run>.log back to results/
     stop-servers           Kill iperf -s on every host
@@ -1232,7 +1237,7 @@ cmd_run_tests() {
 # global scheduler -- per-host probes are independent. Scales to any N
 # because each host has at most one outbound flow at any moment.
 _run_rolling() {
-    log "Rolling: ${IPERF_TOTAL_TIME}s wall-time, ${IPERF_DURATION}s per test, ~one flow per host at a time"
+    log "Rolling: ${IPERF_TOTAL_TIME}s wall-time, ${IPERF_DURATION}s per test, up to ${IPERF_FLOWS} flow(s) per host"
     local hosts=()
     while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
     local pids=() src
@@ -1253,7 +1258,13 @@ _run_rolling() {
             declare -A counts
             for t in \"\${PEERS[@]}\"; do counts[\"\$t\"]=0; done
             seq=0
+            active=0
             while [ \$(date +%s) -lt \$END_TIME ]; do
+                # Wait for a slot if we're at the per-host concurrency cap.
+                while [ \$active -ge $IPERF_FLOWS ]; do
+                    wait -n 2>/dev/null || wait
+                    active=\$((active - 1))
+                done
                 min=999999
                 cands=()
                 for t in \"\${PEERS[@]}\"; do
@@ -1265,13 +1276,21 @@ _run_rolling() {
                 target=\${cands[\$((RANDOM % \${#cands[@]}))]}
                 target_safe=\$(printf '%s' \"\$target\" | tr ':/[] \\t' '_______')
                 seq=\$((seq + 1))
-                sleep 0.\$((100 + RANDOM % 900))
-                {
-                    echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=1 test_start=\$(date +%s)\"
-                    iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -y C 2>&1
-                } > \"iperf_test_${src_safe}_to_\${target_safe}_\${seq}_$RUN_ID.log\"
                 counts[\"\$target\"]=\$((counts[\"\$target\"] + 1))
+                outfile=\"iperf_test_${src_safe}_to_\${target_safe}_\${seq}_$RUN_ID.log\"
+                # Stagger launches and run iperf in background so multiple
+                # flows can be in flight at once.
+                (
+                    sleep 0.\$((100 + RANDOM % 900))
+                    {
+                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=1 test_start=\$(date +%s)\"
+                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -y C 2>&1
+                    } > \"\$outfile\"
+                ) &
+                active=\$((active + 1))
             done
+            # Drain any in-flight flows before returning.
+            wait
         " > "$hostlog" 2>&1 &
         pids+=("$!")
     done
