@@ -66,28 +66,35 @@ SETUP:
 
 EXECUTION:
   start-servers          Start iperf2 -s on every host (port 5001)
-  create-scripts         Generate per-host run scripts locally
-  distribute-scripts     Push each host's script out
-  run-tests [MODE]       Run the tests; MODE is parallel|sequential-host|sequential-pair
+  run-tests [MODE]       Run the tests. Auto-runs create-scripts and
+                         distribute-scripts for non-rolling modes. MODE is
+                         parallel | sequential-host | sequential-pair | rolling.
   collect-results        Pull logs back as a tar archive per host
   stop-servers           Kill iperf -s on every host
-  cleanup [--all] [--yes]  Remove this run's files from $REMOTE_DIR (or
-                           --all to wipe the whole dir)
+  cleanup --yes          Remove $REMOTE_DIR on every host
 
 ANALYSIS:
   parse-csv              Parse iperf2 CSV logs into iperf_results.csv (2 rows per test)
   parse-cpu              Parse mpstat samples into cpu_summary.csv
   make-pivot             Text pivot table at iperf_pivot.txt
   make-heatmap           Heatmap + bar chart at iperf_heatmap.png
+  process                = collect-results + parse-csv + parse-cpu + make-pivot + make-heatmap
   results-summary        P50/P95/min/mean/max throughput + 5 slowest pairs
+
+INTERNAL (run-tests calls these for you; available standalone if needed):
+  create-scripts         Generate per-host client run scripts locally
+  distribute-scripts     Push each host's script out
 
 CONVENIENCE:
   all [MODE] [--keep-going]  Run the full sequence end-to-end
-  status [--json]            Probe hosts live + list available runs
-  help                       Show command help
+                             (ssh-setup + start + run-tests + process + stop)
+  status                     Probe hosts live + list available runs
+  doctor                     Check local prerequisites
+  help                       Common commands and flags
+  help-advanced              Every command, every flag, every env var
 ```
 
-The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. There is no `init` step (server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`), and there is no `--resume` flag (each `all` invocation creates a fresh run-id).
+The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
 
 ### Configuration
 
@@ -108,10 +115,10 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
 | `IPERF_PARALLEL` | `--parallel`, `-P` | `1` | parallel streams within each test |
 | `IPERF_JOBS` | `--jobs`, `-j` | `16` | max concurrent SSH/SCP fan-out (capped concurrency) |
-| `IPERF_RETRIES` | `--retries` | `0` | extra retries for parallel-fan-out workers, with linear back-off |
+| `IPERF_TOTAL_TIME` | `--total-time` | `300` | rolling mode wall-time (seconds) |
+| `IPERF_FLOWS` | `--flows` | `1` | rolling mode per-host concurrent flows |
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
-| `IPERF_PROGRESS` | — | `1` | live progress on stderr; set `0` to disable |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `SSH_PASSWORD_FILE` | `--password-file` | — | path to a file with the SSH password (single line; `chmod 600`); enables expect-driven `ssh-setup` |
 | `SSH_PASSWORD_ENV` | `--password-env` | — | env var name to read the SSH password from; enables expect-driven `ssh-setup` |
@@ -122,7 +129,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 
 #### `--jobs` and capped-concurrency parallel SSH
 
-Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`, `distribute-scripts`, `collect-results`, `stop-servers`, `cleanup`) fan out to all hosts in parallel, capped at `IPERF_JOBS` concurrent SSH/SCP sessions. Per-host output is captured in worker buffers and replayed in server-list order so the screen output stays readable; the central `orchestrator.log` receives entries in real time as workers run, so `tail -f ~/.iperf_orchestrator/logs/orchestrator.log` shows live progress.
+Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`, `distribute-scripts`, `collect-results`, `stop-servers`, `cleanup`) fan out to all hosts in parallel, capped at `IPERF_JOBS` concurrent SSH/SCP sessions. Per-host output is captured in worker buffers and replayed in server-list order so the screen output stays readable.
 
 The default of `16` keeps the orchestrator host's SSH agent and the per-host sshd happy on most fleets. Bump it (e.g. `--jobs 64`) when you have hundreds of hosts and the orchestrator's CPU/network can absorb it; lower it if `MaxStartups` on your sshds rejects connections.
 
@@ -139,9 +146,9 @@ echo 'mypassword' > ~/.ssh-fleet-pw && chmod 600 ~/.ssh-fleet-pw
 ./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
 ```
 
-#### `--keep-going` and `--resume` for `all`
+#### `--keep-going` for `all`
 
-`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). `all --resume` consults the pipeline state and skips steps already marked `yes`, which is what you want after killing a partial run and starting over.
+`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). Without it, the first step that records per-host failures aborts the pipeline.
 
 #### `--dry-run`, `--verbose`, `--quiet`
 
@@ -151,13 +158,14 @@ echo 'mypassword' > ~/.ssh-fleet-pw && chmod 600 ~/.ssh-fleet-pw
 
 ## Run modes
 
-`run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. All three modes use canonical-pair generation — each unordered pair `{A, B}` is tested exactly once, with `--full-duplex` measuring both directions concurrently on a single TCP socket.
+`run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. The first three modes use canonical-pair generation — each unordered pair `{A, B}` is tested exactly once, with `--full-duplex` measuring both directions concurrently on a single TCP socket. `rolling` is structured differently (see below).
 
 | Mode | What runs concurrently | Wall-clock at N=100, DUR=10 | When to use |
 |---|---|---|---|
 | `parallel` (default) | all hosts launch all of their clients at once after a synchronized start | ~1 × DURATION (~50s) | fabric stress testing: load everything at once and see what breaks |
 | `sequential-host` | one host at a time runs all of its clients in parallel | ~N × DURATION (~17 min) | clean numbers per host without inter-host interference |
 | `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
+| `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--flows`, independent of fleet size |
 
 ---
 
