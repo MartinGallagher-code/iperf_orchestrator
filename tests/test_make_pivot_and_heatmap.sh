@@ -90,6 +90,18 @@ test_make_pivot_writes_pivot_file() {
     [ -f "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" ] || return 1
 }
 
+test_make_pivot_includes_per_server_total_traffic() {
+    prep_csv
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    assert_contains "$(cat "$pivot")" "Per-server avg total traffic" \
+        "pivot should have per-server total traffic section" || return 1
+    assert_contains "$(cat "$pivot")" "out=" \
+        "should show out= component" || return 1
+    assert_contains "$(cat "$pivot")" "in=" \
+        "should show in= component" || return 1
+}
+
 test_make_pivot_means_multiple_samples_per_pair() {
     # Rolling mode: same (source, target) appears multiple times. Pivot
     # should report the mean, not the last sample.
@@ -159,6 +171,7 @@ run_test test_make_pivot_requires_csv
 run_test test_make_pivot_produces_grid
 run_test test_make_pivot_per_source_mean_ranking
 run_test test_make_pivot_writes_pivot_file
+run_test test_make_pivot_includes_per_server_total_traffic
 run_test test_make_pivot_means_multiple_samples_per_pair
 run_test test_make_heatmap_requires_csv
 run_test test_make_heatmap_produces_png_or_skips_cleanly

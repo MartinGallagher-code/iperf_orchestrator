@@ -2195,6 +2195,28 @@ with open(out_txt, "w") as f:
         bar = "#" * int(m / max(row_means.values()) * 40) if row_means else ""
         f.write(f"  {h.ljust(host_w)} {m:9.2f}  {bar}\n")
 
+    # Per-server total traffic = avg outgoing (row mean) + avg incoming
+    # (column mean). Tells you which hosts carry the most traffic
+    # regardless of direction.
+    col_means = {}
+    for d in dst_list:
+        vals = [mat.get(s, {}).get(d) for s in src_list if s != d]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            col_means[d] = sum(vals) / len(vals)
+    totals = {h: row_means.get(h, 0.0) + col_means.get(h, 0.0)
+              for h in set(row_means) | set(col_means)}
+    if totals:
+        f.write("\nPer-server avg total traffic Mbps "
+                "(out+in, sorted high to low):\n")
+        max_total = max(totals.values()) or 1.0
+        for h, t in sorted(totals.items(), key=lambda kv: kv[1], reverse=True):
+            o = row_means.get(h, 0.0)
+            i = col_means.get(h, 0.0)
+            bar = "#" * int(t / max_total * 40)
+            f.write(f"  {h.ljust(host_w)} {t:9.2f}  "
+                    f"(out={o:8.2f} in={i:8.2f})  {bar}\n")
+
     # If any cell aggregated more than one sample (rolling mode), summarize.
     counts = [c for d in samples_per.values() for c in d.values()]
     if counts and max(counts) > 1:
