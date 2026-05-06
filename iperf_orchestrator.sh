@@ -1467,10 +1467,20 @@ cmd_parse_csv() {
     log "Parsing iperf2 CSV logs -> $csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found; install Python 3"
 
-    "$PYTHON_BIN" - "$RESULTS_DIR" "$csv" <<'PYEOF'
+    # If a server list is reachable, build a filter: only keep rows
+    # whose pair_a/pair_b are both in the active list. Lets users
+    # comment hosts out of servers.txt to drop them from the analysis
+    # without re-running the test.
+    local active_list=""
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        active_list=$(read_servers | tr '\n' ',')
+    fi
+
+    "$PYTHON_BIN" - "$RESULTS_DIR" "$csv" "$active_list" <<'PYEOF'
 import os, sys, csv, glob
 
 results_dir, out_csv = sys.argv[1], sys.argv[2]
+active = set(h for h in (sys.argv[3] if len(sys.argv) > 3 else "").split(",") if h)
 
 # Each iperf2 --full-duplex log has the structure:
 #
@@ -1732,6 +1742,17 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
     emit(a_to_b, pair_a, pair_b)
     emit(b_to_a, pair_b, pair_a)
 
+# Filter against the current server list, if one was supplied. Drops
+# rows whose pair_a or pair_b is not in the active set, so commented
+# hosts in servers.txt disappear from the analysis automatically.
+if active:
+    before = len(rows)
+    rows = [r for r in rows if r["pair_a"] in active and r["pair_b"] in active]
+    dropped = before - len(rows)
+    if dropped:
+        print(f"Filtered {dropped} row(s) for hosts not in current servers.txt",
+              file=sys.stderr)
+
 if not rows:
     print("No log files found", file=sys.stderr)
     sys.exit(1)
@@ -1782,10 +1803,16 @@ cmd_parse_cpu() {
         return 0
     fi
 
-    "$PYTHON_BIN" - "$RESULTS_DIR" "$cpu_csv" <<'PYEOF'
+    local active_list=""
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        active_list=$(read_servers | tr '\n' ',')
+    fi
+
+    "$PYTHON_BIN" - "$RESULTS_DIR" "$cpu_csv" "$active_list" <<'PYEOF'
 import os, sys, csv, glob, re
 
 results_dir, out_csv = sys.argv[1], sys.argv[2]
+active = set(h for h in (sys.argv[3] if len(sys.argv) > 3 else "").split(",") if h)
 
 def parse_mpstat(path):
     """Parse `mpstat -P ALL 1 N` output. Returns dict of summary stats or
@@ -2022,6 +2049,14 @@ for path in sorted(glob.glob(os.path.join(results_dir, "cpu_*.log"))):
     summary["host"] = host
     summary["filename"] = base
     rows.append(summary)
+
+# Filter against the current server list, if one was supplied.
+if active:
+    before = len(rows)
+    rows = [r for r in rows if r["host"] in active]
+    dropped = before - len(rows)
+    if dropped:
+        print(f"Filtered {dropped} host(s) not in current servers.txt", file=sys.stderr)
 
 with open(out_csv, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=cols)

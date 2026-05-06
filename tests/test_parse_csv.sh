@@ -220,7 +220,27 @@ run_test test_parse_csv_missing_summary_marks_no_summary
 run_test test_parse_csv_propagates_iperf_error_text
 run_test test_parse_csv_non_default_port_still_detects_directions
 run_test test_parse_csv_skips_per_stream_lines_with_parallel_streams
+test_parse_csv_filters_by_active_server_list() {
+    local rd; rd=$(prep_results_dir)
+    # Two pairs in the logs: a<->b and a<->c. servers.txt comments out c.
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
+    write_ok_log "$rd/iperf_test_a_to_c_${IPERF_RUN_ID}.log" a c 800000000 700000000
+    cat > "$IPERF_SERVERS" <<'EOF'
+a
+b
+# c     <- commented out: should not appear in CSV
+EOF
+    run_orch parse-csv >/dev/null 2>&1
+    local n_c
+    n_c=$(awk -F, 'NR>1 && ($2=="c" || $3=="c")' "$rd/iperf_results.csv" | wc -l)
+    assert_eq "0" "$n_c" "rows referencing the commented-out host should be dropped" || return 1
+    local n_b
+    n_b=$(awk -F, 'NR>1 && ($2=="b" || $3=="b")' "$rd/iperf_results.csv" | wc -l)
+    [ "$n_b" -gt 0 ] || { echo "expected rows for active host b" >&2; return 1; }
+}
+
 run_test test_parse_csv_writes_results_csv_in_run_dir
+run_test test_parse_csv_filters_by_active_server_list
 run_test test_parse_csv_includes_required_columns
 
 report_tests
