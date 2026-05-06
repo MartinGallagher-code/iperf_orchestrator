@@ -168,6 +168,7 @@ while [ $# -gt 0 ]; do
         --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
+        --help-advanced) _PARSED+=("help-advanced"); shift ;;
         --*)             _flag_die "unknown flag: $1 (global flags must come before the subcommand; subcommand flags must come after)" ;;
         *)               _PARSED+=("$1"); _saw_subcommand=1; shift ;;
     esac
@@ -540,25 +541,64 @@ The script is stateless. Re-running 'all' creates a fresh run-id; the
 an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 
 Other useful commands:
-    $0 doctor      Check that local prerequisites are installed
-    $0 status      Probe hosts and list available result runs
-    $0 help        Full command and flag reference
+    $0 doctor             Check that local prerequisites are installed
+    $0 status             Probe hosts and list available result runs
+    $0 help               Common commands and flags
+    $0 help-advanced      Every command, every flag, every env var
 
 EOF
 }
 
 usage() {
     cat <<EOF
+iperf-orchestrator.sh - full-mesh iperf2 throughput tests
+
+USAGE:
+    $0 [flags] <command> [args]
+
+QUICK START:
+    $0 --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
+    $0 --servers servers.txt all                        # run + analyze + cleanup
+
+COMMON COMMANDS:
+    ssh-setup              Distribute SSH keys to every host (one-time)
+    start-servers          Start iperf2 -s daemons on every host
+    run-tests [MODE]       Run tests. MODE is one of:
+                             parallel         (default) every host pairs up at once
+                             rolling          random rolling probes; scales to any N
+                                              (--total-time SECONDS, --flows N)
+    process                Pull results, parse CSV/CPU, render pivot + heatmap
+    stop-servers           Kill iperf2 -s daemons
+    all [MODE]             ssh-setup + start-servers + run-tests + process + stop
+    status                 List runs and probe hosts live
+
+COMMON FLAGS:
+    --servers, -s FILE         server list (one host per line; '#' comments)
+    --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
+    --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
+    --flows N                  concurrent flows per host in rolling mode (default $IPERF_FLOWS)
+    --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --ssh-user, -u USER        SSH login user (default $SSH_USER)
+    --ask-password             prompt once for an SSH password, reuse for all hosts
+    --output, -o DIR           results directory (default $RESULTS_BASE)
+    -h, --help                 show this help
+    --help-advanced            show every command, every flag, every env var
+
+Each invocation creates \$RESULTS_BASE/<run-id>/. \$RESULTS_BASE/latest tracks
+the most recent run. Pass --run-id <id> to operate on an older run.
+EOF
+}
+
+usage_advanced() {
+    cat <<EOF
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
-Each host pair is tested once with iperf2 --full-duplex (single TCP
-socket carrying traffic in both directions). The CSV parser produces
-two rows per test, one for each direction, so the heatmap is filled
-symmetrically by direction but values can differ.
+Each host pair is tested with iperf2; results are parsed into a CSV,
+pivot table, and heatmap.
 
-The script is stateless. Each pipeline run produces a fresh
-\$RESULTS_BASE/<run-id>/ directory; analysis commands default to the
-'latest' symlink, override with --run-id <id>.
+The script is stateless. Each invocation that produces output creates a
+fresh \$RESULTS_BASE/<run-id>/ directory; analysis commands follow the
+'latest' symlink unless --run-id is passed explicitly.
 
 USAGE:
     $0 [global flags] <command> [args]
@@ -567,105 +607,91 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
                                (default: \$IPERF_SERVERS env, else $SCRIPT_DIR/servers.txt)
     --output, -o DIR           Base directory for results (default $RESULTS_BASE)
-    --run-id ID                Address an existing run for read commands; for write
-                               commands, override the auto-generated timestamp.
+    --run-id ID                Address an existing run (default: follow 'latest' symlink)
     --port PORT                iperf2 listening port (default $IPERF_PORT)
-    --duration, -d SECONDS     test duration per pair (default $IPERF_DURATION)
+    --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --parallel, -P N           parallel streams within each test (default $IPERF_PARALLEL)
     --jobs, -j N               max concurrent SSH/SCP fan-out (default $IPERF_JOBS)
+    --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
+    --flows N                  rolling mode per-host concurrent flows (default $IPERF_FLOWS)
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
     --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
-                               Safe to point at a shared FS (NFS home, etc.):
-                               every remote-side file includes <host>_<run-id>.
+                               Safe to point at a shared FS: filenames embed <host>_<run-id>.
     --python PATH              Python interpreter (default $PYTHON_BIN)
     --password-file PATH       Read SSH password from PATH (single line; chmod 600).
-                               Enables automated 'expect'-driven ssh-setup.
     --password-env VAR         Read SSH password from env var named VAR.
-                               Enables automated 'expect'-driven ssh-setup.
-    --ask-password             Prompt once for an SSH password and reuse it
-                               for every host. Enables 'expect'-driven ssh-setup.
-    -h, --help                 show this message
+    --ask-password             Prompt once for an SSH password and reuse it.
+    -h, --help                 show the simple help
+    --help-advanced            show this help
 
 SETUP:
-    ssh-setup              Generate (if needed) and distribute SSH keys to all hosts.
-                           By default prompts you per-host for the SSH password
-                           (sequential). Pass --password-file / --password-env /
-                           --ask-password to drive ssh-copy-id non-interactively
-                           via 'expect', in parallel (capped by --jobs).
+    ssh-setup              Generate ~/.ssh/id_ed25519 if needed and distribute the key.
+                           Default: per-host password prompt (sequential). With
+                           --password-file / --password-env / --ask-password, drive
+                           ssh-copy-id via 'expect' in parallel (capped by --jobs).
     check-iperf            Check which hosts have iperf2 installed
-    check-servers          Check which hosts currently have iperf -s running
+    check-servers          Check which hosts have iperf -s currently running
 
 EXECUTION:
-    start-servers          Start iperf2 in daemon mode on every host
-    create-scripts         Generate per-host client run scripts locally
-    distribute-scripts     Copy each host's run script to that host
-    run-tests [MODE]       Run the tests. MODE is one of:
-                             parallel         (default) all hosts launch all of
-                                              their clients simultaneously after
-                                              a synchronized start. Maximum mesh
-                                              contention; fastest wall-clock.
-                             sequential-host  hosts run one at a time; the
-                                              active host fires its clients to
-                                              all targets in parallel.
-                             sequential-pair  exactly one connection on the wire
-                                              at any moment. Cleanest per-pair
-                                              numbers; takes N*(N-1)/2 * duration
-                                              (canonical pairs only).
-                                             rolling          each host independently picks
-                                              its least-tested peer, small jitter,
-                                              one short iperf, repeats for
-                                              --total-time. Up to --flows N
-                                              concurrent flows per host (default 1).
-                                              No global scheduler; scales to any N.
-                                              Doesn't need create-scripts.
-    collect-results        Pull every iperf_test_<src>_to_<dst>_<run>.log back to results/
-    stop-servers           Kill iperf -s on every host
-    cleanup [--all] [--yes]
-                           Remove the current run's files from \$REMOTE_DIR on
-                           every host. With --all, wipe \$REMOTE_DIR entirely.
+    start-servers          Start iperf -p \$PORT -s -D on every host
+    create-scripts         Generate per-host client run scripts (called by run-tests)
+    distribute-scripts     Copy each host's run script to that host (called by run-tests)
+    run-tests [MODE]       Run the tests. Auto-runs create-scripts and
+                           distribute-scripts for parallel/sequential modes. MODE:
+                             parallel         all hosts run simultaneously after a
+                                              synchronized start (default)
+                             sequential-host  hosts run one at a time
+                             sequential-pair  one connection on the wire at any moment
+                             rolling          each host independently picks its
+                                              least-tested peer, repeats for
+                                              --total-time, with --flows concurrent.
+                                              Self-starting (no create-scripts).
+    collect-results        Pull each host's logs as a tarball back into the run dir.
+    stop-servers           Kill iperf -s daemons on every host.
+    cleanup [--yes]        Remove \$REMOTE_DIR on every host (--yes required).
 
 ANALYSIS:
-    parse-csv              Parse all .log iperf2 CSV files into results/iperf_results.csv
-                           (two rows per file, one per direction)
-    parse-cpu              Parse cpu_<host>.log mpstat samples into results/cpu_summary.csv
-                           and print a per-host peak/mean CPU table
-    make-pivot             Build a text pivot table at results/iperf_pivot.txt
+    parse-csv              Parse iperf2 CSV logs into results/iperf_results.csv
+    parse-cpu              Parse mpstat samples into results/cpu_summary.csv
+    make-pivot             Render results/iperf_pivot.txt (text pivot table)
     make-heatmap           Render results/iperf_heatmap.png (heatmap + bar chart)
+    process                = collect-results + parse-csv + parse-cpu + make-pivot
+                             + make-heatmap.
+    results-summary        Print P50/P95/min/mean/max + 5 slowest pairs from
+                           iperf_results.csv.
 
 CONVENIENCE:
-    all [MODE] [--keep-going]
-                           Run the full sequence end-to-end. MODE is forwarded
-                           to run-tests (default parallel). With --keep-going,
-                           continue past per-host failures instead of aborting.
-                           Runs 'doctor' first.
-    doctor                 Probe local prerequisites (ssh tools, expect when a
-                           password source is configured, python3 + numpy +
-                           pandas + matplotlib) and print install hints.
-    results-summary        Print P50/P95/min/mean/max throughput and the 5
-                           slowest source->target pairs. Reads
-                           results/iperf_results.csv (run parse-csv first).
-    status                 Probe hosts (iperf installed? server running?) and list
-                           available run directories under \$RESULTS_BASE.
-    help                   Show this message
+    all [MODE] [--keep-going]  Run the full pipeline (doctor + ssh-setup +
+                               start-servers + run-tests + process + stop-servers
+                               + cleanup). --keep-going continues past per-host
+                               failures.
+    doctor                     Check local prerequisites (ssh tools, expect, Python,
+                               numpy, matplotlib) and print install hints.
+    status                     Probe hosts (iperf installed? server running?) and
+                               list available runs.
+    help                       Show the simple help (this command's short form).
+    help-advanced              Show this message.
 
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
-    IPERF_DURATION=$IPERF_DURATION       # seconds per pair
-    IPERF_PARALLEL=$IPERF_PARALLEL       # parallel streams
-    IPERF_JOBS=$IPERF_JOBS               # max concurrent SSH/SCP fan-out
+    IPERF_DURATION=$IPERF_DURATION
+    IPERF_PARALLEL=$IPERF_PARALLEL
+    IPERF_JOBS=$IPERF_JOBS
+    IPERF_TOTAL_TIME=$IPERF_TOTAL_TIME
+    IPERF_FLOWS=$IPERF_FLOWS
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
-    IPERF_DRY_RUN=$IPERF_DRY_RUN         # 1 = print SSH/SCP commands, don't run
+    IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
     SSH_OPTS=$SSH_OPTS
-    SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-} # see --password-file
-    SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}   # see --password-env
-    SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD       # see --ask-password
-    START_DELAY=$START_DELAY             # seconds in future for sync start
-    IPERF_SERVERS=${IPERF_SERVERS:-}     # see --servers
+    SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-}
+    SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}
+    SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD
+    START_DELAY=$START_DELAY
+    IPERF_SERVERS=${IPERF_SERVERS:-}
     RESULTS_BASE=$RESULTS_BASE
     REMOTE_DIR=$REMOTE_DIR
 
@@ -1196,14 +1222,17 @@ cmd_run_tests() {
         parallel|sequential-host|sequential-pair|rolling) ;;
         *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair|rolling)" ;;
     esac
-    # rolling is self-starting (doesn't use create-scripts), so it
-    # mints its own run-id. The other modes require an existing run.
+    # rolling is self-starting (doesn't use per-host run scripts).
+    # Other modes generate + distribute the per-host scripts as part
+    # of run-tests so users don't have to chain create-scripts and
+    # distribute-scripts by hand.
     if [ "$mode" = "rolling" ]; then
         _ensure_run_id
+        _validate_server_list
     else
-        _resolve_existing_run
+        cmd_create_scripts
+        cmd_distribute_scripts
     fi
-    _validate_server_list
     trap '_orchestrator_signal_cleanup' INT TERM
     local n_hosts; n_hosts=$(read_servers | wc -l)
     [ "$n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts (got $n_hosts)"
@@ -2460,6 +2489,17 @@ cmd_doctor() {
 }
 
 #------------------------------------------------------------------------------
+# process: pull results from the fleet and render the analysis artifacts.
+#   collect-results -> parse-csv -> parse-cpu -> make-pivot -> make-heatmap
+cmd_process() {
+    cmd_collect_results
+    cmd_parse_csv
+    cmd_parse_cpu
+    cmd_make_pivot
+    cmd_make_heatmap
+}
+
+#------------------------------------------------------------------------------
 cmd_all() {
     local mode="parallel"
     local keep_going=0
@@ -2507,17 +2547,11 @@ cmd_all() {
     cmd_check_iperf;         _all_gate check-iperf
     cmd_check_servers;       _all_gate check-servers
     cmd_start_servers;       _all_gate start-servers
-    cmd_create_scripts
-    cmd_distribute_scripts;  _all_gate distribute-scripts
-    cmd_run_tests "$mode"
-    cmd_collect_results;     _all_gate collect-results
+    cmd_run_tests "$mode"   # also runs create-scripts + distribute-scripts internally
+    cmd_process              # collect + parse-csv + parse-cpu + make-pivot + make-heatmap
     cmd_stop_servers;        _all_gate stop-servers
     _IPERF_ORCH_INTERNAL=1 cmd_cleanup
     _all_gate cleanup
-    cmd_parse_csv
-    cmd_parse_cpu
-    cmd_make_pivot
-    cmd_make_heatmap
     log "=== Pipeline complete ==="
     echo
     echo "Results in: $RESULTS_DIR"
@@ -2563,9 +2597,11 @@ case "$cmd" in
     parse-cpu)          cmd_parse_cpu ;;
     make-pivot)         cmd_make_pivot ;;
     make-heatmap)       cmd_make_heatmap ;;
+    process)            cmd_process ;;
     doctor)             cmd_doctor ;;
     results-summary)    cmd_results_summary ;;
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
+    help-advanced|--help-advanced) usage_advanced ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac

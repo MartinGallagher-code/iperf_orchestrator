@@ -27,13 +27,13 @@ test_flag_requiring_value_with_no_value() {
 }
 
 test_jobs_must_be_positive_integer() {
-    run_orch --jobs notanumber help
+    run_orch --jobs notanumber help-advanced
     assert_status 2 "$RUN_RC" "non-integer --jobs should exit 2" || return 1
     assert_contains "$RUN_OUT" "integer" "error message should explain integer requirement" || return 1
 }
 
 test_jobs_zero_is_rejected() {
-    run_orch --jobs 0 help
+    run_orch --jobs 0 help-advanced
     assert_status 2 "$RUN_RC" "zero --jobs should be rejected" || return 1
     assert_contains "$RUN_OUT" ">= 1" "should require >= 1" || return 1
 }
@@ -41,44 +41,44 @@ test_jobs_zero_is_rejected() {
 test_jobs_negative_is_rejected() {
     # The integer validator only accepts digits, so -1 is parsed as
     # non-integer (the leading '-' fails the digit-only check).
-    run_orch --jobs -1 help
+    run_orch --jobs -1 help-advanced
     assert_status 2 "$RUN_RC" "negative --jobs should be rejected" || return 1
 }
 
 test_long_flag_with_equals() {
     # The usage text echoes the active port value. Verify --port=NNNN
     # is parsed as the value 9999.
-    run_orch --port=9999 help
+    run_orch --port=9999 help-advanced
     assert_status 0 "$RUN_RC" "--port=N should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=9999" "usage should reflect port=9999" || return 1
 }
 
 test_long_flag_with_space() {
-    run_orch --port 8888 help
+    run_orch --port 8888 help-advanced
     assert_status 0 "$RUN_RC" "--port N should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=8888" "usage should reflect port=8888" || return 1
 }
 
 test_short_flag_jobs() {
-    run_orch -j 7 help
+    run_orch -j 7 help-advanced
     assert_status 0 "$RUN_RC" "-j 7 should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_JOBS=7" "usage should reflect jobs=7" || return 1
 }
 
 test_short_flag_duration() {
-    run_orch -d 30 help
+    run_orch -d 30 help-advanced
     assert_status 0 "$RUN_RC" "-d 30 should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_DURATION=30" "usage should reflect duration=30" || return 1
 }
 
 test_short_flag_parallel() {
-    run_orch -P 4 help
+    run_orch -P 4 help-advanced
     assert_status 0 "$RUN_RC" "-P 4 should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_PARALLEL=4" "usage should reflect parallel=4" || return 1
 }
 
 test_ssh_user_override() {
-    run_orch --ssh-user=alice help
+    run_orch --ssh-user=alice help-advanced
     assert_status 0 "$RUN_RC" "--ssh-user=alice should succeed" || return 1
     assert_contains "$RUN_OUT" "SSH_USER=alice" "usage should reflect ssh user" || return 1
 }
@@ -104,14 +104,14 @@ test_double_dash_terminates_flag_parsing() {
 
 test_env_var_used_when_no_flag() {
     # IPERF_PORT env var should appear in usage when no flag overrides.
-    IPERF_PORT=12345 run_orch help
+    IPERF_PORT=12345 run_orch help-advanced
     assert_status 0 "$RUN_RC" "env-only invocation should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=12345" "env IPERF_PORT should propagate" || return 1
 }
 
 test_flag_overrides_env() {
     # CLI flag wins over env var.
-    IPERF_PORT=11111 run_orch --port=22222 help
+    IPERF_PORT=11111 run_orch --port=22222 help-advanced
     assert_status 0 "$RUN_RC" "flag override should succeed" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=22222" "flag should override env" || return 1
     assert_not_contains "$RUN_OUT" "IPERF_PORT=11111" "env value should not leak through" || return 1
@@ -144,17 +144,17 @@ test_subcommand_flag_passes_through_pre_pass() {
 }
 
 test_dry_run_flag_accepted() {
-    run_orch --dry-run help
+    run_orch --dry-run help-advanced
     assert_status 0 "$RUN_RC" "--dry-run should be accepted" || return 1
 }
 
 test_verbose_flag_accepted() {
-    run_orch --verbose help
+    run_orch --verbose help-advanced
     assert_status 0 "$RUN_RC" "--verbose should be accepted" || return 1
 }
 
 test_quiet_flag_accepted() {
-    run_orch --quiet help
+    run_orch --quiet help-advanced
     assert_status 0 "$RUN_RC" "--quiet should be accepted" || return 1
 }
 

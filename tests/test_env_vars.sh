@@ -21,38 +21,38 @@ source "$DIR/test_helper.bash"
 # The help banner echoes every config key with its current value.
 
 test_iperf_port_env_propagates() {
-    IPERF_PORT=22222 run_orch help
+    IPERF_PORT=22222 run_orch help-advanced
     assert_contains "$RUN_OUT" "IPERF_PORT=22222" || return 1
 }
 
 test_iperf_duration_env_propagates() {
-    IPERF_DURATION=99 run_orch help
+    IPERF_DURATION=99 run_orch help-advanced
     assert_contains "$RUN_OUT" "IPERF_DURATION=99" || return 1
 }
 
 test_iperf_parallel_env_propagates() {
-    IPERF_PARALLEL=8 run_orch help
+    IPERF_PARALLEL=8 run_orch help-advanced
     assert_contains "$RUN_OUT" "IPERF_PARALLEL=8" || return 1
 }
 
 test_iperf_jobs_env_propagates() {
-    IPERF_JOBS=24 run_orch help
+    IPERF_JOBS=24 run_orch help-advanced
     assert_contains "$RUN_OUT" "IPERF_JOBS=24" || return 1
 }
 
 test_ssh_user_env_propagates() {
-    SSH_USER=netadmin run_orch help
+    SSH_USER=netadmin run_orch help-advanced
     assert_contains "$RUN_OUT" "SSH_USER=netadmin" || return 1
 }
 
 test_start_delay_env_propagates() {
-    START_DELAY=120 run_orch help
+    START_DELAY=120 run_orch help-advanced
     assert_contains "$RUN_OUT" "START_DELAY=120" || return 1
 }
 
 test_results_base_env_propagates() {
     local custom="$TEST_TMPDIR/from_env_var"
-    RESULTS_BASE="$custom" run_orch help
+    RESULTS_BASE="$custom" run_orch help-advanced
     assert_contains "$RUN_OUT" "RESULTS_BASE=$custom" || return 1
 }
 
@@ -144,7 +144,7 @@ EOF
 test_ssh_opts_env_var_default_is_safe() {
     # The default contains StrictHostKeyChecking=accept-new which is
     # a sane new-host policy. Make sure that default appears in help.
-    run_orch help
+    run_orch help-advanced
     # SSH_OPTS isn't echoed in the help text directly (only the keys
     # that get echoed are the user-tunable ones), but we can check
     # the default by sourcing the orchestrator.
@@ -177,7 +177,7 @@ test_all_env_vars_set_at_once_dont_collide() {
     SSH_USER=netuser \
     START_DELAY=60 \
     REMOTE_DIR=/some/where \
-    run_orch help
+    run_orch help-advanced
     assert_status 0 "$RUN_RC" || return 1
     assert_contains "$RUN_OUT" "IPERF_PORT=11111" || return 1
     assert_contains "$RUN_OUT" "IPERF_DURATION=20" || return 1
@@ -188,12 +188,12 @@ test_all_env_vars_set_at_once_dont_collide() {
 # ---- Validation also applies to env-only invocation -------------------
 
 test_env_var_invalid_int_is_rejected() {
-    IPERF_PORT=garbage run_orch help
+    IPERF_PORT=garbage run_orch help-advanced
     assert_status 2 "$RUN_RC" "garbage IPERF_PORT env var should be rejected" || return 1
 }
 
 test_env_var_zero_jobs_is_rejected() {
-    IPERF_JOBS=0 run_orch help
+    IPERF_JOBS=0 run_orch help-advanced
     assert_status 2 "$RUN_RC" "IPERF_JOBS=0 env var should be rejected" || return 1
 }
 

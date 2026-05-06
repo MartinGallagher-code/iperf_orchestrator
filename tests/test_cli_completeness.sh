@@ -60,7 +60,7 @@ test_every_documented_subcommand_is_dispatched() {
 }
 
 test_help_text_lists_every_subcommand() {
-    run_orch help
+    run_orch help-advanced
     # Ground truth: scrape the dispatcher case statement for tokens
     # that look like subcommands. The dispatcher block sits between
     # `case "$cmd" in` and the next `esac`. Lines like "    foo)" and
@@ -92,7 +92,7 @@ test_help_text_lists_every_subcommand() {
 }
 
 test_help_text_documents_every_long_flag() {
-    run_orch help
+    run_orch help-advanced
     # Extract long flags from case-statement patterns specifically:
     # lines that look like "    --port)" or "    --port=*)". This
     # avoids false positives from prose comments and the SSH_OPTS
@@ -123,21 +123,21 @@ test_help_text_documents_every_long_flag() {
 # ---- Help text content ----------------------------------------------------
 
 test_help_includes_all_three_run_modes() {
-    run_orch help
+    run_orch help-advanced
     assert_contains "$RUN_OUT" "parallel" "should mention parallel mode" || return 1
     assert_contains "$RUN_OUT" "sequential-host" || return 1
     assert_contains "$RUN_OUT" "sequential-pair" || return 1
 }
 
 test_help_includes_files_section() {
-    run_orch help
+    run_orch help-advanced
     assert_contains "$RUN_OUT" "FILES:" "should have a FILES: section" || return 1
     assert_contains "$RUN_OUT" "Server list:" || return 1
     assert_contains "$RUN_OUT" "Results base:" || return 1
 }
 
 test_help_includes_setup_quickstart() {
-    run_orch help
+    run_orch help-advanced
     assert_contains "$RUN_OUT" "ssh-setup" "help should mention ssh-setup" || return 1
     assert_contains "$RUN_OUT" "--servers" "help should mention --servers flag" || return 1
 }
