@@ -1376,8 +1376,8 @@ _run_rolling() {
                 (
                     sleep 0.\$((100 + RANDOM % 900))
                     {
-                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=1 test_start=\$(date +%s)\"
-                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION$IPERF_EXTRA_ARGS -y C 2>&1
+                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS test_start=\$(date +%s)\"
+                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS$IPERF_EXTRA_ARGS -y C 2>&1
                     } > \"\$outfile\"
                 ) &
                 active=\$((active + 1))

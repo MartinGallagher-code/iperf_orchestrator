@@ -148,8 +148,27 @@ test_run_tests_rolling_passes_perf_flags_to_iperf() {
     }
 }
 
+test_run_tests_rolling_passes_streams_to_iperf() {
+    install_fake_ssh
+    write_server_list a b c >/dev/null
+    IPERF_STREAMS=4 \
+        run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -qE '[-]P[[:space:]]+4' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should include -P 4 in iperf -c" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -q 'parallel=4' "$FAKE_SSH_LOG" || {
+        echo "rolling probe header should report parallel=4" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+}
+
 run_test test_run_tests_rolling_mode_dispatches_per_host_loop
 run_test test_run_tests_rolling_passes_perf_flags_to_iperf
+run_test test_run_tests_rolling_passes_streams_to_iperf
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode
