@@ -2351,6 +2351,8 @@ with open(out_txt, "w") as f:
             col_means[d] = sum(vals) / len(vals)
     totals = {h: row_means.get(h, 0.0) + col_means.get(h, 0.0)
               for h in set(row_means) | set(col_means)}
+    # Mbps -> GB/s (decimal): Mbps / 8000. So 8000 Mbps = 1 GB/s.
+    def _gbs(mbps): return mbps / 8000.0
     if totals:
         f.write("\nPer-server avg total traffic Mbps "
                 "(out+in, sorted high to low):\n")
@@ -2359,7 +2361,8 @@ with open(out_txt, "w") as f:
             o = row_means.get(h, 0.0)
             i = col_means.get(h, 0.0)
             bar = "#" * int(t / max_total * 40)
-            f.write(f"  {h.ljust(host_w)} {t:9.2f}  "
+            f.write(f"  {h.ljust(host_w)} {t:9.2f} Mbps "
+                    f"({_gbs(t):6.3f} GB/s)  "
                     f"(out={o:8.2f} in={i:8.2f})  {bar}\n")
 
     # Fleet-wide aggregate: the total bandwidth being moved across the
@@ -2373,9 +2376,10 @@ with open(out_txt, "w") as f:
         sys_total = sum(all_flows)
         sys_mean = sys_total / len(all_flows)
         f.write(f"\nFleet aggregate bandwidth (sum of all directional flows): "
-                f"{sys_total:.2f} Mbps\n")
+                f"{sys_total:.2f} Mbps  ({_gbs(sys_total):.3f} GB/s)\n")
         f.write(f"  measured flows: {len(all_flows)} "
-                f"(mean {sys_mean:.2f} Mbps per flow)\n")
+                f"(mean {sys_mean:.2f} Mbps / "
+                f"{_gbs(sys_mean):.3f} GB/s per flow)\n")
 
     # If any cell aggregated more than one sample (rolling mode), summarize.
     counts = [c for d in samples_per.values() for c in d.values()]
