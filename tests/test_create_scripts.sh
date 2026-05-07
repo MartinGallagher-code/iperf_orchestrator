@@ -171,6 +171,19 @@ test_generated_script_outputs_run_id_suffixed_filenames() {
     return 1
 }
 
+test_generated_script_includes_iperf_perf_flags() {
+    write_servers_only h0 h1
+    IPERF_BANDWIDTH=100M IPERF_LENGTH=128K IPERF_WINDOW=4M IPERF_MSS=1448 IPERF_NO_NAGLE=1 \
+        run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q -- '-b 100M' "$s" || { echo "missing -b 100M" >&2; cat "$s" >&2; return 1; }
+    grep -q -- '-l 128K' "$s" || { echo "missing -l 128K" >&2; return 1; }
+    grep -q -- '-w 4M'   "$s" || { echo "missing -w 4M"   >&2; return 1; }
+    grep -q -- '-M 1448' "$s" || { echo "missing -M 1448" >&2; return 1; }
+    grep -q -- ' -N '    "$s" || { echo "missing -N"      >&2; return 1; }
+}
+
 test_generated_scripts_handle_synchronized_start() {
     write_servers_only h0 h1 h2
     run_orch create-scripts >/dev/null 2>&1
@@ -193,6 +206,7 @@ run_test test_generated_script_writes_pair_header
 run_test test_generated_script_sets_correct_constants
 run_test test_create_scripts_sanitizes_ipv6_filenames
 run_test test_generated_script_outputs_run_id_suffixed_filenames
+run_test test_generated_script_includes_iperf_perf_flags
 run_test test_generated_scripts_handle_synchronized_start
 
 report_tests

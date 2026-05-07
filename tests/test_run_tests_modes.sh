@@ -131,7 +131,25 @@ test_run_tests_rolling_mode_dispatches_per_host_loop() {
 }
 
 run_test test_run_tests_unknown_mode_is_rejected
+test_run_tests_rolling_passes_perf_flags_to_iperf() {
+    install_fake_ssh
+    write_server_list a b c >/dev/null
+    IPERF_BANDWIDTH=500M IPERF_LENGTH=64K \
+        run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q -- '-b 500M' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should include -b 500M in iperf -c" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -q -- '-l 64K' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should include -l 64K" >&2
+        return 1
+    }
+}
+
 run_test test_run_tests_rolling_mode_dispatches_per_host_loop
+run_test test_run_tests_rolling_passes_perf_flags_to_iperf
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode

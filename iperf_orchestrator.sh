@@ -69,6 +69,14 @@ IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_TOTAL_TIME="${IPERF_TOTAL_TIME:-300}"  # 'rolling' mode wall-time
 IPERF_HOST_FLOWS="${IPERF_HOST_FLOWS:-1}"              # 'rolling' mode per-host concurrency
+
+# iperf2 performance knobs forwarded to every iperf -c invocation.
+# Empty = use iperf2's default; otherwise passed through verbatim.
+IPERF_BANDWIDTH="${IPERF_BANDWIDTH:-}"   # -b: target rate (e.g. 100M, 1G)
+IPERF_LENGTH="${IPERF_LENGTH:-}"         # -l: TCP read/write buffer (e.g. 128K)
+IPERF_WINDOW="${IPERF_WINDOW:-}"         # -w: TCP window / socket buffer (e.g. 4M)
+IPERF_MSS="${IPERF_MSS:-}"               # -M: TCP maximum segment size
+IPERF_NO_NAGLE="${IPERF_NO_NAGLE:-0}"    # -N: disable Nagle's algorithm (1=on)
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -144,6 +152,15 @@ while [ $# -gt 0 ]; do
         --total-time=*)  IPERF_TOTAL_TIME="${1#*=}"; shift ;;
         --host-flows)    _flag_need "$1" "${2:-}"; IPERF_HOST_FLOWS="$2"; shift 2 ;;
         --host-flows=*)  IPERF_HOST_FLOWS="${1#*=}"; shift ;;
+        --bandwidth|-b)  _flag_need "$1" "${2:-}"; IPERF_BANDWIDTH="$2"; shift 2 ;;
+        --bandwidth=*)   IPERF_BANDWIDTH="${1#*=}"; shift ;;
+        --length|-l)     _flag_need "$1" "${2:-}"; IPERF_LENGTH="$2"; shift 2 ;;
+        --length=*)      IPERF_LENGTH="${1#*=}"; shift ;;
+        --window|-w)     _flag_need "$1" "${2:-}"; IPERF_WINDOW="$2"; shift 2 ;;
+        --window=*)      IPERF_WINDOW="${1#*=}"; shift ;;
+        --mss|-M)        _flag_need "$1" "${2:-}"; IPERF_MSS="$2"; shift 2 ;;
+        --mss=*)         IPERF_MSS="${1#*=}"; shift ;;
+        --no-nagle|-N)   IPERF_NO_NAGLE=1; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
@@ -202,6 +219,20 @@ if [ "$IPERF_SSH_JOBS" -gt 256 ]; then
     echo "iperf-orchestrator: WARN: --ssh-jobs=$IPERF_SSH_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
 fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
+
+# Build the optional iperf2 client-arg string (-b/-l/-w/-M/-N) once at
+# startup. Empty if no perf knobs were set; otherwise something like
+# "-b 1G -l 128K -N". Pass-through; iperf2 validates the values.
+_iperf_extra_args() {
+    local a=""
+    [ -n "$IPERF_BANDWIDTH" ]   && a+=" -b $IPERF_BANDWIDTH"
+    [ -n "$IPERF_LENGTH" ]      && a+=" -l $IPERF_LENGTH"
+    [ -n "$IPERF_WINDOW" ]      && a+=" -w $IPERF_WINDOW"
+    [ -n "$IPERF_MSS" ]         && a+=" -M $IPERF_MSS"
+    [ "$IPERF_NO_NAGLE" = "1" ] && a+=" -N"
+    printf '%s' "$a"
+}
+IPERF_EXTRA_ARGS=$(_iperf_extra_args)
 
 # Run ID + results directory.
 #
@@ -577,6 +608,8 @@ COMMON FLAGS:
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
     --host-flows N             concurrent flows per host in rolling mode (default $IPERF_HOST_FLOWS)
+    --bandwidth, -b RATE       cap per-flow rate, e.g. 100M, 1G (iperf2 -b)
+    --length, -l SIZE          TCP r/w buffer size, e.g. 128K (iperf2 -l)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --ask-password             prompt once for an SSH password, reuse for all hosts
@@ -614,6 +647,11 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
     --host-flows N             rolling mode per-host concurrent flows (default $IPERF_HOST_FLOWS)
+    --bandwidth, -b RATE       cap per-flow target rate (iperf2 -b; e.g. 100M, 1G)
+    --length, -l SIZE          TCP read/write buffer size (iperf2 -l; e.g. 128K)
+    --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
+    --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
+    --no-nagle, -N             disable Nagle's algorithm (iperf2 -N)
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -683,6 +721,11 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_SSH_JOBS=$IPERF_SSH_JOBS
     IPERF_TOTAL_TIME=$IPERF_TOTAL_TIME
     IPERF_HOST_FLOWS=$IPERF_HOST_FLOWS
+    IPERF_BANDWIDTH=${IPERF_BANDWIDTH:-}   # iperf2 -b (per-flow rate cap)
+    IPERF_LENGTH=${IPERF_LENGTH:-}         # iperf2 -l (TCP read/write buffer)
+    IPERF_WINDOW=${IPERF_WINDOW:-}         # iperf2 -w (TCP window / socket buffer)
+    IPERF_MSS=${IPERF_MSS:-}               # iperf2 -M (TCP MSS)
+    IPERF_NO_NAGLE=$IPERF_NO_NAGLE         # iperf2 -N (1 = disable Nagle's)
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
@@ -1127,7 +1170,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
             echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" --full-duplex -e -y C 2>&1
+            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL"$IPERF_EXTRA_ARGS --full-duplex -e -y C 2>&1
         } > "\$out" &
         pids+=(\$!)
     done
@@ -1334,7 +1377,7 @@ _run_rolling() {
                     sleep 0.\$((100 + RANDOM % 900))
                     {
                         echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=1 test_start=\$(date +%s)\"
-                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -y C 2>&1
+                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION$IPERF_EXTRA_ARGS -y C 2>&1
                     } > \"\$outfile\"
                 ) &
                 active=\$((active + 1))
