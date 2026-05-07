@@ -2174,17 +2174,37 @@ in_csv, out_txt = sys.argv[1], sys.argv[2]
 meta_run_at, meta_mode, meta_duration = sys.argv[3], sys.argv[4], sys.argv[5]
 meta_port, meta_parallel, meta_n_hosts = sys.argv[6], sys.argv[7], sys.argv[8]
 
-mat = defaultdict(dict)    # mat[src][dst] = mean mbps across samples
+mat = defaultdict(dict)    # mat[src][dst] = time-averaged directional Mbps
 samples_per = defaultdict(dict)  # samples_per[src][dst] = sample count
 attempts = defaultdict(lambda: defaultdict(int))  # attempts[src][dst] = total tries (incl. failures)
 sources, targets = set(), set()
 
-# Accumulate samples per (source, target). Rolling mode produces many
-# rows per ordered pair; we aggregate by taking the mean. We also count
-# every attempt (including rows with no measured throughput, i.e.
-# failed iperf invocations) so blank cells can be annotated with the
-# attempt count -- "-(5)" means 5 tries, all failed.
+# iperf2 -y C timestamp parser. Format: "YYYYMMDDHHMMSS.fff" (e.g.
+# "20260506191234.567"). Returns epoch seconds, or None on failure.
+def _ts(s):
+    if not s or len(s) < 14:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+    except Exception:
+        return None
+
+# Cell value semantics: time-averaged directional Mbps, computed as
+# sum(mbps_i * duration_i for all flows i in this direction) / run_wall_time.
+# This is equivalent to total-bytes-divided-by-wall-time (since
+# mbps*duration = bytes*8/1e6) and correctly captures BOTH concurrent
+# flows (--host-flows>1, where multiple iperf invocations in the same
+# direction sum because their bytes accumulate during the same wall
+# window) AND idle gaps in the run. With --host-flows=1 and back-to-
+# back tests it collapses to the per-flow mean. We also track every
+# attempt (including rows with no measured throughput, i.e. failed
+# iperf invocations) so blank cells can be annotated -- "-(5)" means
+# 5 tries, all failed.
 acc = defaultdict(lambda: defaultdict(list))
+mbps_seconds = defaultdict(lambda: defaultdict(float))  # sum(mbps * duration)
+ts_list = []
+max_dur = 0.0
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
@@ -2197,12 +2217,37 @@ with open(in_csv) as f:
             f_v = None
         if f_v is not None:
             acc[s][t].append(f_v)
+            try:
+                d = float(row.get("duration_s") or "0")
+            except ValueError:
+                d = 0.0
+            if d > 0:
+                mbps_seconds[s][t] += f_v * d
+                if d > max_dur:
+                    max_dur = d
+            tv = _ts(row.get("timestamp", ""))
+            if tv is not None:
+                ts_list.append(tv)
+
+# Run wall-time = span of all timestamps + the longest single-test
+# duration. For parallel / sequential-host modes (rows roughly synced)
+# the span is small and wall_time ≈ max_dur. For rolling, the span
+# covers the whole probe loop so wall_time ≈ --total-time.
+if ts_list:
+    span = max(ts_list) - min(ts_list)
+    wall_time = span + max_dur if span >= 0 else max_dur
+else:
+    wall_time = max_dur
+if wall_time <= 0:
+    wall_time = 1.0  # fallback; avoids division-by-zero
+
 for s in acc:
     for t in acc[s]:
         vs = acc[s][t]
         if vs:
-            mat[s][t] = sum(vs) / len(vs)
             samples_per[s][t] = len(vs)
+            ms = mbps_seconds[s].get(t, 0.0)
+            mat[s][t] = ms / wall_time if ms > 0 else sum(vs) / len(vs)
         else:
             mat[s][t] = None
 
@@ -2227,7 +2272,9 @@ with open(out_txt, "w") as f:
     f.write(f"Mode:     {meta_mode}    Duration: {meta_duration}s    "
             f"Port: {meta_port}    Parallel: {meta_parallel}    Hosts: {meta_n_hosts}\n")
     f.write(f"Rows = source (sender), Columns = target (receiver)\n")
-    f.write(f"Each cell from a single full-duplex test that measured both directions concurrently.\n")
+    f.write(f"Each cell = total bytes (source -> target) * 8 / run wall-time = "
+            f"time-averaged\n  directional throughput. Accounts for "
+            f"concurrent flows summing in the same direction.\n")
     f.write(f"Diagonal '-' = no self-test;  '-(N)' = N attempts, none successful\n\n")
 
     # Header
@@ -2369,9 +2416,20 @@ except ImportError as e:
 
 mat = defaultdict(dict)
 sources, targets = set(), set()
-# Accumulate samples per ordered pair and use the mean. Rolling mode
-# can produce many rows per (source, target); other modes produce one.
 acc = defaultdict(lambda: defaultdict(list))
+mbps_seconds = defaultdict(lambda: defaultdict(float))
+ts_list = []
+max_dur = 0.0
+
+def _ts(s):
+    if not s or len(s) < 14:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+    except Exception:
+        return None
+
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
@@ -2383,10 +2441,35 @@ with open(in_csv) as f:
             f_v = None
         if f_v is not None:
             acc[s][t].append(f_v)
+            try:
+                d = float(row.get("duration_s") or "0")
+            except ValueError:
+                d = 0.0
+            if d > 0:
+                mbps_seconds[s][t] += f_v * d
+                if d > max_dur:
+                    max_dur = d
+            tv = _ts(row.get("timestamp", ""))
+            if tv is not None:
+                ts_list.append(tv)
+
+if ts_list:
+    span = max(ts_list) - min(ts_list)
+    wall_time = span + max_dur if span >= 0 else max_dur
+else:
+    wall_time = max_dur
+if wall_time <= 0:
+    wall_time = 1.0
+
 for s in acc:
     for t in acc[s]:
         vs = acc[s][t]
-        mat[s][t] = sum(vs) / len(vs) if vs else None
+        if not vs:
+            mat[s][t] = None
+            continue
+        ms = mbps_seconds[s].get(t, 0.0)
+        # Time-averaged directional Mbps; concurrent flows sum naturally.
+        mat[s][t] = ms / wall_time if ms > 0 else sum(vs) / len(vs)
 
 hosts = sorted(sources | targets)
 n = len(hosts)

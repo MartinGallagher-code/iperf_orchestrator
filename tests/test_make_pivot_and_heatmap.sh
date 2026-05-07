@@ -136,22 +136,39 @@ test_make_pivot_includes_per_server_total_traffic() {
         "should show in= component" || return 1
 }
 
-test_make_pivot_means_multiple_samples_per_pair() {
-    # Rolling mode: same (source, target) appears multiple times. Pivot
-    # should report the mean, not the last sample.
+test_make_pivot_sums_concurrent_flows() {
+    # Three rows with the SAME timestamp = three concurrent flows in
+    # the same direction (e.g. --host-flows 3). Each flow runs for 5s.
+    # Cell = sum(mbps * duration) / wall_time = 30000 / 5 = 6000 Mbps
+    # (the directional total, not the per-flow mean of 2000).
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
-,a,b,OK,TCP,5,1,0,0,1000.0,5001,40000,a,b,r1,
-,a,b,OK,TCP,5,1,0,0,2000.0,5001,40000,a,b,r2,
-,a,b,OK,TCP,5,1,0,0,3000.0,5001,40000,a,b,r3,
+20260101120000,a,b,OK,TCP,5,1,0,0,1000.0,5001,40000,a,b,r1,
+20260101120000,a,b,OK,TCP,5,1,0,0,2000.0,5001,40000,a,b,r2,
+20260101120000,a,b,OK,TCP,5,1,0,0,3000.0,5001,40000,a,b,r3,
 EOF
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    # Mean of 1000, 2000, 3000 = 2000. Should appear; last value (3000) should not.
-    grep -q "2000.00" "$pivot" || { echo "expected mean 2000.00"; cat "$pivot" >&2; return 1; }
-    # Footer mentions sample count summary when any cell has > 1 sample.
+    grep -q "6000.00" "$pivot" || { echo "expected sum 6000.00 (concurrent flows)"; cat "$pivot" >&2; return 1; }
     grep -q "Samples per cell" "$pivot" || { echo "expected samples summary"; return 1; }
+}
+
+test_make_pivot_averages_sequential_flows() {
+    # Three rows with timestamps 5s apart = three back-to-back flows
+    # (e.g. --host-flows 1). Wall-time spans 10 + 5 = 15s. Cell =
+    # sum(1000+2000+3000)*5 / 15 = 30000 / 15 = 2000 Mbps (the
+    # time-averaged per-flow rate).
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+20260101120000,a,b,OK,TCP,5,1,0,0,1000.0,5001,40000,a,b,r1,
+20260101120005,a,b,OK,TCP,5,1,0,0,2000.0,5001,40000,a,b,r2,
+20260101120010,a,b,OK,TCP,5,1,0,0,3000.0,5001,40000,a,b,r3,
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -q "2000.00" "$pivot" || { echo "expected mean 2000.00 (sequential flows)"; cat "$pivot" >&2; return 1; }
 }
 
 test_make_heatmap_requires_csv() {
@@ -208,7 +225,8 @@ run_test test_make_pivot_writes_pivot_file
 run_test test_make_pivot_annotates_failed_only_cells_with_attempt_count
 run_test test_make_pivot_includes_per_server_total_traffic
 run_test test_make_pivot_includes_fleet_aggregate_bandwidth
-run_test test_make_pivot_means_multiple_samples_per_pair
+run_test test_make_pivot_sums_concurrent_flows
+run_test test_make_pivot_averages_sequential_flows
 run_test test_make_heatmap_requires_csv
 run_test test_make_heatmap_produces_png_or_skips_cleanly
 run_test test_make_heatmap_missing_dependency_message
