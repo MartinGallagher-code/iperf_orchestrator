@@ -121,12 +121,16 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 #------------------------------------------------------------------------------
 # CLI flag pre-pass
 #
-# Consumes GLOBAL flags up until the subcommand and leaves the subcommand
-# plus its arguments behind. Once the first positional (the subcommand)
-# is seen, everything after it is forwarded to the subcommand verbatim --
-# including subcommand-specific flags like `cleanup --yes` or
-# `all --keep-going`. Anything after a literal "--" is also passed through.
-# Both "--key value" and "--key=value" forms are accepted for global flags.
+# Recognizes GLOBAL flags anywhere on the command line and accumulates the
+# remaining positionals (subcommand + its args + any subcommand-specific
+# flags) into _PARSED, preserving order. So all of these are equivalent:
+#
+#     orch --streams 4 run-tests rolling
+#     orch run-tests --streams 4 rolling
+#     orch run-tests rolling --streams 4
+#
+# Anything after a literal `--` is forwarded verbatim, even if flag-shaped.
+# Both `--key value` and `--key=value` forms are accepted.
 #------------------------------------------------------------------------------
 _flag_die() { echo "iperf-orchestrator: $*" >&2; exit 2; }
 _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
@@ -134,9 +138,6 @@ _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
 _PARSED=()
 _saw_subcommand=0
 while [ $# -gt 0 ]; do
-    if [ "$_saw_subcommand" = "1" ]; then
-        _PARSED+=("$1"); shift; continue
-    fi
     case "$1" in
         --port)          _flag_need "$1" "${2:-}"; IPERF_PORT="$2"; shift 2 ;;
         --port=*)        IPERF_PORT="${1#*=}"; shift ;;
@@ -186,7 +187,17 @@ while [ $# -gt 0 ]; do
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
         --help-advanced) _PARSED+=("help-advanced"); shift ;;
-        --*)             _flag_die "unknown flag: $1 (global flags must come before the subcommand; subcommand flags must come after)" ;;
+        # Unknown flags before any subcommand are treated as typos and
+        # rejected at the top level. Once a subcommand has been seen,
+        # unknown flags get forwarded so subcommand-specific flags
+        # (`cleanup --yes`, `ssh-setup --ask-password`, etc.) survive.
+        --*|-?*)
+            if [ "$_saw_subcommand" = "1" ]; then
+                _PARSED+=("$1"); shift
+            else
+                _flag_die "unknown flag: $1"
+            fi
+            ;;
         *)               _PARSED+=("$1"); _saw_subcommand=1; shift ;;
     esac
 done
@@ -224,13 +235,13 @@ fi
 # startup. Empty if no perf knobs were set; otherwise something like
 # "-b 1G -l 128K -N". Pass-through; iperf2 validates the values.
 _iperf_extra_args() {
-    local a=""
-    [ -n "$IPERF_BANDWIDTH" ]   && a+=" -b $IPERF_BANDWIDTH"
-    [ -n "$IPERF_LENGTH" ]      && a+=" -l $IPERF_LENGTH"
-    [ -n "$IPERF_WINDOW" ]      && a+=" -w $IPERF_WINDOW"
-    [ -n "$IPERF_MSS" ]         && a+=" -M $IPERF_MSS"
-    [ "$IPERF_NO_NAGLE" = "1" ] && a+=" -N"
-    printf '%s' "$a"
+    local parts=()
+    [ -n "$IPERF_BANDWIDTH" ]   && parts+=("-b" "$IPERF_BANDWIDTH")
+    [ -n "$IPERF_LENGTH" ]      && parts+=("-l" "$IPERF_LENGTH")
+    [ -n "$IPERF_WINDOW" ]      && parts+=("-w" "$IPERF_WINDOW")
+    [ -n "$IPERF_MSS" ]         && parts+=("-M" "$IPERF_MSS")
+    [ "$IPERF_NO_NAGLE" = "1" ] && parts+=("-N")
+    printf '%s' "${parts[*]}"
 }
 IPERF_EXTRA_ARGS=$(_iperf_extra_args)
 
@@ -1170,7 +1181,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
             echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL"$IPERF_EXTRA_ARGS --full-duplex -e -y C 2>&1
+            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS --full-duplex -e -y C 2>&1
         } > "\$out" &
         pids+=(\$!)
     done
@@ -1377,7 +1388,7 @@ _run_rolling() {
                     sleep 0.\$((100 + RANDOM % 900))
                     {
                         echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS test_start=\$(date +%s)\"
-                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS$IPERF_EXTRA_ARGS -y C 2>&1
+                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS -y C 2>&1
                     } > \"\$outfile\"
                 ) &
                 active=\$((active + 1))
@@ -2152,27 +2163,45 @@ cmd_make_pivot() {
     [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
     log "Building pivot table -> $pivot"
 
-    # Metadata captured for the header (best effort; reflects current
-    # environment, which may have changed since the actual test run).
-    local meta_run_at meta_mode meta_duration meta_port meta_parallel meta_n_hosts
+    # Metadata captured for the header. Most fields reflect the run's
+    # actual recorded values (mode, duration, port, parallel-streams)
+    # so a `make-pivot` invocation that doesn't pass `--duration`/`-P`
+    # still describes the test that was actually run. n_hosts is taken
+    # from the active server list at pivot time, since make-pivot honors
+    # the current servers.txt for filtering.
+    local meta_run_at meta_mode meta_n_hosts
     meta_run_at="$(date '+%F %T %z')"
     meta_mode="(unknown)"
     [ -f "$RESULTS_DIR/.run_mode" ] && meta_mode=$(cat "$RESULTS_DIR/.run_mode")
-    meta_duration="$IPERF_DURATION"
-    meta_port="$IPERF_PORT"
-    meta_parallel="$IPERF_STREAMS"
     meta_n_hosts=0
     [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] && meta_n_hosts=$(read_servers | wc -l)
 
     "$PYTHON_BIN" - "$csv" "$pivot" \
-        "$meta_run_at" "$meta_mode" "$meta_duration" "$meta_port" \
-        "$meta_parallel" "$meta_n_hosts" <<'PYEOF'
+        "$meta_run_at" "$meta_mode" "$meta_n_hosts" <<'PYEOF'
 import csv, sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 in_csv, out_txt = sys.argv[1], sys.argv[2]
-meta_run_at, meta_mode, meta_duration = sys.argv[3], sys.argv[4], sys.argv[5]
-meta_port, meta_parallel, meta_n_hosts = sys.argv[6], sys.argv[7], sys.argv[8]
+meta_run_at, meta_mode, meta_n_hosts = sys.argv[3], sys.argv[4], sys.argv[5]
+
+# duration / port / parallel come from the run's own data so they reflect
+# what actually executed, not whatever this make-pivot invocation's env
+# happens to have. We pick the modal value across rows for each.
+def _modal(values):
+    vs = [v for v in values if v not in (None, "", "0")]
+    if not vs:
+        return "?"
+    return Counter(vs).most_common(1)[0][0]
+
+_dur_vals, _port_vals, _par_vals = [], [], []
+with open(in_csv) as _f:
+    for _r in csv.DictReader(_f):
+        _dur_vals.append(_r.get("duration_s", ""))
+        _port_vals.append(_r.get("dst_port", ""))
+        _par_vals.append(_r.get("parallel_streams", ""))
+meta_duration = _modal(_dur_vals)
+meta_port     = _modal(_port_vals)
+meta_parallel = _modal(_par_vals)
 
 mat = defaultdict(dict)    # mat[src][dst] = time-averaged directional Mbps
 samples_per = defaultdict(dict)  # samples_per[src][dst] = sample count

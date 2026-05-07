@@ -172,4 +172,40 @@ run_test test_python_flag_uses_alternate_interpreter
 run_test test_python_flag_dies_when_interpreter_missing
 run_test test_multiple_global_flags_take_effect_together
 
+# ---- global flags after the subcommand ----------------------------------
+
+test_global_flag_after_subcommand_is_recognized() {
+    # Prior to this test the pre-pass stopped consuming global flags as
+    # soon as it saw the subcommand, so `run-tests rolling --streams 4`
+    # silently dropped --streams. The pre-pass now scans the full line.
+    install_fake_ssh
+    write_server_list a b >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch run-tests rolling --total-time 1 --duration 1 --streams 4
+    assert_status 0 "$RUN_RC" "post-subcommand global flags must be honored" || return 1
+    grep -qE '[-]P[[:space:]]+4' "$FAKE_SSH_LOG" || {
+        echo "expected -P 4 in iperf invocation" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -q 'parallel=4' "$FAKE_SSH_LOG" || {
+        echo "expected parallel=4 in rolling header" >&2
+        return 1
+    }
+}
+
+test_global_flag_interleaved_with_subcommand_args() {
+    install_fake_ssh
+    write_server_list a b >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch run-tests --streams 2 rolling --total-time 1 --duration 1
+    assert_status 0 "$RUN_RC" || return 1
+    grep -qE '[-]P[[:space:]]+2' "$FAKE_SSH_LOG" || {
+        echo "expected -P 2 with flag interleaved before mode arg" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+}
+
+run_test test_global_flag_after_subcommand_is_recognized
+run_test test_global_flag_interleaved_with_subcommand_args
+
 report_tests
