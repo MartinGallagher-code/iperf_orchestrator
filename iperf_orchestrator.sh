@@ -83,6 +83,9 @@ IPERF_BIND="${IPERF_BIND:-}"             # -B value. Treated as a substring sear
                                          # IPv4 address is passed to iperf -c -B.
                                          # Examples: "eth0", "bond", "10.0.0",
                                          # "mlx5".
+IPERF_SERVER_BIND="${IPERF_SERVER_BIND:-}" # Same pattern as IPERF_BIND, but for the
+                                         # daemon side: passes -B <ip> to iperf -s
+                                         # so the server only accepts on that iface.
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -170,6 +173,8 @@ while [ $# -gt 0 ]; do
         --no-nagle|-N)   IPERF_NO_NAGLE=1; shift ;;
         --bind|-B)       _flag_need "$1" "${2:-}"; IPERF_BIND="$2"; shift 2 ;;
         --bind=*)        IPERF_BIND="${1#*=}"; shift ;;
+        --server-bind)   _flag_need "$1" "${2:-}"; IPERF_SERVER_BIND="$2"; shift 2 ;;
+        --server-bind=*) IPERF_SERVER_BIND="${1#*=}"; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
@@ -677,6 +682,10 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
                                is what iperf2 -B receives. Examples:
                                  -B eth0       -B bond       -B mlx5
                                  -B 10.0.0     -B 192.168
+    --server-bind PATTERN      bind the iperf2 server side too. Same pattern
+                               syntax as --bind. Without this, the daemon
+                               listens on 0.0.0.0; with it, the daemon only
+                               accepts connections on the resolved IP.
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -752,6 +761,7 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_MSS=${IPERF_MSS:-}               # iperf2 -M (TCP MSS)
     IPERF_NO_NAGLE=$IPERF_NO_NAGLE         # iperf2 -N (1 = disable Nagle's)
     IPERF_BIND=${IPERF_BIND:-}             # iperf2 -B (bind to local addr/iface)
+    IPERF_SERVER_BIND=${IPERF_SERVER_BIND:-} # iperf2 -B for the server side
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
@@ -1050,7 +1060,24 @@ cmd_check_servers() {
 #------------------------------------------------------------------------------
 _worker_start_server() {
     local host="$1"
-    ssh_run "$host" "mkdir -p '$REMOTE_DIR' && iperf -p $IPERF_PORT -s -D"
+    # If --server-bind is set, the remote shell resolves the substring
+    # against its own interface list and passes -B <ip> to iperf -s.
+    # Failure is fatal so the operator notices a wrong pattern instead
+    # of silently falling back to a 0.0.0.0 listener.
+    ssh_run "$host" "
+        set -e
+        mkdir -p '$REMOTE_DIR'
+        BIND_RAW='$IPERF_SERVER_BIND'
+        BIND_FLAG=''
+        if [ -n \"\$BIND_RAW\" ]; then
+            _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
+            [ -n \"\$_line\" ] || { echo \"ERROR: $host: --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
+            _ip=\$(echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1)
+            BIND_FLAG=\"-B \$_ip\"
+            echo \"[server-bind] $host: '\$BIND_RAW' -> ip=\$_ip\"
+        fi
+        iperf -p $IPERF_PORT \$BIND_FLAG -s -D
+    "
 }
 
 cmd_start_servers() {

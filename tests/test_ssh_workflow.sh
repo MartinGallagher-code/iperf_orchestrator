@@ -141,7 +141,45 @@ run_test test_check_iperf_marks_hosts_installed
 run_test test_check_iperf_handles_unreachable_host
 run_test test_check_servers_reports_stopped_when_none_running
 run_test test_check_servers_reports_running_when_pgrep_finds_proc
+test_start_servers_embeds_server_bind_resolver_when_set() {
+    prep_workflow a b
+    run_with_fake_path --server-bind eth0 start-servers >/dev/null 2>&1
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q "BIND_RAW='eth0'" "$FAKE_SSH_LOG" || {
+        echo "--server-bind value not embedded in start-servers worker" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -q 'ip -o -4 addr show' "$FAKE_SSH_LOG" || {
+        echo "start-servers worker should embed the resolver" >&2; return 1
+    }
+    grep -q 'no interface matched' "$FAKE_SSH_LOG" || {
+        echo "start-servers worker missing no-match error path" >&2; return 1
+    }
+    grep -qE 'iperf -p [0-9]+ \$BIND_FLAG -s -D' "$FAKE_SSH_LOG" || {
+        echo "iperf -s invocation should reference \$BIND_FLAG" >&2
+        grep "iperf -p" "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+}
+
+test_start_servers_omits_server_bind_when_unset() {
+    prep_workflow a b
+    run_with_fake_path start-servers >/dev/null 2>&1
+    assert_status 0 "$RUN_RC" || return 1
+    # When --server-bind isn't given, BIND_RAW='' and the resolver
+    # block runs but does nothing; the iperf -s invocation should
+    # still appear with an empty BIND_FLAG.
+    grep -q "BIND_RAW=''" "$FAKE_SSH_LOG" || {
+        echo "expected empty BIND_RAW='' when --server-bind not given" >&2
+        grep BIND_RAW "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+}
+
 run_test test_start_servers_dispatches_per_host
+run_test test_start_servers_embeds_server_bind_resolver_when_set
+run_test test_start_servers_omits_server_bind_when_unset
 run_test test_stop_servers_kills_iperf_on_each_host
 run_test test_cleanup_removes_remote_dir
 run_test test_cleanup_without_yes_dies
