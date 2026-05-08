@@ -191,6 +191,26 @@ test_run_tests_rolling_embeds_bind_resolver() {
     }
 }
 
+test_run_tests_rolling_writes_cmd_and_traps_failures() {
+    install_fake_ssh
+    write_server_list a b >/dev/null
+    run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -qE 'cmd="iperf -c \$target' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should build cmd= string for the log" >&2
+        cat "$FAKE_SSH_LOG" >&2; return 1
+    }
+    grep -q 'echo "# cmd: \$cmd"' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should write '# cmd:' line into log" >&2; return 1
+    }
+    grep -q '\[FAIL\] ' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should surface [FAIL] on errors" >&2; return 1
+    }
+    grep -q 'connect failed' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should include error-token grep" >&2; return 1
+    }
+}
+
 test_run_tests_rolling_omits_bind_when_unset() {
     install_fake_ssh
     write_server_list a b c >/dev/null
@@ -203,6 +223,7 @@ test_run_tests_rolling_omits_bind_when_unset() {
 }
 run_test test_run_tests_rolling_embeds_bind_resolver
 run_test test_run_tests_rolling_omits_bind_when_unset
+run_test test_run_tests_rolling_writes_cmd_and_traps_failures
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode

@@ -232,6 +232,50 @@ test_generated_script_omits_bind_when_not_set() {
     }
 }
 
+test_generated_script_writes_cmd_line_to_log() {
+    # Each iperf_test_*.log gets a "# cmd: iperf -c ..." line written
+    # before iperf runs, so an operator debugging a failed test can
+    # copy-paste the exact invocation.
+    write_servers_only h0 h1
+    run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^[[:space:]]*echo "# cmd: \$cmd"' "$s" || {
+        echo "expected '# cmd:' line emission" >&2; cat "$s" >&2; return 1
+    }
+    grep -qE 'cmd="iperf -c \$target' "$s" || {
+        echo "expected cmd= assignment with iperf -c \$target" >&2
+        grep '^[[:space:]]*cmd=' "$s" >&2
+        return 1
+    }
+}
+
+test_generated_script_traps_iperf_failure() {
+    # On non-zero exit OR known iperf2 error tokens in output, the
+    # script must (a) record exit_status into the log, (b) echo a
+    # FAIL line and the inciting cmd to stderr (which lands in the
+    # collected per-host log).
+    write_servers_only h0 h1
+    run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q 'connect failed' "$s" || {
+        echo "missing 'connect failed' in error-token grep" >&2; return 1
+    }
+    grep -q 'Connection timed out' "$s" || {
+        echo "missing 'Connection timed out' in error-token grep" >&2; return 1
+    }
+    grep -q 'No route to host' "$s" || {
+        echo "missing 'No route to host' in error-token grep" >&2; return 1
+    }
+    grep -q '\[FAIL\]' "$s" || {
+        echo "missing [FAIL] tag in error reporter" >&2; return 1
+    }
+    grep -q 'echo "# exit_status:' "$s" || {
+        echo "missing exit_status logging" >&2; return 1
+    }
+}
+
 test_generated_script_embeds_bind_metadata_in_log_header() {
     write_servers_only h0 h1
     run_orch create-scripts >/dev/null 2>&1
@@ -260,5 +304,7 @@ run_test test_generated_scripts_handle_synchronized_start
 run_test test_generated_script_includes_bind_resolver_and_arg
 run_test test_generated_script_omits_bind_when_not_set
 run_test test_generated_script_embeds_bind_metadata_in_log_header
+run_test test_generated_script_writes_cmd_line_to_log
+run_test test_generated_script_traps_iperf_failure
 
 report_tests

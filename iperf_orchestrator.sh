@@ -923,7 +923,7 @@ _worker_ssh_copy_id() {
     local host="$1"
     log "Distributing key to $host (automated via expect)"
     if _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
-        log "  OK: $host"
+        vlog "  OK: $host"
         return 0
     fi
     warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
@@ -991,7 +991,7 @@ cmd_ssh_setup() {
             [ -z "$host" ] && continue
             log "Distributing key to $host (you may be prompted for the password)"
             if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
-                log "  OK: $host"
+                vlog "  OK: $host"
             else
                 warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
                 failure_count=$((failure_count + 1))
@@ -1239,11 +1239,31 @@ if [ \${#run_targets[@]} -gt 0 ]; then
         target_safe=\$(_san "\$target")
         out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_\${RUN_ID}.log"
         echo "\$(date '+%F %T') testing <-> \$target" >> "\$STATUS_FILE"
-        {
+        (
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
-            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C 2>&1
-        } > "\$out" &
+            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
+            # Build the exact iperf invocation as a single string and
+            # echo it into the per-test log BEFORE running. Anyone
+            # debugging a failure can copy-paste this directly.
+            cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C"
+            echo "# cmd: \$cmd" >> "\$out"
+            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C >> "\$out" 2>&1
+            rc=\$?
+            # iperf2 sometimes returns 0 even when the connection failed
+            # (it writes "connect failed" to stdout and exits cleanly).
+            # Catch both: non-zero exit OR known error tokens in output.
+            if [ "\$rc" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' "\$out"; then
+                err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' "\$out" | head -n1)
+                [ -z "\$err_tail" ] && err_tail="exit_status=\$rc"
+                echo "# exit_status: \$rc" >> "\$out"
+                # Surface failure into the per-host SSH log (which is
+                # collected back as run_<host>.log) so the operator
+                # sees the inciting command without having to grep
+                # every iperf_test_*.log.
+                echo "[FAIL] \$SOURCE -> \$target: \$err_tail" >&2
+                echo "       cmd: \$cmd" >&2
+            fi
+        ) &
         pids+=(\$!)
     done
 
@@ -1261,7 +1281,7 @@ fi
 echo "\$(date '+%F %T') DONE" >> "\$STATUS_FILE"
 EOF
         chmod +x "$script"
-        log "  created $script (targets: ${#targets[@]})"
+        vlog "  created $script (targets: ${#targets[@]})"
     done <<< "$hosts"
 
     # Summarize the client-load distribution so the user can confirm the
@@ -1279,7 +1299,7 @@ EOF
         log "Client load: min=$mn, max=$mx, mean=$((mean10/10)).$((mean10%10)), total tests=$sum"
     fi
 
-    log "All run scripts created in $SCRIPTS_DIR"
+    vlog "All run scripts created in $SCRIPTS_DIR"
 }
 
 #------------------------------------------------------------------------------
@@ -1298,7 +1318,7 @@ _worker_distribute_script() {
     if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f $clean_glob" \
        && scp_to "$script" "$host" "$REMOTE_DIR/$remote_name" \
        && ssh_run "$host" "chmod +x '$REMOTE_DIR/$remote_name'"; then
-        log "  OK: $host"
+        vlog "  OK: $host"
     else
         warn "  FAILED: $host"
         return 1
@@ -1313,7 +1333,7 @@ cmd_distribute_scripts() {
     parallel_hosts _worker_distribute_script
 
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        log "All run scripts distributed"
+        vlog "All run scripts distributed"
     else
         warn "distribute-scripts had ${#PARALLEL_FAILED[@]} failure(s)"
     fi
@@ -1465,10 +1485,18 @@ _run_rolling() {
                 # flows can be in flight at once.
                 (
                     sleep 0.\$((100 + RANDOM % 900))
-                    {
-                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\"
-                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C 2>&1
-                    } > \"\$outfile\"
+                    cmd=\"iperf -c \$target -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
+                    echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
+                    echo \"# cmd: \$cmd\" >> \"\$outfile\"
+                    iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
+                    rc=\$?
+                    if [ \"\$rc\" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' \"\$outfile\"; then
+                        err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' \"\$outfile\" | head -n1)
+                        [ -z \"\$err_tail\" ] && err_tail=\"exit_status=\$rc\"
+                        echo \"# exit_status: \$rc\" >> \"\$outfile\"
+                        echo \"[FAIL] $src -> \$target seq=\$seq: \$err_tail\" >&2
+                        echo \"       cmd: \$cmd\" >&2
+                    fi
                 ) &
                 active=\$((active + 1))
             done
@@ -1553,9 +1581,10 @@ _worker_collect_results() {
     local tarout
     tarout=$(tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>&1)
     if [ -n "$tarout" ]; then
-        log "  $host: $client_count client logs + server log + status (tar: $tarout)"
+        # tar warnings (e.g. clock skew) are noise but worth keeping at -v.
+        vlog "  $host: $client_count client logs + server log + status (tar: $tarout)"
     else
-        log "  $host: $client_count client logs + server log + status"
+        vlog "  $host: $client_count client logs + server log + status"
     fi
     rm -f "$tarball_local"
     ssh_run "$host" "rm -f '$tarball_remote'" 2>/dev/null || true
@@ -2773,6 +2802,9 @@ _doctor_check_tool() {
     if command -v "$tool" >/dev/null 2>&1; then
         local ver
         ver=$("$tool" --version 2>&1 | head -n1 | tr -d '\r')
+        # Doctor is explicitly a diagnostic; show its findings at the
+        # default verbosity even though similar per-thing OK lines
+        # elsewhere are demoted to -v.
         log "  OK  $tool   ${ver:-(no --version output)}"
         return 0
     fi
