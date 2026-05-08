@@ -1130,15 +1130,18 @@ cd "\$(dirname "\$0")"
 # 'ip -o -4 addr show' output (full line, so it matches against iface
 # name OR address). The first matching line's IPv4 wins.
 BIND_ARG=""
+BIND_IP=""
+BIND_IFACE=""
 if [ -n "\$BIND_RAW" ]; then
-    _bind_ip=\$(ip -o -4 addr show 2>/dev/null \\
-        | grep -- "\$BIND_RAW" \\
-        | awk 'NR==1{print \$4}' | cut -d/ -f1)
-    [ -n "\$_bind_ip" ] || {
+    _bind_line=\$(ip -o -4 addr show 2>/dev/null | grep -- "\$BIND_RAW" | head -n1)
+    [ -n "\$_bind_line" ] || {
         echo "ERROR: \$SOURCE: no interface matched '\$BIND_RAW'" >&2
         exit 1
     }
-    BIND_ARG="-B \$_bind_ip"
+    BIND_IFACE=\$(echo "\$_bind_line" | awk '{print \$2}')
+    BIND_IP=\$(echo "\$_bind_line"    | awk '{print \$4}' | cut -d/ -f1)
+    BIND_ARG="-B \$BIND_IP"
+    echo "[bind] \$SOURCE: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP"
 fi
 
 # Synchronized launch: wait until START_TIME (epoch seconds), if given.
@@ -1211,7 +1214,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
         echo "\$(date '+%F %T') testing <-> \$target" >> "\$STATUS_FILE"
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
-            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
+            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)"
             iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C 2>&1
         } > "\$out" &
         pids+=(\$!)
@@ -1389,15 +1392,18 @@ _run_rolling() {
             # line's IPv4 is what we bind to.
             BIND_RAW=\"$IPERF_BIND\"
             BIND_ARG=\"\"
+            BIND_IP=\"\"
+            BIND_IFACE=\"\"
             if [ -n \"\$BIND_RAW\" ]; then
-                _bind_ip=\$(ip -o -4 addr show 2>/dev/null \\
-                    | grep -- \"\$BIND_RAW\" \\
-                    | awk 'NR==1{print \$4}' | cut -d/ -f1)
-                [ -n \"\$_bind_ip\" ] || {
+                _bind_line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
+                [ -n \"\$_bind_line\" ] || {
                     echo \"ERROR: $src: no interface matched '\$BIND_RAW'\" >&2
                     exit 1
                 }
-                BIND_ARG=\"-B \$_bind_ip\"
+                BIND_IFACE=\$(echo \"\$_bind_line\" | awk '{print \$2}')
+                BIND_IP=\$(echo \"\$_bind_line\"    | awk '{print \$4}' | cut -d/ -f1)
+                BIND_ARG=\"-B \$BIND_IP\"
+                echo \"[bind] $src: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP\"
             fi
             PEERS=( $peers )
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
@@ -1433,7 +1439,7 @@ _run_rolling() {
                 (
                     sleep 0.\$((100 + RANDOM % 900))
                     {
-                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS test_start=\$(date +%s)\"
+                        echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\"
                         iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C 2>&1
                     } > \"\$outfile\"
                 ) &
@@ -1658,6 +1664,8 @@ def make_blank_row(pair_a, pair_b, src, dst, base, status, error="", header=None
         "timestamp": "", "source": src, "target": dst, "status": status,
         "protocol": "TCP", "duration_s": h.get("duration", ""),
         "parallel_streams": h.get("parallel", ""),
+        "bind_iface": h.get("bind_iface", ""),
+        "bind_ip": h.get("bind_ip", ""),
         "bytes_transferred": "", "bps": "", "mbps": "",
         "src_port": "", "dst_port": "",
         "pair_a": pair_a, "pair_b": pair_b,
@@ -1850,6 +1858,8 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
             "protocol": "TCP",
             "duration_s": header.get("duration", ""),
             "parallel_streams": header.get("parallel", ""),
+            "bind_iface": header.get("bind_iface", ""),
+            "bind_ip": header.get("bind_ip", ""),
             "bytes_transferred": nbytes, "bps": bps_f, "mbps": mbps,
             "src_port": src_port, "dst_port": dst_port,
             "pair_a": pair_a, "pair_b": pair_b,
@@ -1875,7 +1885,8 @@ if not rows:
     sys.exit(1)
 
 cols = ["timestamp","source","target","status","protocol","duration_s",
-        "parallel_streams","bytes_transferred","bps","mbps",
+        "parallel_streams","bind_iface","bind_ip",
+        "bytes_transferred","bps","mbps",
         "src_port","dst_port","pair_a","pair_b","filename","error"]
 
 with open(out_csv, "w", newline="") as f:
@@ -2240,11 +2251,20 @@ def _modal(values):
     return Counter(vs).most_common(1)[0][0]
 
 _dur_vals, _port_vals, _par_vals = [], [], []
+# bindings_per_src[src] = (iface, ip) — populated only when --bind was set.
+# The bind metadata describes the host that *originated* the test (pair_a).
+# We only credit it to that host's source-row to avoid placeholder rows
+# (DIRECTION_MISSING from the other side's log) clobbering it.
+bindings_per_src = {}
 with open(in_csv) as _f:
     for _r in csv.DictReader(_f):
         _dur_vals.append(_r.get("duration_s", ""))
         _port_vals.append(_r.get("dst_port", ""))
         _par_vals.append(_r.get("parallel_streams", ""))
+        _bi, _bp = _r.get("bind_iface", ""), _r.get("bind_ip", "")
+        _src, _pa = _r.get("source", ""), _r.get("pair_a", "")
+        if (_bi or _bp) and _src and _src == _pa:
+            bindings_per_src[_src] = (_bi, _bp)
 meta_duration = _modal(_dur_vals)
 meta_port     = _modal(_port_vals)
 meta_parallel = _modal(_par_vals)
@@ -2426,6 +2446,13 @@ with open(out_txt, "w") as f:
         f.write(f"  measured flows: {len(all_flows)} "
                 f"(mean {sys_mean:.2f} Mbps / "
                 f"{_gbs(sys_mean):.3f} GB/s per flow)\n")
+
+    # Source bindings: only present when --bind was used.
+    if bindings_per_src:
+        f.write("\nSource bindings (--bind resolved per host at iperf-launch):\n")
+        for src in sorted(bindings_per_src):
+            iface, ip = bindings_per_src[src]
+            f.write(f"  {src.ljust(host_w)} iface={iface or '?'} ip={ip or '?'}\n")
 
     # If any cell aggregated more than one sample (rolling mode), summarize.
     counts = [c for d in samples_per.values() for c in d.values()]
