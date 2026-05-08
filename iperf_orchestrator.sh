@@ -77,6 +77,7 @@ IPERF_LENGTH="${IPERF_LENGTH:-}"         # -l: TCP read/write buffer (e.g. 128K)
 IPERF_WINDOW="${IPERF_WINDOW:-}"         # -w: TCP window / socket buffer (e.g. 4M)
 IPERF_MSS="${IPERF_MSS:-}"               # -M: TCP maximum segment size
 IPERF_NO_NAGLE="${IPERF_NO_NAGLE:-0}"    # -N: disable Nagle's algorithm (1=on)
+IPERF_BIND="${IPERF_BIND:-}"             # -B: bind iperf -c to a local address/iface
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -162,6 +163,8 @@ while [ $# -gt 0 ]; do
         --mss|-M)        _flag_need "$1" "${2:-}"; IPERF_MSS="$2"; shift 2 ;;
         --mss=*)         IPERF_MSS="${1#*=}"; shift ;;
         --no-nagle|-N)   IPERF_NO_NAGLE=1; shift ;;
+        --bind|-B)       _flag_need "$1" "${2:-}"; IPERF_BIND="$2"; shift 2 ;;
+        --bind=*)        IPERF_BIND="${1#*=}"; shift ;;
         --ssh-user|-u)   _flag_need "$1" "${2:-}"; SSH_USER="$2"; shift 2 ;;
         --ssh-user=*)    SSH_USER="${1#*=}"; shift ;;
         --output|-o)     _flag_need "$1" "${2:-}"; RESULTS_BASE="$2"; shift 2 ;;
@@ -240,6 +243,7 @@ _iperf_extra_args() {
     [ -n "$IPERF_LENGTH" ]      && parts+=("-l" "$IPERF_LENGTH")
     [ -n "$IPERF_WINDOW" ]      && parts+=("-w" "$IPERF_WINDOW")
     [ -n "$IPERF_MSS" ]         && parts+=("-M" "$IPERF_MSS")
+    [ -n "$IPERF_BIND" ]        && parts+=("-B" "$IPERF_BIND")
     [ "$IPERF_NO_NAGLE" = "1" ] && parts+=("-N")
     printf '%s' "${parts[*]}"
 }
@@ -663,6 +667,7 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
     --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
     --no-nagle, -N             disable Nagle's algorithm (iperf2 -N)
+    --bind, -B ADDR            bind iperf -c to a local address/iface (iperf2 -B)
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -737,6 +742,7 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_WINDOW=${IPERF_WINDOW:-}         # iperf2 -w (TCP window / socket buffer)
     IPERF_MSS=${IPERF_MSS:-}               # iperf2 -M (TCP MSS)
     IPERF_NO_NAGLE=$IPERF_NO_NAGLE         # iperf2 -N (1 = disable Nagle's)
+    IPERF_BIND=${IPERF_BIND:-}             # iperf2 -B (bind to local addr/iface)
     IPERF_VERBOSITY=$IPERF_VERBOSITY     # 0=quiet, 1=normal, 2=verbose
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
