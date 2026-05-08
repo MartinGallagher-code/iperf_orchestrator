@@ -77,7 +77,13 @@ IPERF_LENGTH="${IPERF_LENGTH:-}"         # -l: TCP read/write buffer (e.g. 128K)
 IPERF_WINDOW="${IPERF_WINDOW:-}"         # -w: TCP window / socket buffer (e.g. 4M)
 IPERF_MSS="${IPERF_MSS:-}"               # -M: TCP maximum segment size
 IPERF_NO_NAGLE="${IPERF_NO_NAGLE:-0}"    # -N: disable Nagle's algorithm (1=on)
-IPERF_BIND="${IPERF_BIND:-}"             # -B: bind iperf -c to a local address/iface
+IPERF_BIND="${IPERF_BIND:-}"             # -B value. If it looks like an IPv4/IPv6
+                                         # address (or addr:port) it's passed to
+                                         # iperf -c verbatim. Otherwise it's treated
+                                         # as an interface name and resolved on each
+                                         # remote host at iperf-launch time:
+                                         #   ip -o -4 addr show <name>
+                                         #     | awk '{print $4}' | cut -d/ -f1
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -243,7 +249,6 @@ _iperf_extra_args() {
     [ -n "$IPERF_LENGTH" ]      && parts+=("-l" "$IPERF_LENGTH")
     [ -n "$IPERF_WINDOW" ]      && parts+=("-w" "$IPERF_WINDOW")
     [ -n "$IPERF_MSS" ]         && parts+=("-M" "$IPERF_MSS")
-    [ -n "$IPERF_BIND" ]        && parts+=("-B" "$IPERF_BIND")
     [ "$IPERF_NO_NAGLE" = "1" ] && parts+=("-N")
     printf '%s' "${parts[*]}"
 }
@@ -667,7 +672,11 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
     --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
     --no-nagle, -N             disable Nagle's algorithm (iperf2 -N)
-    --bind, -B ADDR            bind iperf -c to a local address/iface (iperf2 -B)
+    --bind, -B VAL             bind iperf -c source to a local address.
+                               If VAL is an IPv4/IPv6/addr:port it's passed to
+                               iperf2 -B verbatim. Anything else is treated as an
+                               interface name and resolved on each remote host
+                               via 'ip -o -4 addr show <iface>'.
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -1112,9 +1121,30 @@ RUN_ID="$RUN_ID"
 PORT=$IPERF_PORT
 DURATION=$IPERF_DURATION
 PARALLEL=$IPERF_STREAMS
+BIND_RAW="$IPERF_BIND"
 TARGETS=( $targets_str )
 
 cd "\$(dirname "\$0")"
+
+# Resolve --bind. Treat IPv4 dotted-quad and anything containing a colon
+# (IPv6 or addr:port) as literal; any other string is taken as an
+# interface name and resolved to that host's first IPv4 on the iface.
+BIND_ARG=""
+if [ -n "\$BIND_RAW" ]; then
+    case "\$BIND_RAW" in
+        *:*)                                              BIND_ARG="-B \$BIND_RAW" ;;
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*)                      BIND_ARG="-B \$BIND_RAW" ;;
+        *)
+            _bind_ip=\$(ip -o -4 addr show "\$BIND_RAW" 2>/dev/null \\
+                | awk 'NR==1{print \$4}' | cut -d/ -f1)
+            [ -n "\$_bind_ip" ] || {
+                echo "ERROR: \$SOURCE: no IPv4 on interface '\$BIND_RAW'" >&2
+                exit 1
+            }
+            BIND_ARG="-B \$_bind_ip"
+            ;;
+    esac
+fi
 
 # Synchronized launch: wait until START_TIME (epoch seconds), if given.
 if [ "\$START_TIME" -gt 0 ]; then
@@ -1187,7 +1217,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
         {
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
             echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL test_start=\$(date +%s)"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS --full-duplex -e -y C 2>&1
+            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C 2>&1
         } > "\$out" &
         pids+=(\$!)
     done
@@ -1359,6 +1389,25 @@ _run_rolling() {
                     done
                 fi
             } > \"cpu_${src_safe}_$RUN_ID.log\" 2>&1 &
+            # Resolve --bind once for this host. IPv4/IPv6/host:port -> literal,
+            # bare name -> first IPv4 on that interface.
+            BIND_RAW=\"$IPERF_BIND\"
+            BIND_ARG=\"\"
+            if [ -n \"\$BIND_RAW\" ]; then
+                case \"\$BIND_RAW\" in
+                    *:*)                                              BIND_ARG=\"-B \$BIND_RAW\" ;;
+                    [0-9]*.[0-9]*.[0-9]*.[0-9]*)                      BIND_ARG=\"-B \$BIND_RAW\" ;;
+                    *)
+                        _bind_ip=\$(ip -o -4 addr show \"\$BIND_RAW\" 2>/dev/null \\
+                            | awk 'NR==1{print \$4}' | cut -d/ -f1)
+                        [ -n \"\$_bind_ip\" ] || {
+                            echo \"ERROR: $src: no IPv4 on interface '\$BIND_RAW'\" >&2
+                            exit 1
+                        }
+                        BIND_ARG=\"-B \$_bind_ip\"
+                        ;;
+                esac
+            fi
             PEERS=( $peers )
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
             declare -A counts
@@ -1394,7 +1443,7 @@ _run_rolling() {
                     sleep 0.\$((100 + RANDOM % 900))
                     {
                         echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS test_start=\$(date +%s)\"
-                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS -y C 2>&1
+                        iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C 2>&1
                     } > \"\$outfile\"
                 ) &
                 active=\$((active + 1))
