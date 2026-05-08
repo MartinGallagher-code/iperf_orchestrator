@@ -196,6 +196,55 @@ test_generated_scripts_handle_synchronized_start() {
     }
 }
 
+test_generated_script_includes_bind_resolver_and_arg() {
+    write_servers_only h0 h1
+    IPERF_BIND="bond0" run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW="bond0"$' "$s" || {
+        echo "BIND_RAW not embedded (bond0)" >&2; cat "$s" >&2; return 1
+    }
+    grep -q 'ip -o -4 addr show' "$s" || {
+        echo "missing 'ip -o -4 addr show' resolver" >&2; return 1
+    }
+    grep -q 'grep -- "\$BIND_RAW"' "$s" || {
+        echo "missing grep against BIND_RAW" >&2; return 1
+    }
+    grep -q 'no interface matched' "$s" || {
+        echo "missing no-match error message" >&2; return 1
+    }
+    grep -qE 'iperf -c .*\$BIND_ARG' "$s" || {
+        echo "iperf invocation does not reference \$BIND_ARG" >&2
+        grep 'iperf -c' "$s" >&2
+        return 1
+    }
+}
+
+test_generated_script_omits_bind_when_not_set() {
+    write_servers_only h0 h1
+    run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW=""$' "$s" || {
+        echo "expected empty BIND_RAW when --bind not set" >&2
+        grep '^BIND_RAW=' "$s" >&2
+        return 1
+    }
+}
+
+test_generated_script_embeds_bind_metadata_in_log_header() {
+    write_servers_only h0 h1
+    run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q 'bind_iface=\$BIND_IFACE' "$s" || {
+        echo "log header missing bind_iface=\$BIND_IFACE" >&2; return 1
+    }
+    grep -q 'bind_ip=\$BIND_IP' "$s" || {
+        echo "log header missing bind_ip=\$BIND_IP" >&2; return 1
+    }
+}
+
 run_test test_create_scripts_generates_one_script_per_host
 run_test test_generated_scripts_are_valid_bash_syntax
 run_test test_generated_scripts_are_executable
@@ -208,5 +257,8 @@ run_test test_create_scripts_sanitizes_ipv6_filenames
 run_test test_generated_script_outputs_run_id_suffixed_filenames
 run_test test_generated_script_includes_iperf_perf_flags
 run_test test_generated_scripts_handle_synchronized_start
+run_test test_generated_script_includes_bind_resolver_and_arg
+run_test test_generated_script_omits_bind_when_not_set
+run_test test_generated_script_embeds_bind_metadata_in_log_header
 
 report_tests

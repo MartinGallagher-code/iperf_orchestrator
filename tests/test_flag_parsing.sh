@@ -158,8 +158,56 @@ test_quiet_flag_accepted() {
     assert_status 0 "$RUN_RC" "--quiet should be accepted" || return 1
 }
 
+test_bind_long_flag_propagates_to_generated_script() {
+    install_fake_ssh
+    write_server_list h0 h1 >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch --bind eth0 create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW="eth0"$' "$s" || {
+        echo "--bind eth0 not propagated" >&2; cat "$s" >&2; return 1
+    }
+}
+
+test_bind_short_flag_works() {
+    install_fake_ssh
+    write_server_list h0 h1 >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch -B bond0 create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW="bond0"$' "$s" || {
+        echo "-B bond0 not propagated" >&2; cat "$s" >&2; return 1
+    }
+}
+
+test_bind_equals_form_works() {
+    install_fake_ssh
+    write_server_list h0 h1 >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch --bind=mlx5 create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW="mlx5"$' "$s" || {
+        echo "--bind=mlx5 not propagated" >&2; cat "$s" >&2; return 1
+    }
+}
+
+test_bind_env_var_works() {
+    install_fake_ssh
+    write_server_list h0 h1 >/dev/null
+    IPERF_BIND="10.0.0" PATH="$FAKE_BIN:$PATH" run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | head -n1)
+    grep -q '^BIND_RAW="10.0.0"$' "$s" || {
+        echo "IPERF_BIND env var not propagated" >&2; cat "$s" >&2; return 1
+    }
+}
+
 run_test test_subcommand_flag_passes_through_pre_pass
 run_test test_dry_run_flag_accepted
 run_test test_verbose_flag_accepted
 run_test test_quiet_flag_accepted
+run_test test_bind_long_flag_propagates_to_generated_script
+run_test test_bind_short_flag_works
+run_test test_bind_equals_form_works
+run_test test_bind_env_var_works
 report_tests

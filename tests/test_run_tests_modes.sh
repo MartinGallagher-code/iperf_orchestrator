@@ -169,6 +169,40 @@ test_run_tests_rolling_passes_streams_to_iperf() {
 run_test test_run_tests_rolling_mode_dispatches_per_host_loop
 run_test test_run_tests_rolling_passes_perf_flags_to_iperf
 run_test test_run_tests_rolling_passes_streams_to_iperf
+test_run_tests_rolling_embeds_bind_resolver() {
+    install_fake_ssh
+    write_server_list a b c >/dev/null
+    IPERF_BIND="eth0" \
+        run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q 'BIND_RAW="eth0"' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should set BIND_RAW=\"eth0\"" >&2
+        cat "$FAKE_SSH_LOG" >&2; return 1
+    }
+    grep -q 'ip -o -4 addr show' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should embed the ip-addr resolver" >&2; return 1
+    }
+    grep -q 'no interface matched' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should include the no-match error path" >&2; return 1
+    }
+    grep -qE 'iperf -c .*\$BIND_ARG' "$FAKE_SSH_LOG" || {
+        echo "rolling iperf invocation should reference \$BIND_ARG" >&2
+        grep 'iperf -c' "$FAKE_SSH_LOG" >&2; return 1
+    }
+}
+
+test_run_tests_rolling_omits_bind_when_unset() {
+    install_fake_ssh
+    write_server_list a b c >/dev/null
+    run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q 'BIND_RAW=""' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should set BIND_RAW=\"\" when --bind not given" >&2
+        grep BIND_RAW "$FAKE_SSH_LOG" >&2; return 1
+    }
+}
+run_test test_run_tests_rolling_embeds_bind_resolver
+run_test test_run_tests_rolling_omits_bind_when_unset
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode

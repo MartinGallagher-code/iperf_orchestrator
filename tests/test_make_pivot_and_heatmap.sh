@@ -171,6 +171,129 @@ EOF
     grep -q "2000.00" "$pivot" || { echo "expected mean 2000.00 (sequential flows)"; cat "$pivot" >&2; return 1; }
 }
 
+test_make_pivot_parallel_header_comes_from_csv_not_env() {
+    # The "Parallel: N" line in the pivot header must reflect what
+    # actually ran (recorded in iperf_results.csv parallel_streams),
+    # not the orchestrator's current IPERF_STREAMS env. Otherwise a
+    # standalone `make-pivot` shows whatever the user happens to type.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+20260101120000,a,b,OK,TCP,30,8,0,0,1000.0,5001,40000,a,b,r,
+20260101120000,b,a,OK,TCP,30,8,0,0,1000.0,5001,40000,a,b,r,
+EOF
+    # IPERF_STREAMS deliberately set to a different value.
+    IPERF_STREAMS=1 run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -qE "Parallel:[[:space:]]+8" "$pivot" || {
+        echo "pivot Parallel: should read '8' from CSV, not '1' from env" >&2
+        grep -E "^Mode:|Parallel:" "$pivot" >&2
+        return 1
+    }
+}
+
+test_make_pivot_duration_and_port_come_from_csv_not_env() {
+    # Same idea for Duration / Port — derived from the run's data.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+20260101120000,a,b,OK,TCP,42,1,0,0,1000.0,7777,7777,a,b,r,
+20260101120000,b,a,OK,TCP,42,1,0,0,1000.0,7777,7777,a,b,r,
+EOF
+    IPERF_DURATION=10 IPERF_PORT=5001 run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -qE "Duration:[[:space:]]+42s" "$pivot" || {
+        echo "Duration should be 42s from CSV"; grep "Duration" "$pivot" >&2; return 1
+    }
+    grep -qE "Port:[[:space:]]+7777" "$pivot" || {
+        echo "Port should be 7777 from CSV"; grep "Port" "$pivot" >&2; return 1
+    }
+}
+
+test_make_pivot_shows_gbs_alongside_mbps() {
+    # Both Per-server avg total traffic and Fleet aggregate should
+    # show GB/s next to Mbps. Conversion is decimal: 8000 Mbps = 1 GB/s.
+    # Two pairs at 8000 Mbps each direction -> per-server total =
+    # 16000 Mbps = 2.000 GB/s; fleet aggregate = 2*8000+2*8000 = 32000
+    # Mbps = 4.000 GB/s.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+20260101120000,a,b,OK,TCP,10,1,0,0,8000.0,5001,40000,a,b,r,
+20260101120000,b,a,OK,TCP,10,1,0,0,8000.0,5001,40000,a,b,r,
+20260101120000,a,c,OK,TCP,10,1,0,0,8000.0,5001,40000,a,c,r,
+20260101120000,c,a,OK,TCP,10,1,0,0,8000.0,5001,40000,a,c,r,
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    # Per-server section: should mention 'GB/s' alongside the Mbps figure.
+    grep -qE "Per-server avg total traffic Mbps" "$pivot" || return 1
+    awk '/Per-server avg total traffic/,/^$/' "$pivot" | grep -q "GB/s" || {
+        echo "per-server section missing GB/s annotation" >&2
+        awk '/Per-server avg total traffic/,/^$/' "$pivot" >&2
+        return 1
+    }
+    grep -q "Fleet aggregate bandwidth" "$pivot" || return 1
+    # Fleet aggregate line should have both Mbps and GB/s.
+    grep -E "Fleet aggregate.*Mbps.*GB/s" "$pivot" >/dev/null || {
+        echo "fleet aggregate missing GB/s annotation" >&2
+        grep -E "Fleet aggregate" "$pivot" >&2
+        return 1
+    }
+    # Specific value: fleet total = 32000 Mbps -> 4.000 GB/s
+    grep -q "4.000 GB/s" "$pivot" || {
+        echo "expected 4.000 GB/s (32000 Mbps) in fleet aggregate" >&2
+        grep -E "Fleet aggregate" "$pivot" >&2
+        return 1
+    }
+}
+
+test_make_pivot_source_bindings_section_when_bind_data_present() {
+    # When iperf_results.csv has bind_iface/bind_ip values, the pivot
+    # gains a "Source bindings" section listing each source's resolved
+    # interface and IP. The mapping is keyed off rows where source ==
+    # pair_a (the originating host) so DIRECTION_MISSING placeholders
+    # from the other side's log don't clobber it.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bind_iface,bind_ip,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+20260101120000,a,b,OK,TCP,10,1,bond0,10.10.5.41,0,0,1000.0,5001,40000,a,b,r1,
+20260101120000,b,a,OK,TCP,10,1,bond0,10.10.5.41,0,0,1000.0,5001,40000,a,b,r1,
+20260101120000,b,a,OK,TCP,10,1,bond0,10.10.5.42,0,0,900.0,5001,40000,b,a,r2,
+20260101120000,a,b,OK,TCP,10,1,bond0,10.10.5.42,0,0,900.0,5001,40000,b,a,r2,
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -q "Source bindings" "$pivot" || {
+        echo "expected Source bindings section" >&2; cat "$pivot" >&2; return 1
+    }
+    # Source 'a' is pair_a in row 1 -> iface=bond0 ip=10.10.5.41
+    grep -qE "^  a[[:space:]]+iface=bond0 ip=10\.10\.5\.41$" "$pivot" || {
+        echo "expected 'a iface=bond0 ip=10.10.5.41'" >&2
+        grep -A 5 "Source bindings" "$pivot" >&2
+        return 1
+    }
+    # Source 'b' is pair_a in row 3 -> iface=bond0 ip=10.10.5.42
+    grep -qE "^  b[[:space:]]+iface=bond0 ip=10\.10\.5\.42$" "$pivot" || {
+        echo "expected 'b iface=bond0 ip=10.10.5.42'" >&2
+        grep -A 5 "Source bindings" "$pivot" >&2
+        return 1
+    }
+}
+
+test_make_pivot_no_source_bindings_section_when_unused() {
+    # If --bind wasn't used, bind_iface/bind_ip are empty for every
+    # row and the section must be omitted entirely.
+    prep_csv      # the no-bind fixture
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    if grep -q "Source bindings" "$pivot"; then
+        echo "Source bindings should not appear when --bind wasn't used" >&2
+        grep -A 3 "Source bindings" "$pivot" >&2
+        return 1
+    fi
+}
+
 test_make_heatmap_requires_csv() {
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
@@ -227,6 +350,11 @@ run_test test_make_pivot_includes_per_server_total_traffic
 run_test test_make_pivot_includes_fleet_aggregate_bandwidth
 run_test test_make_pivot_sums_concurrent_flows
 run_test test_make_pivot_averages_sequential_flows
+run_test test_make_pivot_parallel_header_comes_from_csv_not_env
+run_test test_make_pivot_duration_and_port_come_from_csv_not_env
+run_test test_make_pivot_shows_gbs_alongside_mbps
+run_test test_make_pivot_source_bindings_section_when_bind_data_present
+run_test test_make_pivot_no_source_bindings_section_when_unused
 run_test test_make_heatmap_requires_csv
 run_test test_make_heatmap_produces_png_or_skips_cleanly
 run_test test_make_heatmap_missing_dependency_message

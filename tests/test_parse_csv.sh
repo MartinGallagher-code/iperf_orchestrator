@@ -243,4 +243,53 @@ run_test test_parse_csv_writes_results_csv_in_run_dir
 run_test test_parse_csv_filters_by_active_server_list
 run_test test_parse_csv_includes_required_columns
 
+test_parse_csv_includes_bind_columns() {
+    local rd; rd=$(prep_results_dir)
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
+    run_orch parse-csv >/dev/null 2>&1
+    local csv="$rd/iperf_results.csv"
+    local header; header=$(head -n1 "$csv")
+    for col in bind_iface bind_ip; do
+        assert_contains "$header" "$col" "header missing column: $col" || return 1
+    done
+}
+
+test_parse_csv_populates_bind_columns_from_header() {
+    # Per-test log header now carries bind_iface=... bind_ip=...; the
+    # parser must propagate those into every row from that file (both
+    # directions, including DIRECTION_MISSING placeholders).
+    local rd; rd=$(prep_results_dir)
+    cat > "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" <<'EOF'
+# pair_a=a pair_b=b duration=10 port=5001 parallel=1 bind_iface=bond0 bind_ip=10.10.5.41 test_start=1700000000
+20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
+20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
+EOF
+    run_orch parse-csv >/dev/null 2>&1
+    local csv="$rd/iperf_results.csv"
+    local v
+    v=$(csv_cell "$csv" a b bind_iface)
+    assert_eq "bond0" "$v" "a->b bind_iface should be bond0" || return 1
+    v=$(csv_cell "$csv" a b bind_ip)
+    assert_eq "10.10.5.41" "$v" "a->b bind_ip should be 10.10.5.41" || return 1
+    # Reverse direction in the same file shares the bind metadata.
+    v=$(csv_cell "$csv" b a bind_iface)
+    assert_eq "bond0" "$v" "b->a bind_iface should also be bond0" || return 1
+}
+
+test_parse_csv_bind_columns_empty_when_absent() {
+    local rd; rd=$(prep_results_dir)
+    write_ok_log "$rd/iperf_test_a_to_b_${IPERF_RUN_ID}.log" a b 1000000000 900000000
+    run_orch parse-csv >/dev/null 2>&1
+    local csv="$rd/iperf_results.csv"
+    local v
+    v=$(csv_cell "$csv" a b bind_iface)
+    assert_eq "" "$v" "bind_iface should be empty when header omits it" || return 1
+    v=$(csv_cell "$csv" a b bind_ip)
+    assert_eq "" "$v" "bind_ip should be empty when header omits it" || return 1
+}
+
+run_test test_parse_csv_includes_bind_columns
+run_test test_parse_csv_populates_bind_columns_from_header
+run_test test_parse_csv_bind_columns_empty_when_absent
+
 report_tests
