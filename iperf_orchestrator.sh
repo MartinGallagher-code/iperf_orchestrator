@@ -77,13 +77,12 @@ IPERF_LENGTH="${IPERF_LENGTH:-}"         # -l: TCP read/write buffer (e.g. 128K)
 IPERF_WINDOW="${IPERF_WINDOW:-}"         # -w: TCP window / socket buffer (e.g. 4M)
 IPERF_MSS="${IPERF_MSS:-}"               # -M: TCP maximum segment size
 IPERF_NO_NAGLE="${IPERF_NO_NAGLE:-0}"    # -N: disable Nagle's algorithm (1=on)
-IPERF_BIND="${IPERF_BIND:-}"             # -B value. If it looks like an IPv4/IPv6
-                                         # address (or addr:port) it's passed to
-                                         # iperf -c verbatim. Otherwise it's treated
-                                         # as an interface name and resolved on each
-                                         # remote host at iperf-launch time:
-                                         #   ip -o -4 addr show <name>
-                                         #     | awk '{print $4}' | cut -d/ -f1
+IPERF_BIND="${IPERF_BIND:-}"             # -B value. Treated as a substring search
+                                         # against `ip -o -4 addr show` on each
+                                         # remote host. The first matching iface's
+                                         # IPv4 address is passed to iperf -c -B.
+                                         # Examples: "eth0", "bond", "10.0.0",
+                                         # "mlx5".
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -672,11 +671,12 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
     --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
     --no-nagle, -N             disable Nagle's algorithm (iperf2 -N)
-    --bind, -B VAL             bind iperf -c source to a local address.
-                               If VAL is an IPv4/IPv6/addr:port it's passed to
-                               iperf2 -B verbatim. Anything else is treated as an
-                               interface name and resolved on each remote host
-                               via 'ip -o -4 addr show <iface>'.
+    --bind, -B PATTERN         bind iperf -c to a local interface. PATTERN is
+                               substring-matched against 'ip -o -4 addr show'
+                               on each remote; the first matching line's IPv4
+                               is what iperf2 -B receives. Examples:
+                                 -B eth0       -B bond       -B mlx5
+                                 -B 10.0.0     -B 192.168
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -1126,24 +1126,19 @@ TARGETS=( $targets_str )
 
 cd "\$(dirname "\$0")"
 
-# Resolve --bind. Treat IPv4 dotted-quad and anything containing a colon
-# (IPv6 or addr:port) as literal; any other string is taken as an
-# interface name and resolved to that host's first IPv4 on the iface.
+# Resolve --bind. The value is a substring matched against this host's
+# 'ip -o -4 addr show' output (full line, so it matches against iface
+# name OR address). The first matching line's IPv4 wins.
 BIND_ARG=""
 if [ -n "\$BIND_RAW" ]; then
-    case "\$BIND_RAW" in
-        *:*)                                              BIND_ARG="-B \$BIND_RAW" ;;
-        [0-9]*.[0-9]*.[0-9]*.[0-9]*)                      BIND_ARG="-B \$BIND_RAW" ;;
-        *)
-            _bind_ip=\$(ip -o -4 addr show "\$BIND_RAW" 2>/dev/null \\
-                | awk 'NR==1{print \$4}' | cut -d/ -f1)
-            [ -n "\$_bind_ip" ] || {
-                echo "ERROR: \$SOURCE: no IPv4 on interface '\$BIND_RAW'" >&2
-                exit 1
-            }
-            BIND_ARG="-B \$_bind_ip"
-            ;;
-    esac
+    _bind_ip=\$(ip -o -4 addr show 2>/dev/null \\
+        | grep -- "\$BIND_RAW" \\
+        | awk 'NR==1{print \$4}' | cut -d/ -f1)
+    [ -n "\$_bind_ip" ] || {
+        echo "ERROR: \$SOURCE: no interface matched '\$BIND_RAW'" >&2
+        exit 1
+    }
+    BIND_ARG="-B \$_bind_ip"
 fi
 
 # Synchronized launch: wait until START_TIME (epoch seconds), if given.
@@ -1389,24 +1384,20 @@ _run_rolling() {
                     done
                 fi
             } > \"cpu_${src_safe}_$RUN_ID.log\" 2>&1 &
-            # Resolve --bind once for this host. IPv4/IPv6/host:port -> literal,
-            # bare name -> first IPv4 on that interface.
+            # Resolve --bind once for this host. The value is a substring
+            # matched against 'ip -o -4 addr show'; the first matching
+            # line's IPv4 is what we bind to.
             BIND_RAW=\"$IPERF_BIND\"
             BIND_ARG=\"\"
             if [ -n \"\$BIND_RAW\" ]; then
-                case \"\$BIND_RAW\" in
-                    *:*)                                              BIND_ARG=\"-B \$BIND_RAW\" ;;
-                    [0-9]*.[0-9]*.[0-9]*.[0-9]*)                      BIND_ARG=\"-B \$BIND_RAW\" ;;
-                    *)
-                        _bind_ip=\$(ip -o -4 addr show \"\$BIND_RAW\" 2>/dev/null \\
-                            | awk 'NR==1{print \$4}' | cut -d/ -f1)
-                        [ -n \"\$_bind_ip\" ] || {
-                            echo \"ERROR: $src: no IPv4 on interface '\$BIND_RAW'\" >&2
-                            exit 1
-                        }
-                        BIND_ARG=\"-B \$_bind_ip\"
-                        ;;
-                esac
+                _bind_ip=\$(ip -o -4 addr show 2>/dev/null \\
+                    | grep -- \"\$BIND_RAW\" \\
+                    | awk 'NR==1{print \$4}' | cut -d/ -f1)
+                [ -n \"\$_bind_ip\" ] || {
+                    echo \"ERROR: $src: no interface matched '\$BIND_RAW'\" >&2
+                    exit 1
+                }
+                BIND_ARG=\"-B \$_bind_ip\"
             fi
             PEERS=( $peers )
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
