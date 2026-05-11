@@ -2333,11 +2333,21 @@ sources, targets = set(), set()
 # iperf2 -y C timestamp parser. Format: "YYYYMMDDHHMMSS.fff" (e.g.
 # "20260506191234.567"). Returns epoch seconds, or None on failure.
 def _ts(s):
+    # iperf2 -y C emits "YYYYMMDDHHMMSS" with an optional ".fff"
+    # millisecond suffix. Keep the fractional part -- losing it can
+    # underestimate `span` by up to a second per row and inflate the
+    # directional-throughput cell on tightly-clustered samples.
     if not s or len(s) < 14:
         return None
     try:
         from datetime import datetime
-        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        secs = datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        if len(s) > 15 and s[14] == ".":
+            try:
+                secs += float("0." + s[15:].strip())
+            except ValueError:
+                pass
+        return secs
     except Exception:
         return None
 
@@ -2584,11 +2594,21 @@ ts_list = []
 max_dur = 0.0
 
 def _ts(s):
+    # iperf2 -y C emits "YYYYMMDDHHMMSS" with an optional ".fff"
+    # millisecond suffix. Keep the fractional part -- losing it can
+    # underestimate `span` by up to a second per row and inflate the
+    # directional-throughput cell on tightly-clustered samples.
     if not s or len(s) < 14:
         return None
     try:
         from datetime import datetime
-        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        secs = datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        if len(s) > 15 and s[14] == ".":
+            try:
+                secs += float("0." + s[15:].strip())
+            except ValueError:
+                pass
+        return secs
     except Exception:
         return None
 
