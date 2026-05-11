@@ -183,7 +183,9 @@ EOF
     assert_status 0 "$RUN_RC" "pivot should not crash on all-NaN data" || return 1
     # Output should mark every cell as '-'
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    grep -q "Per-source mean outgoing" "$pivot" || return 1
+    # With every cell missing, the per-host section is correctly
+    # omitted; the pivot just renders the header + grid of '-(N)' cells.
+    grep -q "iperf2 full-duplex mesh throughput" "$pivot" || return 1
 }
 
 # ---- Status output cleanliness ------------------------------------------
