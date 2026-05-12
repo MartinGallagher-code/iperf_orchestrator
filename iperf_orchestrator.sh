@@ -2569,12 +2569,13 @@ with open(out_txt, "w") as f:
     all_flows = [v for v in all_flows if v is not None]
     if all_flows:
         sys_total = sum(all_flows)
-        sys_mean = sys_total / len(all_flows)
+        n_hosts = len(all_hosts)
+        per_host = sys_total / n_hosts if n_hosts else 0.0
         f.write(f"\nFleet aggregate bandwidth (sum of all directional flows): "
                 f"{sys_total:.2f} Mbps  ({_gbs(sys_total):.3f} GB/s)\n")
-        f.write(f"  measured flows: {len(all_flows)} "
-                f"(mean {sys_mean:.2f} Mbps / "
-                f"{_gbs(sys_mean):.3f} GB/s per flow)\n")
+        f.write(f"  mean per-host throughput: {per_host:.2f} Mbps "
+                f"({_gbs(per_host):.3f} GB/s)   "
+                f"[{len(all_flows)} flow(s) measured across {n_hosts} host(s)]\n")
 
     # Source bindings: only present when --bind was used.
     if bindings_per_src:

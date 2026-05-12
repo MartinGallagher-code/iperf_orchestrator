@@ -106,8 +106,8 @@ test_make_pivot_includes_fleet_aggregate_bandwidth() {
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     assert_contains "$(cat "$pivot")" "Fleet aggregate bandwidth" \
         "pivot should report fleet-wide total" || return 1
-    assert_contains "$(cat "$pivot")" "measured flows:" \
-        "pivot should report flow count" || return 1
+    assert_contains "$(cat "$pivot")" "mean per-host throughput:" \
+        "pivot should report per-host mean throughput" || return 1
 }
 
 test_make_pivot_includes_per_host_incoming_bandwidth() {
