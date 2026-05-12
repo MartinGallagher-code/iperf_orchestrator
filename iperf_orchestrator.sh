@@ -1096,8 +1096,16 @@ cmd_create_scripts() {
     _validate_server_list
     log "Generating per-host client run scripts (every host as client to every peer)..."
     log "Run ID: $RUN_ID"
-    local hosts; hosts=$(read_servers)
-    [ -n "$hosts" ] || die "No hosts in server list"
+    # Slurp the host list into a plain array up front. Nested `while read
+    # <<<` loops have produced empty inner iterations in the field that I
+    # haven't been able to reproduce locally; iterating arrays sidesteps
+    # the here-string mechanism entirely and is easier to reason about.
+    local hosts_arr=() h
+    while IFS= read -r h; do
+        [ -z "$h" ] && continue
+        hosts_arr+=("$h")
+    done < <(read_servers)
+    [ "${#hosts_arr[@]}" -gt 0 ] || die "No hosts in server list"
 
     build_host_idx
 
@@ -1106,9 +1114,9 @@ cmd_create_scripts() {
     # other host (one iperf invocation per directed edge), so counts
     # should be N-1 for all hosts.
     local target_counts=()
+    local src
 
-    while IFS= read -r src; do
-        [ -z "$src" ] && continue
+    for src in "${hosts_arr[@]}"; do
         local src_safe; src_safe=$(_sanitize_host "$src")
         local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
@@ -1118,12 +1126,20 @@ cmd_create_scripts() {
         # iperf2 --full-duplex CSV reporting quirks (per-direction row
         # vs SUM-of-both-directions row) that made cell values
         # unreliable across -P values and iperf2 builds.
-        local targets=()
-        while IFS= read -r t; do
-            [ -z "$t" ] && continue
+        local targets=() t
+        for t in "${hosts_arr[@]}"; do
             [ "$t" = "$src" ] && continue
             targets+=("$t")
-        done <<< "$hosts"
+        done
+
+        # Hard guard: every host must have N-1 targets. An empty list
+        # means the run script will silently no-op for that source, and
+        # the pivot will show '-(1)' for everything in that row -- the
+        # exact failure mode we saw before this guard was added.
+        local expected_targets=$(( ${#hosts_arr[@]} - 1 ))
+        if [ "${#targets[@]}" -ne "$expected_targets" ]; then
+            die "create-scripts: $src ended up with ${#targets[@]} target(s), expected $expected_targets. Server list: ${hosts_arr[*]}"
+        fi
 
         target_counts+=("${#targets[@]}")
 
@@ -1292,7 +1308,7 @@ echo "\$(date '+%F %T') DONE" >> "\$STATUS_FILE"
 EOF
         chmod +x "$script"
         vlog "  created $script (targets: ${#targets[@]})"
-    done <<< "$hosts"
+    done
 
     # Summarize the client-load distribution so the user can confirm the
     # fan-out. Every host is now a client to every other host, so all
