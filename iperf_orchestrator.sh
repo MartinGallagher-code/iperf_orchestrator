@@ -634,7 +634,12 @@ COMMON FLAGS:
     --servers, -s FILE         server list (one host per line; '#' comments)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
-    --host-flows N             concurrent flows per host in rolling mode (default $IPERF_HOST_FLOWS)
+    --host-flows N             concurrent iperf processes per directed edge.
+                               In parallel/sequential modes: each (src, dst) pair
+                               runs N iperf processes simultaneously, so the cell
+                               aggregates N flows' bandwidth. In rolling mode:
+                               caps how many concurrent iperf processes a single
+                               host has in flight at once. (default $IPERF_HOST_FLOWS)
     --bandwidth, -b RATE       cap per-flow rate, e.g. 100M, 1G (iperf2 -b)
     --length, -l SIZE          TCP r/w buffer size, e.g. 128K (iperf2 -l)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
@@ -673,7 +678,8 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --streams, -P N            parallel streams within each test (default $IPERF_STREAMS)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
-    --host-flows N             rolling mode per-host concurrent flows (default $IPERF_HOST_FLOWS)
+    --host-flows N             concurrent iperf procs per directed edge (parallel)
+                               or per-host concurrency cap (rolling). (default $IPERF_HOST_FLOWS)
     --bandwidth, -b RATE       cap per-flow target rate (iperf2 -b; e.g. 100M, 1G)
     --length, -l SIZE          TCP read/write buffer size (iperf2 -l; e.g. 128K)
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
@@ -1096,8 +1102,16 @@ cmd_create_scripts() {
     _validate_server_list
     log "Generating per-host client run scripts (every host as client to every peer)..."
     log "Run ID: $RUN_ID"
-    local hosts; hosts=$(read_servers)
-    [ -n "$hosts" ] || die "No hosts in server list"
+    # Slurp the host list into a plain array up front. Nested `while read
+    # <<<` loops have produced empty inner iterations in the field that I
+    # haven't been able to reproduce locally; iterating arrays sidesteps
+    # the here-string mechanism entirely and is easier to reason about.
+    local hosts_arr=() h
+    while IFS= read -r h; do
+        [ -z "$h" ] && continue
+        hosts_arr+=("$h")
+    done < <(read_servers)
+    [ "${#hosts_arr[@]}" -gt 0 ] || die "No hosts in server list"
 
     build_host_idx
 
@@ -1106,9 +1120,9 @@ cmd_create_scripts() {
     # other host (one iperf invocation per directed edge), so counts
     # should be N-1 for all hosts.
     local target_counts=()
+    local src
 
-    while IFS= read -r src; do
-        [ -z "$src" ] && continue
+    for src in "${hosts_arr[@]}"; do
         local src_safe; src_safe=$(_sanitize_host "$src")
         local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
@@ -1118,12 +1132,20 @@ cmd_create_scripts() {
         # iperf2 --full-duplex CSV reporting quirks (per-direction row
         # vs SUM-of-both-directions row) that made cell values
         # unreliable across -P values and iperf2 builds.
-        local targets=()
-        while IFS= read -r t; do
-            [ -z "$t" ] && continue
+        local targets=() t
+        for t in "${hosts_arr[@]}"; do
             [ "$t" = "$src" ] && continue
             targets+=("$t")
-        done <<< "$hosts"
+        done
+
+        # Hard guard: every host must have N-1 targets. An empty list
+        # means the run script will silently no-op for that source, and
+        # the pivot will show '-(1)' for everything in that row -- the
+        # exact failure mode we saw before this guard was added.
+        local expected_targets=$(( ${#hosts_arr[@]} - 1 ))
+        if [ "${#targets[@]}" -ne "$expected_targets" ]; then
+            die "create-scripts: $src ended up with ${#targets[@]} target(s), expected $expected_targets. Server list: ${hosts_arr[*]}"
+        fi
 
         target_counts+=("${#targets[@]}")
 
@@ -1157,6 +1179,7 @@ DURATION=$IPERF_DURATION
 PARALLEL=$IPERF_STREAMS
 BIND_RAW="$IPERF_BIND"
 TARGETS=( $targets_str )
+HOST_FLOWS=$IPERF_HOST_FLOWS
 
 cd "\$(dirname "\$0")"
 
@@ -1242,39 +1265,49 @@ if [ \${#run_targets[@]} -gt 0 ]; then
     # invocation is unidirectional: the peer host's matching script
     # handles the reverse direction simultaneously, so both directions
     # are measured without iperf2 SUM-row ambiguity.
+    # When HOST_FLOWS>1 we fire that many concurrent iperf processes
+    # per directed edge so the cell value reflects the aggregate
+    # bandwidth of N parallel flows. Each flow gets its own log; the
+    # parser sums them per pair via mbps*duration / wall_time.
     # -y C gives CSV summaries; -e enables enhanced reports.
     pids=()
     for target in "\${run_targets[@]}"; do
         target_safe=\$(_san "\$target")
-        out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_\${RUN_ID}.log"
-        echo "\$(date '+%F %T') testing -> \$target" >> "\$STATUS_FILE"
-        (
-            # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
-            # full_duplex=0 tells parse-csv this log carries one direction only (pair_a -> pair_b).
-            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
-            # Build the exact iperf invocation as a single string and
-            # echo it into the per-test log BEFORE running. Anyone
-            # debugging a failure can copy-paste this directly.
-            cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
-            echo "# cmd: \$cmd" >> "\$out"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
-            rc=\$?
-            # iperf2 sometimes returns 0 even when the connection failed
-            # (it writes "connect failed" to stdout and exits cleanly).
-            # Catch both: non-zero exit OR known error tokens in output.
-            if [ "\$rc" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' "\$out"; then
-                err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' "\$out" | head -n1)
-                [ -z "\$err_tail" ] && err_tail="exit_status=\$rc"
-                echo "# exit_status: \$rc" >> "\$out"
-                # Surface failure into the per-host SSH log (which is
-                # collected back as run_<host>.log) so the operator
-                # sees the inciting command without having to grep
-                # every iperf_test_*.log.
-                echo "[FAIL] \$SOURCE -> \$target: \$err_tail" >&2
-                echo "       cmd: \$cmd" >&2
+        echo "\$(date '+%F %T') testing -> \$target (x\$HOST_FLOWS)" >> "\$STATUS_FILE"
+        for flow in \$(seq 1 "\$HOST_FLOWS"); do
+            if [ "\$HOST_FLOWS" -gt 1 ]; then
+                out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_f\${flow}_\${RUN_ID}.log"
+            else
+                out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_\${RUN_ID}.log"
             fi
-        ) &
-        pids+=(\$!)
+            (
+                # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
+                # full_duplex=0 tells parse-csv this log carries one direction only (pair_a -> pair_b).
+                echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL host_flows=\$HOST_FLOWS flow=\$flow full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
+                # Build the exact iperf invocation as a single string and
+                # echo it into the per-test log BEFORE running. Anyone
+                # debugging a failure can copy-paste this directly.
+                cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
+                echo "# cmd: \$cmd" >> "\$out"
+                iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
+                rc=\$?
+                # iperf2 sometimes returns 0 even when the connection failed
+                # (it writes "connect failed" to stdout and exits cleanly).
+                # Catch both: non-zero exit OR known error tokens in output.
+                if [ "\$rc" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' "\$out"; then
+                    err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' "\$out" | head -n1)
+                    [ -z "\$err_tail" ] && err_tail="exit_status=\$rc"
+                    echo "# exit_status: \$rc" >> "\$out"
+                    # Surface failure into the per-host SSH log (which is
+                    # collected back as run_<host>.log) so the operator
+                    # sees the inciting command without having to grep
+                    # every iperf_test_*.log.
+                    echo "[FAIL] \$SOURCE -> \$target flow=\$flow: \$err_tail" >&2
+                    echo "       cmd: \$cmd" >&2
+                fi
+            ) &
+            pids+=(\$!)
+        done
     done
 
     for p in "\${pids[@]}"; do
@@ -1292,11 +1325,13 @@ echo "\$(date '+%F %T') DONE" >> "\$STATUS_FILE"
 EOF
         chmod +x "$script"
         vlog "  created $script (targets: ${#targets[@]})"
-    done <<< "$hosts"
+    done
 
     # Summarize the client-load distribution so the user can confirm the
     # fan-out. Every host is now a client to every other host, so all
-    # counts should equal N-1 and total tests = N*(N-1) directed edges.
+    # counts should equal N-1 and total iperf processes per host = (N-1)
+    # * IPERF_HOST_FLOWS. Total directed edges across the fleet = N*(N-1)
+    # and total iperf processes = N*(N-1)*IPERF_HOST_FLOWS.
     if [ ${#target_counts[@]} -gt 0 ]; then
         local mn=${target_counts[0]} mx=${target_counts[0]} sum=0 c
         for c in "${target_counts[@]}"; do
@@ -1307,7 +1342,12 @@ EOF
         local n=${#target_counts[@]}
         # Integer mean to one decimal: (sum*10)/n with rounding
         local mean10=$(( (sum * 10 + n / 2) / n ))
-        log "Client load: min=$mn, max=$mx, mean=$((mean10/10)).$((mean10%10)), total tests=$sum"
+        local total_procs=$(( sum * IPERF_HOST_FLOWS ))
+        if [ "$IPERF_HOST_FLOWS" -gt 1 ]; then
+            log "Client load: min=$mn, max=$mx, mean=$((mean10/10)).$((mean10%10)), edges=$sum, flows/edge=$IPERF_HOST_FLOWS, total iperf procs=$total_procs"
+        else
+            log "Client load: min=$mn, max=$mx, mean=$((mean10/10)).$((mean10%10)), total tests=$sum"
+        fi
     fi
 
     vlog "All run scripts created in $SCRIPTS_DIR"
@@ -3019,6 +3059,13 @@ cmd_all() {
     _all_gate cleanup
     log "=== Pipeline complete ==="
     echo
+
+    local pivot="$RESULTS_DIR/iperf_pivot.txt"
+    if [ -f "$pivot" ]; then
+        cat "$pivot"
+        echo
+    fi
+
     echo "Results in: $RESULTS_DIR"
     ls -1 "$RESULTS_DIR" | sed 's/^/  /'
 
