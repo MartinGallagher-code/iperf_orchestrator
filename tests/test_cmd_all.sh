@@ -231,11 +231,20 @@ test_cmd_all_lists_results_at_end() {
     }
 }
 
+test_cmd_all_prints_pivot_table_at_end() {
+    prep_workflow alpha bravo
+    run_with_fakes --start-delay=0 --duration=1 -- all --keep-going
+    assert_contains "$RUN_OUT" "iperf2 full-mesh throughput" \
+        "cmd_all should cat the pivot table to stdout after the pipeline completes" \
+        || return 1
+}
+
 run_test test_cmd_all_runs_full_pipeline
 run_test test_cmd_all_produces_results_csv_and_pivot
 run_test test_cmd_all_default_mode_is_parallel
 run_test test_cmd_all_accepts_alternate_mode
 run_test test_cmd_all_dies_when_no_server_list
 run_test test_cmd_all_lists_results_at_end
+run_test test_cmd_all_prints_pivot_table_at_end
 
 report_tests

@@ -3062,8 +3062,12 @@ cmd_all() {
 
     local pivot="$RESULTS_DIR/iperf_pivot.txt"
     if [ -f "$pivot" ]; then
+        echo "================================ Pivot table ================================"
         cat "$pivot"
+        echo "============================================================================="
         echo
+    else
+        warn "no pivot table found at $pivot (make-pivot may have been skipped or failed)"
     fi
 
     echo "Results in: $RESULTS_DIR"
