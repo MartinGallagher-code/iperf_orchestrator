@@ -54,12 +54,15 @@ test_generated_scripts_are_executable() {
 }
 
 test_generated_script_targets_are_balanced() {
+    # Full-mesh client fan-out: every host targets every other host, so
+    # each host runs N-1 clients and total directed edges = N*(N-1).
+    # For N=5: every host has 4 targets, 20 directed tests total.
     write_servers_only alpha bravo charlie delta echo
     run_orch create-scripts
     assert_status 0 "$RUN_RC" || return 1
-    assert_contains "$RUN_OUT" "Client load: min=2, max=2" \
-        "expected balanced spread of 0 for N=5" || return 1
-    assert_contains "$RUN_OUT" "total tests=10" "10 canonical pairs for N=5" || return 1
+    assert_contains "$RUN_OUT" "Client load: min=4, max=4" \
+        "expected every host to target N-1=4 peers" || return 1
+    assert_contains "$RUN_OUT" "total tests=20" "20 directed edges for N=5" || return 1
 
     local total=0 s line
     for s in "$(scripts_dir)"/run_*.sh; do
@@ -69,7 +72,7 @@ test_generated_script_targets_are_balanced() {
         count=$((count / 2))
         total=$((total + count))
     done
-    assert_eq "10" "$total" "sum of TARGETS across all scripts should be 10" || return 1
+    assert_eq "20" "$total" "sum of TARGETS across all scripts should be 20" || return 1
 }
 
 test_generated_script_does_not_target_self() {
@@ -89,13 +92,19 @@ test_generated_script_does_not_target_self() {
     done
 }
 
-test_generated_script_uses_full_duplex_and_csv_output() {
+test_generated_script_is_unidirectional_with_csv_output() {
+    # The new design uses unidirectional iperf invocations (no --full-duplex)
+    # and tags each log with full_duplex=0 so parse-csv emits exactly one
+    # row per log.
     write_servers_only h0 h1 h2
     run_orch create-scripts >/dev/null 2>&1
     local s
     for s in "$(scripts_dir)"/run_*.sh; do
         if grep -E '^TARGETS=\( "[^"]+"' "$s" >/dev/null; then
-            grep -q -- '--full-duplex' "$s" || { echo "expected --full-duplex in $s" >&2; return 1; }
+            if grep -q -- '--full-duplex' "$s"; then
+                echo "unexpected --full-duplex in $s" >&2; return 1
+            fi
+            grep -q 'full_duplex=0' "$s" || { echo "expected full_duplex=0 header in $s" >&2; return 1; }
             grep -q -- '-y C' "$s" || { echo "expected '-y C' in $s" >&2; return 1; }
             grep -q -- '-e' "$s" || { echo "expected '-e' in $s" >&2; return 1; }
             return 0
@@ -294,7 +303,7 @@ run_test test_generated_scripts_are_valid_bash_syntax
 run_test test_generated_scripts_are_executable
 run_test test_generated_script_targets_are_balanced
 run_test test_generated_script_does_not_target_self
-run_test test_generated_script_uses_full_duplex_and_csv_output
+run_test test_generated_script_is_unidirectional_with_csv_output
 run_test test_generated_script_writes_pair_header
 run_test test_generated_script_sets_correct_constants
 run_test test_create_scripts_sanitizes_ipv6_filenames

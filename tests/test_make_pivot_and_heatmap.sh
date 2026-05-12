@@ -41,7 +41,7 @@ test_make_pivot_produces_grid() {
     assert_file_exists "$pivot" || return 1
     local content; content=$(cat "$pivot")
     # Header line and the three host columns/rows should appear.
-    assert_contains "$content" "iperf2 full-duplex mesh throughput" || return 1
+    assert_contains "$content" "iperf2 full-mesh throughput" || return 1
     assert_contains "$content" "Per-host incoming bandwidth" || return 1
     # Numeric values should appear (1000.00, 880.00, etc.).
     assert_contains "$content" "1000.00" "expected 1000.00 in pivot" || return 1

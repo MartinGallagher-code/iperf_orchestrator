@@ -185,7 +185,7 @@ EOF
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     # With every cell missing, the per-host section is correctly
     # omitted; the pivot just renders the header + grid of '-(N)' cells.
-    grep -q "iperf2 full-duplex mesh throughput" "$pivot" || return 1
+    grep -q "iperf2 full-mesh throughput" "$pivot" || return 1
 }
 
 # ---- Status output cleanliness ------------------------------------------

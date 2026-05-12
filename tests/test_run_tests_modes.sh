@@ -78,7 +78,8 @@ test_run_tests_sequential_pair_mode() {
     assert_status 0 "$RUN_RC" "sequential-pair should succeed" || return 1
     local n
     n=$(run_iperf_dispatch_count)
-    assert_eq "6" "$n" "4 hosts -> 6 canonical pairs" || return 1
+    # Full mesh: 4 hosts -> 4*3 = 12 directed edges, one per round.
+    assert_eq "12" "$n" "4 hosts -> 12 directed edges" || return 1
     if ! grep -qE "run_iperf_[^[:space:]]+\.sh' 0 '" "$FAKE_SSH_LOG"; then
         echo "expected SINGLE_TARGET arg in sequential-pair calls" >&2
         cat "$FAKE_SSH_LOG" >&2

@@ -79,15 +79,9 @@ run_remote_script() {
 test_generated_script_executes_iperf_for_each_target() {
     install_fake_iperf
     generate_scripts_for src target1 target2
-    # Determine which host has clients (depends on parity rule).
-    local script
-    for h in src target1 target2; do
-        if grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh" >/dev/null; then
-            script="$h"; break
-        fi
-    done
-    [ -n "$script" ] || { echo "no host got any targets" >&2; return 1; }
-
+    # Full-mesh fan-out: every host has every other host as a target,
+    # so any script will do.
+    local script="src"
     run_remote_script "$script" 0
     assert_status 0 "$?" "remote script should exit 0" || return 1
     # iperf was invoked at least once with -c <target>
@@ -96,11 +90,12 @@ test_generated_script_executes_iperf_for_each_target() {
         cat "$FAKE_BIN/iperf_calls.log" >&2
         return 1
     fi
-    # iperf invoked with --full-duplex
-    grep -q -- '--full-duplex' "$FAKE_BIN/iperf_calls.log" || {
-        echo "expected --full-duplex in iperf args" >&2
+    # iperf must NOT be invoked with --full-duplex (we use unidirectional
+    # tests now to keep CSV parsing unambiguous).
+    if grep -q -- '--full-duplex' "$FAKE_BIN/iperf_calls.log"; then
+        echo "unexpected --full-duplex in iperf args" >&2
         return 1
-    }
+    fi
     # iperf invoked with -y C
     grep -q -- '-y C' "$FAKE_BIN/iperf_calls.log" || {
         echo "expected -y C in iperf args" >&2
@@ -112,8 +107,6 @@ test_generated_script_writes_pair_header_into_log() {
     install_fake_iperf
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
-        || script="dst"
     run_remote_script "$script" 0
     # Look for a "# pair_a=..." header in any of the generated logs.
     if ! grep -hE '^# pair_a=' "$REMOTE_WORKDIR"/iperf_test_*.log >/dev/null 2>&1; then
@@ -124,6 +117,9 @@ test_generated_script_writes_pair_header_into_log() {
     # And it must contain the source host's name + a target.
     grep -qE "^# pair_a=$script pair_b=" "$REMOTE_WORKDIR"/iperf_test_*.log \
         || { echo "header missing or malformed" >&2; return 1; }
+    # Single-direction marker is present.
+    grep -q 'full_duplex=0' "$REMOTE_WORKDIR"/iperf_test_*.log \
+        || { echo "expected full_duplex=0 in log header" >&2; return 1; }
 }
 
 test_generated_script_falls_back_to_proc_stat_when_mpstat_missing() {
@@ -133,8 +129,6 @@ test_generated_script_falls_back_to_proc_stat_when_mpstat_missing() {
     # PATH so mpstat truly isn't found.
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
-        || script="dst"
     local workdir="$TEST_TMPDIR/work-fallback"
     mkdir -p "$workdir"
     cp "$(scripts_dir)/run_${script}_${IPERF_RUN_ID}.sh" "$workdir/run_iperf.sh"
@@ -158,8 +152,6 @@ test_generated_script_uses_mpstat_when_available() {
     install_fake_mpstat
     generate_scripts_for src dst
     local script="src"
-    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_src_${IPERF_RUN_ID}.sh" >/dev/null \
-        || script="dst"
     run_remote_script "$script" 0
     [ -f "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" ] || {
         echo "expected cpu log file" >&2
@@ -182,7 +174,6 @@ test_generated_script_zero_start_time_no_sleep() {
     install_fake_mpstat
     generate_scripts_for a b
     local script="a"
-    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_a_${IPERF_RUN_ID}.sh" >/dev/null || script="b"
     local before after
     before=$(date +%s)
     run_remote_script "$script" 0
@@ -199,21 +190,9 @@ test_generated_script_single_target_overrides_full_list() {
     install_fake_iperf
     install_fake_mpstat
     generate_scripts_for h0 h1 h2 h3
-    # Pick a script that has multiple targets; sequential-pair would
-    # call it with SINGLE_TARGET and only one log should result.
-    local script
-    for h in h0 h1 h2 h3; do
-        local n
-        n=$(grep -E '^TARGETS=\(' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh" \
-            | tr ' ' '\n' | grep -c '"')
-        if [ "$n" -ge 4 ]; then  # at least 2 targets (4 quote chars)
-            script="$h"; break
-        fi
-    done
-    if [ -z "${script:-}" ]; then
-        echo "    SKIP: no host with >=2 targets in this layout"
-        return 0
-    fi
+    # Full mesh: every host has 3 targets, so any host works for the
+    # SINGLE_TARGET test.
+    local script="h0"
     # Pick a single target that actually appears in this host's TARGETS=.
     local target
     target=$(grep -E '^TARGETS=\(' "$(scripts_dir)/run_${script}_${IPERF_RUN_ID}.sh" \
@@ -237,7 +216,6 @@ test_generated_script_writes_status_file() {
     install_fake_mpstat
     generate_scripts_for x y
     local script="x"
-    grep -E '^TARGETS=\( "[^"]+"' "$(scripts_dir)/run_x_${IPERF_RUN_ID}.sh" >/dev/null || script="y"
     run_remote_script "$script" 0
     [ -f "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" ] || {
         echo "missing iperf_run_${script}_${IPERF_RUN_ID}.status" >&2
@@ -254,32 +232,6 @@ test_generated_script_writes_status_file() {
     }
 }
 
-test_generated_script_lone_host_writes_only_cpu_and_status() {
-    # If a host has zero targets (parity rule edge case), no iperf
-    # test logs are created -- only the CPU log + status file.
-    install_fake_iperf
-    install_fake_mpstat
-    generate_scripts_for solo other
-    # The lone first host has zero clients in N=2 because parity rule
-    # gives the larger index the client role.
-    local script
-    for h in solo other; do
-        if grep -qE '^TARGETS=\([[:space:]]*\)' "$(scripts_dir)/run_${h}_${IPERF_RUN_ID}.sh"; then
-            script="$h"; break
-        fi
-    done
-    if [ -z "${script:-}" ]; then
-        echo "    SKIP: no host with zero targets in this layout"
-        return 0
-    fi
-    run_remote_script "$script" 0
-    local n
-    n=$(find "$REMOTE_WORKDIR" -maxdepth 1 -name 'iperf_test_*.log' | wc -l)
-    assert_eq "0" "$n" "client-less host should not create test logs" || return 1
-    [ -f "$REMOTE_WORKDIR/iperf_run_${script}_${IPERF_RUN_ID}.status" ] || return 1
-    [ -f "$REMOTE_WORKDIR/cpu_${script}_${IPERF_RUN_ID}.log" ] || return 1
-}
-
 run_test test_generated_script_executes_iperf_for_each_target
 run_test test_generated_script_writes_pair_header_into_log
 run_test test_generated_script_falls_back_to_proc_stat_when_mpstat_missing
@@ -287,6 +239,5 @@ run_test test_generated_script_uses_mpstat_when_available
 run_test test_generated_script_zero_start_time_no_sleep
 run_test test_generated_script_single_target_overrides_full_list
 run_test test_generated_script_writes_status_file
-run_test test_generated_script_lone_host_writes_only_cpu_and_status
 
 report_tests
