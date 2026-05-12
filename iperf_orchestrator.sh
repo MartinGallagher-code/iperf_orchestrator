@@ -1274,7 +1274,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
     for target in "\${run_targets[@]}"; do
         target_safe=\$(_san "\$target")
         echo "\$(date '+%F %T') testing -> \$target (x\$HOST_FLOWS)" >> "\$STATUS_FILE"
-        for flow in \$(seq 1 "\$HOST_FLOWS"); do
+        for (( flow=1; flow<=HOST_FLOWS; flow++ )); do
             if [ "\$HOST_FLOWS" -gt 1 ]; then
                 out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_f\${flow}_\${RUN_ID}.log"
             else
