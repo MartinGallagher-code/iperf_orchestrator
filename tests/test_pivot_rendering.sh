@@ -192,7 +192,7 @@ test_pivot_includes_required_header_text() {
         "$(csv_row b a 200)"
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    assert_contains "$(cat "$pivot")" "iperf2 full-duplex mesh throughput" || return 1
+    assert_contains "$(cat "$pivot")" "iperf2 full-mesh throughput" || return 1
     assert_contains "$(cat "$pivot")" "Rows = source" || return 1
     assert_contains "$(cat "$pivot")" "Columns = target" || return 1
     assert_contains "$(cat "$pivot")" "Diagonal" || return 1

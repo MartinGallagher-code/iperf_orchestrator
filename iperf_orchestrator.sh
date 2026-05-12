@@ -21,18 +21,21 @@
 #==============================================================================
 #
 # Orchestrate a full-mesh iperf2 throughput test across a list of servers.
-# Uses iperf2's --full-duplex mode: one TCP socket per host pair, carrying
-# traffic in both directions simultaneously. Each pair is tested once
-# (canonical ordering), and both directions are extracted from the single
-# log file.
+# Every host runs iperf -c against every other host (one unidirectional
+# iperf2 invocation per directed edge). Both directions of each pair are
+# measured by running both endpoints' client invocations simultaneously;
+# each log file carries exactly one direction's bytes, which keeps the
+# CSV parsing unambiguous regardless of iperf2 build or -P value.
 #
 # Why iperf2 and not iperf3:
 #   iperf3's server is single-threaded and accepts one client at a time, so
 #   a full mesh of N hosts would need N iperf3 servers per host on different
 #   ports. iperf2's server is multi-threaded and handles concurrent clients
 #   on a single port, so we run one daemon per host on port 5001 and we're
-#   done. iperf2's --full-duplex also gives us a true single-socket bidir
-#   test, which is what you want for fabric stress testing.
+#   done. We deliberately don't use iperf2's --full-duplex: its -y C output
+#   labels per-direction vs SUM rows inconsistently across versions and -P
+#   values, which made cell values unreliable. Running unidirectional pairs
+#   gives us unambiguous per-direction byte counts in every log file.
 # Results are gathered, parsed into CSV, pivoted, and rendered as a
 # heatmap + bar chart on a single image.
 #
@@ -1091,7 +1094,7 @@ cmd_start_servers() {
 cmd_create_scripts() {
     _ensure_run_id
     _validate_server_list
-    log "Generating per-host client run scripts (balanced pair assignment)..."
+    log "Generating per-host client run scripts (every host as client to every peer)..."
     log "Run ID: $RUN_ID"
     local hosts; hosts=$(read_servers)
     [ -n "$hosts" ] || die "No hosts in server list"
@@ -1099,8 +1102,9 @@ cmd_create_scripts() {
     build_host_idx
 
     # Track per-host target counts so we can show the user the load
-    # distribution after generation. With the parity rule the spread
-    # should be 0 (N odd) or 1 (N even).
+    # distribution after generation. Every host is a client to every
+    # other host (one iperf invocation per directed edge), so counts
+    # should be N-1 for all hosts.
     local target_counts=()
 
     while IFS= read -r src; do
@@ -1108,17 +1112,17 @@ cmd_create_scripts() {
         local src_safe; src_safe=$(_sanitize_host "$src")
         local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
-        # Each unordered pair is tested once, but instead of always making
-        # the lex-smaller host the client (which gives a 0..N-1 imbalance),
-        # we use the parity rule on host indices. Result: every host runs
-        # roughly (N-1)/2 clients, max-min spread of 1 even when N is even.
+        # Every host is a client against every other host. Each directed
+        # edge (src -> dst) is its own iperf2 invocation, producing a
+        # log with exactly one direction's data. This sidesteps the
+        # iperf2 --full-duplex CSV reporting quirks (per-direction row
+        # vs SUM-of-both-directions row) that made cell values
+        # unreliable across -P values and iperf2 builds.
         local targets=()
         while IFS= read -r t; do
             [ -z "$t" ] && continue
             [ "$t" = "$src" ] && continue
-            if is_client_for "$src" "$t"; then
-                targets+=("$t")
-            fi
+            targets+=("$t")
         done <<< "$hosts"
 
         target_counts+=("${#targets[@]}")
@@ -1135,10 +1139,13 @@ cmd_create_scripts() {
 # Run ID:      $RUN_ID
 # Targets:     ${targets[*]}
 #
-# Runs iperf2 --full-duplex against each target. One TCP socket per pair,
-# carrying traffic in both directions concurrently. Filenames embed both
-# host and run-id so multiple hosts whose \$REMOTE_DIR is on a shared
-# filesystem (e.g. NFS home) don't overwrite each other.
+# Runs one unidirectional iperf2 against each target. One iperf -c per
+# directed (src -> dst) edge, producing a log with exactly one
+# direction's bytes. The peer host's matching script handles the reverse
+# direction, so both directions are measured simultaneously across the
+# fleet. Filenames embed both host and run-id so multiple hosts whose
+# \$REMOTE_DIR is on a shared filesystem (e.g. NFS home) don't overwrite
+# each other.
 set -u
 
 START_TIME="\${1:-0}"
@@ -1232,22 +1239,25 @@ cpu_pid=\$!
 # loop but still wait for the sampler.
 if [ \${#run_targets[@]} -gt 0 ]; then
     # Fire every client in parallel and wait for the whole batch. Each
-    # invocation uses --full-duplex (one socket, both directions).
+    # invocation is unidirectional: the peer host's matching script
+    # handles the reverse direction simultaneously, so both directions
+    # are measured without iperf2 SUM-row ambiguity.
     # -y C gives CSV summaries; -e enables enhanced reports.
     pids=()
     for target in "\${run_targets[@]}"; do
         target_safe=\$(_san "\$target")
         out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_\${RUN_ID}.log"
-        echo "\$(date '+%F %T') testing <-> \$target" >> "\$STATUS_FILE"
+        echo "\$(date '+%F %T') testing -> \$target" >> "\$STATUS_FILE"
         (
             # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
-            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
+            # full_duplex=0 tells parse-csv this log carries one direction only (pair_a -> pair_b).
+            echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
             # Build the exact iperf invocation as a single string and
             # echo it into the per-test log BEFORE running. Anyone
             # debugging a failure can copy-paste this directly.
-            cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C"
+            cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
             echo "# cmd: \$cmd" >> "\$out"
-            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG --full-duplex -e -y C >> "\$out" 2>&1
+            iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
             rc=\$?
             # iperf2 sometimes returns 0 even when the connection failed
             # (it writes "connect failed" to stdout and exits cleanly).
@@ -1285,7 +1295,8 @@ EOF
     done <<< "$hosts"
 
     # Summarize the client-load distribution so the user can confirm the
-    # balancing worked. With the parity rule, max-min should be 0 or 1.
+    # fan-out. Every host is now a client to every other host, so all
+    # counts should equal N-1 and total tests = N*(N-1) directed edges.
     if [ ${#target_counts[@]} -gt 0 ]; then
         local mn=${target_counts[0]} mx=${target_counts[0]} sum=0 c
         for c in "${target_counts[@]}"; do
@@ -1377,13 +1388,15 @@ cmd_run_tests() {
         parallel)         _run_one_round "$(( $(date +%s) + START_DELAY ))" "" ;;
         sequential-host)  while IFS= read -r h; do [ -n "$h" ] && _run_one_round 0 "" "$h"; done < <(read_servers) ;;
         sequential-pair)
-            build_host_idx
+            # One directed iperf connection on the wire at any moment.
+            # Iterates every (s, d) where s != d, so both directions of
+            # each unordered pair are measured in separate rounds.
             local hosts=()
             while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
             local s d
             for s in "${hosts[@]}"; do
                 for d in "${hosts[@]}"; do
-                    is_client_for "$s" "$d" || continue
+                    [ "$s" = "$d" ] && continue
                     _run_one_round 0 "$d" "$s"
                 done
             done
@@ -1768,6 +1781,14 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
         listening_port = int(header.get("port", "5001"))
     except ValueError:
         listening_port = 5001
+    # full_duplex=0 (the new default written by cmd_create_scripts) means
+    # this log is one direction only: pair_a (the iperf -c invoker) sent
+    # bytes to pair_b. The reverse direction is captured in a separate
+    # log produced by pair_b's matching iperf -c against pair_a. If the
+    # header is missing or full_duplex=1, fall back to the legacy
+    # --full-duplex two-row parse for backwards compatibility with old
+    # log files.
+    full_duplex = header.get("full_duplex", "1") != "0"
 
     if not pair_a or not pair_b:
         rows.append(make_blank_row(pair_a, pair_b, "", "", base, "NO_HEADER",
@@ -1787,9 +1808,10 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
         rows.append(make_blank_row(pair_a, pair_b, pair_a, pair_b, base,
                                    "NO_SUMMARY",
                                    err_text or "No full-duration summary line found"))
-        rows.append(make_blank_row(pair_a, pair_b, pair_b, pair_a, base,
-                                   "NO_SUMMARY",
-                                   err_text or "No full-duration summary line found"))
+        if full_duplex:
+            rows.append(make_blank_row(pair_a, pair_b, pair_b, pair_a, base,
+                                       "NO_SUMMARY",
+                                       err_text or "No full-duration summary line found"))
         continue
 
     # Direction detection. In --full-duplex CSV iperf2 emits, per
@@ -1882,6 +1904,13 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
         elif addr == pair_b and b_to_a is None:
             b_to_a = agg
 
+    # Single-direction log (full_duplex=0): there is exactly one
+    # aggregate, representing pair_a -> pair_b. If the address-matching
+    # fallbacks didn't pick it up (hostname vs IP mismatch with a SUM
+    # marker), assign the lone aggregate to a_to_b directly.
+    if not full_duplex and a_to_b is None and len(aggregates) == 1:
+        a_to_b = next(iter(aggregates.values()))
+
     # Final fallback: still both unset but we have ≥2 aggregates.
     # Assign positionally so the row count stays correct (caller still
     # sees both directions, even if labels could be swapped).
@@ -1923,7 +1952,8 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
         })
 
     emit(a_to_b, pair_a, pair_b)
-    emit(b_to_a, pair_b, pair_a)
+    if full_duplex:
+        emit(b_to_a, pair_b, pair_a)
 
 # Filter against the current server list, if one was supplied. Drops
 # rows whose pair_a or pair_b is not in the active set, so commented
@@ -2428,7 +2458,7 @@ def fmt_num(v):
     return f"{v:>{num_w}.2f}"
 
 with open(out_txt, "w") as f:
-    f.write(f"iperf2 full-duplex mesh throughput (Mbps)\n")
+    f.write(f"iperf2 full-mesh throughput (Mbps)\n")
     f.write(f"Run at:   {meta_run_at}\n")
     f.write(f"Mode:     {meta_mode}    Duration: {meta_duration}s    "
             f"Port: {meta_port}    Parallel: {meta_parallel}    Hosts: {meta_n_hosts}\n")
@@ -2718,7 +2748,7 @@ ax_heat.set_yticklabels(tick_lab, fontsize=heat_fontsize)
 ax_heat.set_xlabel("Target (receiver direction)")
 ax_heat.set_ylabel("Source (sender direction)")
 sub = "" if annotate_cells else f"  (cell labels suppressed for readability at N={n})"
-title_main = f"iperf2 full-duplex mesh throughput (Mbps)  —  {n}×{n} hosts{sub}"
+title_main = f"iperf2 full-mesh throughput (Mbps)  —  {n}×{n} hosts{sub}"
 if meta_run_at or meta_mode or meta_dur:
     meta_bits = []
     if meta_run_at: meta_bits.append(meta_run_at)

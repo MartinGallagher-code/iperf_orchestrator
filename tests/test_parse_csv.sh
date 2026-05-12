@@ -288,8 +288,33 @@ test_parse_csv_bind_columns_empty_when_absent() {
     assert_eq "" "$v" "bind_ip should be empty when header omits it" || return 1
 }
 
+test_parse_csv_single_direction_log_emits_one_row() {
+    # New default format: full_duplex=0 in the header, one CSV summary
+    # row representing pair_a -> pair_b only. Reverse direction comes
+    # from a separate log produced by the peer.
+    local rd; rd=$(prep_results_dir)
+    cat > "$rd/iperf_test_host-a_to_host-b_${IPERF_RUN_ID}.log" <<EOF
+# pair_a=host-a pair_b=host-b duration=10 port=5001 parallel=1 full_duplex=0 test_start=1700000000
+20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
+EOF
+    run_orch parse-csv
+    assert_status 0 "$RUN_RC" "parse-csv should succeed" || return 1
+    local csv="$rd/iperf_results.csv"
+    local n; n=$(csv_row_count "$csv")
+    assert_eq "1" "$n" "single-direction log -> one CSV row" || return 1
+    local mbps status
+    mbps=$(csv_cell "$csv" host-a host-b mbps)
+    status=$(csv_cell "$csv" host-a host-b status)
+    assert_eq "1000.0" "$mbps" "a->b mbps mismatch" || return 1
+    assert_eq "OK" "$status" "a->b status should be OK" || return 1
+    # No reverse-direction row (not even DIRECTION_MISSING) for single-direction logs.
+    local rev; rev=$(csv_cell "$csv" host-b host-a status)
+    assert_eq "" "$rev" "single-direction log must not emit a reverse-direction row" || return 1
+}
+
 run_test test_parse_csv_includes_bind_columns
 run_test test_parse_csv_populates_bind_columns_from_header
 run_test test_parse_csv_bind_columns_empty_when_absent
+run_test test_parse_csv_single_direction_log_emits_one_row
 
 report_tests

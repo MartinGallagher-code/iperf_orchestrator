@@ -224,9 +224,10 @@ test_create_scripts_handles_50_hosts() {
     local n
     n=$(find "$RESULTS_BASE/$IPERF_RUN_ID/scripts" -name 'run_*.sh' | wc -l)
     assert_eq "50" "$n" "50 hosts -> 50 scripts" || return 1
-    assert_contains "$RUN_OUT" "min=24" || return 1
-    assert_contains "$RUN_OUT" "max=25" || return 1
-    assert_contains "$RUN_OUT" "total tests=1225" || return 1
+    # Full mesh: every host targets the other 49 peers; 50*49 = 2450 directed edges.
+    assert_contains "$RUN_OUT" "min=49" || return 1
+    assert_contains "$RUN_OUT" "max=49" || return 1
+    assert_contains "$RUN_OUT" "total tests=2450" || return 1
 }
 
 test_create_scripts_with_special_hostname_chars() {
