@@ -3035,6 +3035,13 @@ cmd_all() {
     _all_gate cleanup
     log "=== Pipeline complete ==="
     echo
+
+    local pivot="$RESULTS_DIR/iperf_pivot.txt"
+    if [ -f "$pivot" ]; then
+        cat "$pivot"
+        echo
+    fi
+
     echo "Results in: $RESULTS_DIR"
     ls -1 "$RESULTS_DIR" | sed 's/^/  /'
 
