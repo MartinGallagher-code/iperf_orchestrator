@@ -110,34 +110,30 @@ EOF
 
 # ---- Sorting --------------------------------------------------------------
 
-test_pivot_per_source_ranking_sorted_descending() {
-    # Means: a=(100+200)/2=150, b=(50+50)/2=50, c=(10+30)/2=20
+test_pivot_per_host_incoming_sorted_descending() {
+    # Incoming sums: a = b->a + c->a = 50 + 10 = 60
+    #                b = a->b + c->b = 100 + 30 = 130
+    #                c = a->c + b->c = 200 + 50 = 250
+    # Sorted high to low: c, b, a.
     prep_results_dir \
         "$(csv_row a b 100)" "$(csv_row a c 200)" \
         "$(csv_row b a 50)"  "$(csv_row b c 50)"  \
         "$(csv_row c a 10)"  "$(csv_row c b 30)"
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    # Extract just the per-source ranking section.
     local section
-    section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
+    section=$(awk '/Per-host incoming bandwidth/{p=1; next} p' "$pivot")
     local first
     first=$(echo "$section" | head -n1)
-    # First entry should be 'a' with mean 150.
-    [[ "$first" == *"a"* ]] || {
-        echo "expected 'a' first in ranking" >&2
+    [[ "$first" == *"c"* && "$first" == *"250.00"* ]] || {
+        echo "expected 'c' first with incoming 250.00" >&2
         echo "$section" >&2
         return 1
     }
-    [[ "$first" == *"150.00"* ]] || {
-        echo "expected mean 150.00 for 'a'" >&2
-        return 1
-    }
-    # Last entry (third line) should be 'c' with mean 20.
     local third
     third=$(echo "$section" | sed -n '3p')
-    [[ "$third" == *"c"* && "$third" == *"20.00"* ]] || {
-        echo "expected 'c' last with mean 20.00" >&2
+    [[ "$third" == *"a"* && "$third" == *"60.00"* ]] || {
+        echo "expected 'a' last with incoming 60.00" >&2
         echo "$section" >&2
         return 1
     }
@@ -155,7 +151,7 @@ test_pivot_bar_chart_max_is_40_chars() {
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     local section
-    section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
+    section=$(awk '/Per-host incoming bandwidth/{p=1; next} p' "$pivot")
     local first
     first=$(echo "$section" | head -n1)
     # Count '#' chars in the first ranking line.
@@ -173,7 +169,7 @@ test_pivot_bar_scales_proportionally() {
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     local section
-    section=$(awk '/Per-source mean outgoing/{p=1; next} p' "$pivot")
+    section=$(awk '/Per-host incoming bandwidth/{p=1; next} p' "$pivot")
     # big mean = (1000+100)/2 = 550. peer mean = (1000+100+1000+100)/4 = 550.
     # small mean = (100+100)/2 = 100. So ratio small:big = ~0.18.
     # Hash count for 'small' should be approximately 0.18*40 = ~7.
@@ -200,7 +196,7 @@ test_pivot_includes_required_header_text() {
     assert_contains "$(cat "$pivot")" "Rows = source" || return 1
     assert_contains "$(cat "$pivot")" "Columns = target" || return 1
     assert_contains "$(cat "$pivot")" "Diagonal" || return 1
-    assert_contains "$(cat "$pivot")" "Per-source mean outgoing" || return 1
+    assert_contains "$(cat "$pivot")" "Per-host incoming bandwidth" || return 1
 }
 
 # ---- Single-cell case --------------------------------------------------
@@ -237,7 +233,7 @@ run_test test_pivot_column_width_scales_to_longest_hostname
 run_test test_pivot_long_hostname_widens_columns
 run_test test_pivot_diagonal_renders_as_dash
 run_test test_pivot_missing_data_renders_as_dash
-run_test test_pivot_per_source_ranking_sorted_descending
+run_test test_pivot_per_host_incoming_sorted_descending
 run_test test_pivot_bar_chart_max_is_40_chars
 run_test test_pivot_bar_scales_proportionally
 run_test test_pivot_includes_required_header_text

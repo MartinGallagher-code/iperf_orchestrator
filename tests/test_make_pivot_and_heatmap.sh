@@ -42,7 +42,7 @@ test_make_pivot_produces_grid() {
     local content; content=$(cat "$pivot")
     # Header line and the three host columns/rows should appear.
     assert_contains "$content" "iperf2 full-duplex mesh throughput" || return 1
-    assert_contains "$content" "Per-source mean outgoing" || return 1
+    assert_contains "$content" "Per-host incoming bandwidth" || return 1
     # Numeric values should appear (1000.00, 880.00, etc.).
     assert_contains "$content" "1000.00" "expected 1000.00 in pivot" || return 1
     assert_contains "$content" "640.00"  "expected 640.00 in pivot" || return 1
@@ -50,38 +50,24 @@ test_make_pivot_produces_grid() {
     assert_contains "$content" "-" "diagonal placeholder missing" || return 1
 }
 
-test_make_pivot_per_source_mean_ranking() {
+test_make_pivot_per_host_incoming_ranking() {
     prep_csv
     run_orch make-pivot
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    # Means: a=(1000+800)/2=900, b=(880+640)/2=760, c=(720+600)/2=660.
-    # The per-source ranking is the section AFTER "Per-source mean".
-    # Find the line numbers of '  a   900.00', '  b   760.00',
-    # '  c   660.00' (formatted with leading two spaces by the script).
-    local start
-    start=$(grep -n "Per-source mean" "$pivot" | head -n1 | cut -d: -f1)
-    if [ -z "$start" ]; then
-        echo "ranking header not found in pivot" >&2
-        cat "$pivot" >&2
-        return 1
-    fi
+    # prep_csv data: a's in = 880 (from b) + 720 (from c) = 1600.
+    #                b's in = 1000 (from a) + 600 (from c) = 1600.
+    #                c's in = 800 (from a) + 640 (from b) = 1440.
+    # Sorted high to low: a (or b), then c. Just verify a, b, c all appear
+    # in the section in some order.
     local section
-    section=$(tail -n +"$start" "$pivot")
-    # First-occurring line numbers within the section.
-    local pa pb pc
-    pa=$(echo "$section" | grep -nE '^  a[[:space:]]' | head -n1 | cut -d: -f1)
-    pb=$(echo "$section" | grep -nE '^  b[[:space:]]' | head -n1 | cut -d: -f1)
-    pc=$(echo "$section" | grep -nE '^  c[[:space:]]' | head -n1 | cut -d: -f1)
-    if [ -z "$pa" ] || [ -z "$pb" ] || [ -z "$pc" ]; then
-        echo "ranking section missing one of a/b/c (a=<$pa> b=<$pb> c=<$pc>)" >&2
-        echo "--- section ---" >&2
-        echo "$section" >&2
-        return 1
-    fi
-    if [ "$pa" -ge "$pb" ] || [ "$pb" -ge "$pc" ]; then
-        echo "expected ranking order a < b < c, got line offsets: a=$pa b=$pb c=$pc" >&2
-        return 1
-    fi
+    section=$(awk '/Per-host incoming bandwidth/,/^$/' "$pivot")
+    for h in a b c; do
+        echo "$section" | grep -qE "^  $h[[:space:]]" || {
+            echo "Per-host incoming section missing $h" >&2
+            echo "$section" >&2
+            return 1
+        }
+    done
 }
 
 test_make_pivot_writes_pivot_file() {
@@ -124,16 +110,20 @@ test_make_pivot_includes_fleet_aggregate_bandwidth() {
         "pivot should report flow count" || return 1
 }
 
-test_make_pivot_includes_per_server_total_traffic() {
+test_make_pivot_includes_per_host_incoming_bandwidth() {
     prep_csv
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    assert_contains "$(cat "$pivot")" "Per-server avg total traffic" \
-        "pivot should have per-server total traffic section" || return 1
-    assert_contains "$(cat "$pivot")" "out=" \
-        "should show out= component" || return 1
-    assert_contains "$(cat "$pivot")" "in=" \
-        "should show in= component" || return 1
+    assert_contains "$(cat "$pivot")" "Per-host incoming bandwidth" \
+        "pivot should have per-host incoming section" || return 1
+    # Per-host incoming totals should sum to the fleet aggregate; verify
+    # the section reports a value for each source in prep_csv (a,b,c).
+    for h in a b c; do
+        grep -qE "^  $h[[:space:]]" "$pivot" || {
+            echo "expected per-host line for $h" >&2
+            cat "$pivot" >&2; return 1
+        }
+    done
 }
 
 test_make_pivot_sums_concurrent_flows() {
@@ -211,11 +201,13 @@ EOF
 }
 
 test_make_pivot_shows_gbs_alongside_mbps() {
-    # Both Per-server avg total traffic and Fleet aggregate should
+    # Both Per-host incoming bandwidth and Fleet aggregate should
     # show GB/s next to Mbps. Conversion is decimal: 8000 Mbps = 1 GB/s.
-    # Two pairs at 8000 Mbps each direction -> per-server total =
-    # 16000 Mbps = 2.000 GB/s; fleet aggregate = 2*8000+2*8000 = 32000
-    # Mbps = 4.000 GB/s.
+    # Four directional flows of 8000 Mbps each:
+    #   a's incoming = 8000 (from b) + 8000 (from c) = 16000 Mbps = 2.000 GB/s
+    #   b's incoming = 8000 (from a) = 8000 Mbps = 1.000 GB/s
+    #   c's incoming = 8000 (from a) = 8000 Mbps = 1.000 GB/s
+    # Sum = 32000 Mbps = 4.000 GB/s = fleet aggregate.
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
@@ -226,11 +218,16 @@ timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transf
 EOF
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
-    # Per-server section: should mention 'GB/s' alongside the Mbps figure.
-    grep -qE "Per-server avg total traffic Mbps" "$pivot" || return 1
-    awk '/Per-server avg total traffic/,/^$/' "$pivot" | grep -q "GB/s" || {
-        echo "per-server section missing GB/s annotation" >&2
-        awk '/Per-server avg total traffic/,/^$/' "$pivot" >&2
+    grep -q "Per-host incoming bandwidth" "$pivot" || return 1
+    awk '/Per-host incoming bandwidth/,/^$/' "$pivot" | grep -q "GB/s" || {
+        echo "per-host incoming section missing GB/s annotation" >&2
+        awk '/Per-host incoming bandwidth/,/^$/' "$pivot" >&2
+        return 1
+    }
+    # a's incoming should be 16000 Mbps = 2.000 GB/s.
+    awk '/Per-host incoming bandwidth/,/^$/' "$pivot" | grep -qE "^  a[[:space:]]+16000\.00 Mbps[[:space:]]+\([[:space:]]*2\.000 GB/s\)" || {
+        echo "expected 'a 16000.00 Mbps (2.000 GB/s)' line" >&2
+        awk '/Per-host incoming bandwidth/,/^$/' "$pivot" >&2
         return 1
     }
     grep -q "Fleet aggregate bandwidth" "$pivot" || return 1
@@ -343,10 +340,10 @@ test_make_heatmap_missing_dependency_message() {
 
 run_test test_make_pivot_requires_csv
 run_test test_make_pivot_produces_grid
-run_test test_make_pivot_per_source_mean_ranking
+run_test test_make_pivot_per_host_incoming_ranking
 run_test test_make_pivot_writes_pivot_file
 run_test test_make_pivot_annotates_failed_only_cells_with_attempt_count
-run_test test_make_pivot_includes_per_server_total_traffic
+run_test test_make_pivot_includes_per_host_incoming_bandwidth
 run_test test_make_pivot_includes_fleet_aggregate_bandwidth
 run_test test_make_pivot_sums_concurrent_flows
 run_test test_make_pivot_averages_sequential_flows

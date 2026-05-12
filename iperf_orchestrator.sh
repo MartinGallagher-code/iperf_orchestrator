@@ -2333,11 +2333,21 @@ sources, targets = set(), set()
 # iperf2 -y C timestamp parser. Format: "YYYYMMDDHHMMSS.fff" (e.g.
 # "20260506191234.567"). Returns epoch seconds, or None on failure.
 def _ts(s):
+    # iperf2 -y C emits "YYYYMMDDHHMMSS" with an optional ".fff"
+    # millisecond suffix. Keep the fractional part -- losing it can
+    # underestimate `span` by up to a second per row and inflate the
+    # directional-throughput cell on tightly-clustered samples.
     if not s or len(s) < 14:
         return None
     try:
         from datetime import datetime
-        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        secs = datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        if len(s) > 15 and s[14] == ".":
+            try:
+                secs += float("0." + s[15:].strip())
+            except ValueError:
+                pass
+        return secs
     except Exception:
         return None
 
@@ -2457,40 +2467,33 @@ with open(out_txt, "w") as f:
             row_means[s] = sum(vals) / len(vals)
         f.write("\n")
 
-    f.write("\nPer-source mean outgoing Mbps (sorted high to low):\n")
-    for h, m in sorted(row_means.items(), key=lambda kv: kv[1], reverse=True):
-        bar = "#" * int(m / max(row_means.values()) * 40) if row_means else ""
-        f.write(f"  {h.ljust(host_w)} {m:9.2f}  {bar}\n")
-
-    # Per-server total traffic = avg outgoing (row mean) + avg incoming
-    # (column mean). Tells you which hosts carry the most traffic
-    # regardless of direction.
-    col_means = {}
+    # Per-host *incoming* total = sum of column cells = total bytes/s
+    # that host receives from every other host. We deliberately do NOT
+    # report (in + out) per-host: every byte appears once as someone's
+    # out and once as someone else's in, so adding them inside one host
+    # double-counts at the fleet level. Reporting only incoming lets
+    # each byte be counted exactly once, and sum(incoming across hosts)
+    # equals the fleet aggregate by construction.
+    col_sums = {}
     for d in dst_list:
         vals = [mat.get(s, {}).get(d) for s in src_list if s != d]
         vals = [v for v in vals if v is not None]
         if vals:
-            col_means[d] = sum(vals) / len(vals)
-    totals = {h: row_means.get(h, 0.0) + col_means.get(h, 0.0)
-              for h in set(row_means) | set(col_means)}
+            col_sums[d] = sum(vals)
     # Mbps -> GB/s (decimal): Mbps / 8000. So 8000 Mbps = 1 GB/s.
     def _gbs(mbps): return mbps / 8000.0
-    if totals:
-        f.write("\nPer-server avg total traffic Mbps "
-                "(out+in, sorted high to low):\n")
-        max_total = max(totals.values()) or 1.0
-        for h, t in sorted(totals.items(), key=lambda kv: kv[1], reverse=True):
-            o = row_means.get(h, 0.0)
-            i = col_means.get(h, 0.0)
-            bar = "#" * int(t / max_total * 40)
-            f.write(f"  {h.ljust(host_w)} {t:9.2f} Mbps "
-                    f"({_gbs(t):6.3f} GB/s)  "
-                    f"(out={o:8.2f} in={i:8.2f})  {bar}\n")
+    if col_sums:
+        f.write("\nPer-host incoming bandwidth "
+                "(total Mbps received, sorted high to low):\n")
+        max_in = max(col_sums.values()) or 1.0
+        for h, v in sorted(col_sums.items(), key=lambda kv: kv[1], reverse=True):
+            bar = "#" * int(v / max_in * 40)
+            f.write(f"  {h.ljust(host_w)} {v:10.2f} Mbps "
+                    f"({_gbs(v):6.3f} GB/s)  {bar}\n")
 
-    # Fleet-wide aggregate: the total bandwidth being moved across the
-    # mesh at any moment, averaged over the run. Sum of every successful
-    # (source -> target) cell value. Each cell is itself a per-pair
-    # mean; summing them gives the total instantaneous flow rate.
+    # Fleet-wide aggregate = sum of every successful (source -> target)
+    # cell = sum of per-host incoming totals. This is the total
+    # bytes/s moving across the mesh, each byte counted exactly once.
     all_flows = [mat.get(s, {}).get(d)
                  for s in src_list for d in dst_list if s != d]
     all_flows = [v for v in all_flows if v is not None]
@@ -2584,11 +2587,21 @@ ts_list = []
 max_dur = 0.0
 
 def _ts(s):
+    # iperf2 -y C emits "YYYYMMDDHHMMSS" with an optional ".fff"
+    # millisecond suffix. Keep the fractional part -- losing it can
+    # underestimate `span` by up to a second per row and inflate the
+    # directional-throughput cell on tightly-clustered samples.
     if not s or len(s) < 14:
         return None
     try:
         from datetime import datetime
-        return datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        secs = datetime.strptime(s[:14], "%Y%m%d%H%M%S").timestamp()
+        if len(s) > 15 and s[14] == ".":
+            try:
+                secs += float("0." + s[15:].strip())
+            except ValueError:
+                pass
+        return secs
     except Exception:
         return None
 
