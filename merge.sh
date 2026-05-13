@@ -9,7 +9,8 @@ cd "$(dirname "$0")"
 out="${1:-bundle.txt}"
 : > "$out"
 
-find . -type f ! -name "$(basename "$0")" ! -name "split.sh" ! -name "$out" \
+find . -type d -name .git -prune -o -type f \
+    ! -name "$(basename "$0")" ! -name "split.sh" ! -name "$out" -print \
     | sort | while read -r f; do
     rel="${f#./}"
     if grep -Iq . "$f"; then
