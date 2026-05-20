@@ -197,7 +197,7 @@ test_run_tests_rolling_writes_cmd_and_traps_failures() {
     write_server_list a b >/dev/null
     run_with_fake_path --total-time 1 --duration 1 run-tests rolling
     assert_status 0 "$RUN_RC" || return 1
-    grep -qE 'cmd="iperf -c \$target' "$FAKE_SSH_LOG" || {
+    grep -qE 'cmd="iperf -c \$conn_ip' "$FAKE_SSH_LOG" || {
         echo "rolling probe should build cmd= string for the log" >&2
         cat "$FAKE_SSH_LOG" >&2; return 1
     }
@@ -225,6 +225,33 @@ test_run_tests_rolling_omits_bind_when_unset() {
 run_test test_run_tests_rolling_embeds_bind_resolver
 run_test test_run_tests_rolling_omits_bind_when_unset
 run_test test_run_tests_rolling_writes_cmd_and_traps_failures
+
+test_run_tests_rolling_embeds_peer_conn_ips_when_bind_set() {
+    # With --bind, the rolling heredoc gets a PEER_CONN_IPS associative
+    # array populated by _resolve_peer_bind_ips, and iperf -c connects
+    # to the resolved data-plane IP per peer instead of the login IP.
+    install_fake_ssh
+    write_server_list alpha bravo charlie >/dev/null
+    IPERF_BIND="eth0" \
+        run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q 'declare -A PEER_CONN_IPS=' "$FAKE_SSH_LOG" || {
+        echo "rolling probe should declare PEER_CONN_IPS" >&2
+        cat "$FAKE_SSH_LOG" >&2; return 1
+    }
+    grep -qE '\["(alpha|bravo|charlie)"\]="10\.99\.0\.[0-9]+"' "$FAKE_SSH_LOG" || {
+        echo "PEER_CONN_IPS should map peer names to resolved IPs" >&2
+        return 1
+    }
+    grep -qF 'conn_ip=${PEER_CONN_IPS["$target"]:-$target}' "$FAKE_SSH_LOG" || {
+        echo "rolling loop should look up conn_ip per target" >&2; return 1
+    }
+    grep -qF 'iperf -c "$conn_ip"' "$FAKE_SSH_LOG" || {
+        echo "rolling iperf -c should use \$conn_ip, not \$target" >&2
+        grep 'iperf -c' "$FAKE_SSH_LOG" >&2; return 1
+    }
+}
+run_test test_run_tests_rolling_embeds_peer_conn_ips_when_bind_set
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode

@@ -206,8 +206,14 @@ test_generated_scripts_handle_synchronized_start() {
 }
 
 test_generated_script_includes_bind_resolver_and_arg() {
+    # --bind triggers the orchestrator-side peer-IP probe over SSH, so
+    # the fake-ssh shim must be on PATH (it returns a synthetic
+    # data-plane IP per host). Without it the probe dies and no scripts
+    # get generated.
+    install_fake_ssh
     write_servers_only h0 h1
-    IPERF_BIND="bond0" run_orch create-scripts >/dev/null 2>&1
+    IPERF_BIND="bond0" PATH="$FAKE_BIN:$PATH" \
+        run_orch create-scripts >/dev/null 2>&1
     local s
     s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
     grep -q '^BIND_RAW="bond0"$' "$s" || {
@@ -252,8 +258,8 @@ test_generated_script_writes_cmd_line_to_log() {
     grep -q '^[[:space:]]*echo "# cmd: \$cmd"' "$s" || {
         echo "expected '# cmd:' line emission" >&2; cat "$s" >&2; return 1
     }
-    grep -qE 'cmd="iperf -c \$target' "$s" || {
-        echo "expected cmd= assignment with iperf -c \$target" >&2
+    grep -qE 'cmd="iperf -c \$conn_ip' "$s" || {
+        echo "expected cmd= assignment with iperf -c \$conn_ip" >&2
         grep '^[[:space:]]*cmd=' "$s" >&2
         return 1
     }
@@ -315,5 +321,70 @@ run_test test_generated_script_omits_bind_when_not_set
 run_test test_generated_script_embeds_bind_metadata_in_log_header
 run_test test_generated_script_writes_cmd_line_to_log
 run_test test_generated_script_traps_iperf_failure
+
+# ---- Login-IP / data-plane NIC mismatch ----------------------------------
+
+test_create_scripts_embeds_target_conn_ips_when_bind_set() {
+    # With --bind set, the orchestrator probes every host for its
+    # data-plane IP and embeds the resolved per-target IPs into the
+    # generated script via the TARGET_CONN_IPS array. iperf -c then
+    # connects to that IP instead of the SSH/login IP from servers.txt.
+    install_fake_ssh
+    write_servers_only host-a host-b host-c
+    IPERF_BIND="eth0" PATH="$FAKE_BIN:$PATH" \
+        run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_host-a_*.sh' | head -n1)
+    [ -f "$s" ] || { echo "no script generated for host-a" >&2; return 1; }
+    grep -qE '^TARGET_CONN_IPS=\( "10\.99\.0\.[0-9]+" "10\.99\.0\.[0-9]+" +\)' "$s" || {
+        echo "TARGET_CONN_IPS not populated with resolved IPs" >&2
+        grep -E '^TARGET_CONN_IPS=' "$s" >&2; return 1
+    }
+    grep -q 'conn_ip="\${run_conn_ips\[\$ti\]:-\$target}"' "$s" || {
+        echo "iperf loop should resolve conn_ip per target" >&2; return 1
+    }
+    grep -qE 'iperf -c "\$conn_ip"' "$s" || {
+        echo "iperf -c should use \$conn_ip, not \$target" >&2
+        grep -E 'iperf -c' "$s" >&2; return 1
+    }
+    grep -q 'conn_ip=\$conn_ip' "$s" || {
+        echo "log header should record conn_ip" >&2; return 1
+    }
+}
+
+test_create_scripts_target_conn_ips_empty_when_bind_unset() {
+    # Without --bind, no probe runs and TARGET_CONN_IPS slots are empty
+    # so the loop falls back to the login IP from TARGETS.
+    write_servers_only h0 h1 h2
+    run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_h0_*.sh' | head -n1)
+    grep -qE '^TARGET_CONN_IPS=\( "" "" +\)' "$s" || {
+        echo "TARGET_CONN_IPS should be all-empty when --bind not set" >&2
+        grep -E '^TARGET_CONN_IPS=' "$s" >&2; return 1
+    }
+}
+
+test_create_scripts_dies_when_peer_bind_pattern_unmatched() {
+    # If the bind probe finds nothing on a host, abort up front so the
+    # operator fixes the pattern before we generate a full mesh of
+    # broken tests.
+    install_fake_ssh
+    # Override the shim so the probe returns empty output.
+    cat > "$FAKE_BIN/ssh" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+    chmod +x "$FAKE_BIN/ssh"
+    write_servers_only h0 h1
+    IPERF_BIND="nosuch" PATH="$FAKE_BIN:$PATH" run_orch create-scripts
+    assert_ne 0 "$RUN_RC" "create-scripts should die when bind probe fails" || return 1
+    assert_contains "$RUN_OUT" "no interface matched" \
+        "error should explain the unmatched pattern" || return 1
+}
+
+run_test test_create_scripts_embeds_target_conn_ips_when_bind_set
+run_test test_create_scripts_target_conn_ips_empty_when_bind_unset
+run_test test_create_scripts_dies_when_peer_bind_pattern_unmatched
 
 report_tests

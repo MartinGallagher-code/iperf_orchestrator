@@ -83,12 +83,17 @@ IPERF_NO_NAGLE="${IPERF_NO_NAGLE:-0}"    # -N: disable Nagle's algorithm (1=on)
 IPERF_BIND="${IPERF_BIND:-}"             # -B value. Treated as a substring search
                                          # against `ip -o -4 addr show` on each
                                          # remote host. The first matching iface's
-                                         # IPv4 address is passed to iperf -c -B.
-                                         # Examples: "eth0", "bond", "10.0.0",
-                                         # "mlx5".
+                                         # IPv4 address is (a) passed to iperf -c -B
+                                         # to bind the source side, and (b) used as
+                                         # the iperf -c destination so traffic
+                                         # actually rides the bound NIC even when
+                                         # the SSH/login IP lives on a different
+                                         # interface. Examples: "eth0", "bond",
+                                         # "10.0.0", "mlx5".
 IPERF_SERVER_BIND="${IPERF_SERVER_BIND:-}" # Same pattern as IPERF_BIND, but for the
                                          # daemon side: passes -B <ip> to iperf -s
                                          # so the server only accepts on that iface.
+                                         # Defaults to IPERF_BIND when unset.
 IPERF_STREAMS="${IPERF_STREAMS:-1}"      # parallel streams per test
 # --ssh-jobs default: derived from $(nproc) so a 64-core orchestrator host
 # can fan out further than a 4-core laptop. Capped at 32 to avoid
@@ -246,6 +251,16 @@ if [ "$IPERF_SSH_JOBS" -gt 256 ]; then
     echo "iperf-orchestrator: WARN: --ssh-jobs=$IPERF_SSH_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
 fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
+
+# Split-NIC fleets: if --bind is set but --server-bind is not, mirror
+# --bind to the server side so the daemon only accepts on the data-plane
+# NIC. Otherwise a misrouted client connection would land on a daemon
+# happily listening on 0.0.0.0 and we'd quietly measure the wrong NIC.
+# Users who explicitly want a 0.0.0.0 listener with a bound client can
+# still set --server-bind='' to opt out.
+if [ -n "$IPERF_BIND" ] && [ -z "$IPERF_SERVER_BIND" ]; then
+    IPERF_SERVER_BIND="$IPERF_BIND"
+fi
 
 # Build the optional iperf2 client-arg string (-b/-l/-w/-M/-N) once at
 # startup. Empty if no perf knobs were set; otherwise something like
@@ -529,6 +544,81 @@ parallel_hosts() {
 }
 
 #------------------------------------------------------------------------------
+# Peer data-plane IP resolution
+#
+# When the SSH/login IP differs from the iperf data-plane NIC, plain
+# `iperf -c <login_ip>` either rides the wrong NIC (kernel routes the
+# login IP over the management interface) or fails outright if the peer
+# daemon is bound to its data-plane IP via --server-bind. The fix is to
+# connect to each peer's data-plane IP directly. We discover them once,
+# up front, by SSHing to every host (via its login IP) and running the
+# same --bind substring against its `ip -o -4 addr show` output.
+#
+# Sets the global associative array PEER_BIND_IPS keyed by login-IP (as
+# in servers.txt) -> data-plane IPv4. Aborts up front if any host lacks
+# a matching interface so the operator can fix the pattern before we
+# launch a full mesh of broken tests.
+_resolve_peer_bind_ips() {
+    declare -gA PEER_BIND_IPS=()
+    local pattern="$1"
+    [ -z "$pattern" ] && return 0
+
+    if [ -z "$SERVER_LIST_FILE" ] || [ ! -f "$SERVER_LIST_FILE" ]; then
+        die "no server list. Pass --servers <file> or set IPERF_SERVERS"
+    fi
+
+    local hosts=() h
+    while IFS= read -r h; do
+        [ -z "$h" ] && continue
+        hosts+=("$h")
+    done < <(read_servers)
+    local n=${#hosts[@]}
+    [ "$n" -eq 0 ] && return 0
+
+    log "Resolving peer data-plane IPs for --bind '$pattern' (parallel x$IPERF_SSH_JOBS)..."
+
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-bind-XXXXXX") || die "mktemp failed"
+
+    local jobs=$IPERF_SSH_JOBS
+    [ "$jobs" -gt "$n" ] && jobs=$n
+
+    local i running=0
+    for ((i=0; i<n; i++)); do
+        if [ "$running" -ge "$jobs" ]; then
+            wait -n 2>/dev/null || wait
+            running=$((running - 1))
+        fi
+        (
+            ssh_run "${hosts[$i]}" "
+                BIND_RAW='$pattern'
+                _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
+                [ -n \"\$_line\" ] || exit 1
+                echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1
+            " > "$tmpdir/$i.ip" 2>/dev/null
+        ) &
+        running=$((running + 1))
+    done
+    wait
+
+    local missing=() ip
+    for ((i=0; i<n; i++)); do
+        ip=$(tr -d '[:space:]' < "$tmpdir/$i.ip" 2>/dev/null)
+        if [ -z "$ip" ]; then
+            missing+=("${hosts[$i]}")
+        else
+            PEER_BIND_IPS["${hosts[$i]}"]=$ip
+            vlog "  ${hosts[$i]}: '$pattern' -> $ip"
+        fi
+    done
+    rm -rf "$tmpdir"
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        die "--bind '$pattern': no interface matched on host(s): ${missing[*]}. Check that the pattern matches a line in 'ip -o -4 addr show' on each host."
+    fi
+}
+
+#------------------------------------------------------------------------------
 # Balanced pair assignment
 #
 # For each unordered pair {a, b} we need to pick exactly one endpoint to
@@ -691,10 +781,18 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
                                is what iperf2 -B receives. Examples:
                                  -B eth0       -B bond       -B mlx5
                                  -B 10.0.0     -B 192.168
+                               When set, the orchestrator also probes every
+                               peer up front for the data-plane IP matching
+                               PATTERN and uses that as the iperf -c
+                               destination (instead of the SSH/login IP from
+                               servers.txt), so traffic actually rides the
+                               bound NIC even when login and data-plane IPs
+                               live on different interfaces.
     --server-bind PATTERN      bind the iperf2 server side too. Same pattern
-                               syntax as --bind. Without this, the daemon
-                               listens on 0.0.0.0; with it, the daemon only
-                               accepts connections on the resolved IP.
+                               syntax as --bind. Defaults to the value of
+                               --bind so the daemon only accepts on the
+                               data-plane NIC; pass --server-bind='' to
+                               keep listening on 0.0.0.0 instead.
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
@@ -1113,6 +1211,12 @@ cmd_create_scripts() {
     done < <(read_servers)
     [ "${#hosts_arr[@]}" -gt 0 ] || die "No hosts in server list"
 
+    # Resolve each peer's data-plane IP when --bind is set, so the
+    # generated run scripts can `iperf -c <data_plane_ip>` instead of
+    # connecting to the SSH/login IP (which may route over the wrong
+    # NIC). No-op when --bind is unset.
+    _resolve_peer_bind_ips "$IPERF_BIND"
+
     build_host_idx
 
     # Track per-host target counts so we can show the user the load
@@ -1149,9 +1253,15 @@ cmd_create_scripts() {
 
         target_counts+=("${#targets[@]}")
 
-        local targets_str=""
+        local targets_str="" conn_ips_str=""
         for t in "${targets[@]}"; do
             targets_str+="\"$t\" "
+            # Parallel array: conn IP to actually feed to iperf -c. When
+            # --bind isn't set (or PEER_BIND_IPS is empty) this stays
+            # empty per slot and the generated script falls back to the
+            # login IP. We resolved every host in _resolve_peer_bind_ips
+            # so missing entries here mean --bind wasn't set.
+            conn_ips_str+="\"${PEER_BIND_IPS[$t]:-}\" "
         done
 
         cat > "$script" <<EOF
@@ -1179,6 +1289,10 @@ DURATION=$IPERF_DURATION
 PARALLEL=$IPERF_STREAMS
 BIND_RAW="$IPERF_BIND"
 TARGETS=( $targets_str )
+# Parallel to TARGETS: the data-plane IP to feed to iperf -c. Empty
+# slots fall back to the matching TARGETS entry (the SSH/login IP), so
+# this is a no-op when --bind is unset.
+TARGET_CONN_IPS=( $conn_ips_str )
 HOST_FLOWS=$IPERF_HOST_FLOWS
 
 cd "\$(dirname "\$0")"
@@ -1210,11 +1324,24 @@ if [ "\$START_TIME" -gt 0 ]; then
 fi
 
 # Pick the target list: a single target overrides the full list (used by
-# sequential-pair mode, which calls this script once per pair).
+# sequential-pair mode, which calls this script once per pair). When a
+# single target is given we still want its resolved conn IP (if --bind
+# was set), so look it up in the parallel TARGETS / TARGET_CONN_IPS
+# arrays and fall back to the target itself when nothing matches.
 if [ -n "\$SINGLE_TARGET" ]; then
     run_targets=( "\$SINGLE_TARGET" )
+    _single_conn="\$SINGLE_TARGET"
+    for ((_i=0; _i<\${#TARGETS[@]}; _i++)); do
+        if [ "\${TARGETS[\$_i]}" = "\$SINGLE_TARGET" ]; then
+            _single_conn="\${TARGET_CONN_IPS[\$_i]:-\$SINGLE_TARGET}"
+            [ -z "\$_single_conn" ] && _single_conn="\$SINGLE_TARGET"
+            break
+        fi
+    done
+    run_conn_ips=( "\$_single_conn" )
 else
     run_targets=( "\${TARGETS[@]}" )
+    run_conn_ips=( "\${TARGET_CONN_IPS[@]}" )
 fi
 
 # Sanitizer matching the orchestrator's _sanitize_host(). Keeps file
@@ -1271,9 +1398,16 @@ if [ \${#run_targets[@]} -gt 0 ]; then
     # parser sums them per pair via mbps*duration / wall_time.
     # -y C gives CSV summaries; -e enables enhanced reports.
     pids=()
-    for target in "\${run_targets[@]}"; do
+    for (( ti=0; ti<\${#run_targets[@]}; ti++ )); do
+        target="\${run_targets[\$ti]}"
+        # Connection IP: the peer's data-plane IP when --bind was set;
+        # otherwise the SSH/login IP from servers.txt. We keep \$target
+        # as pair_b in the header so the analysis labels match the
+        # server-list hostnames (the conn IP is informational only).
+        conn_ip="\${run_conn_ips[\$ti]:-\$target}"
+        [ -z "\$conn_ip" ] && conn_ip="\$target"
         target_safe=\$(_san "\$target")
-        echo "\$(date '+%F %T') testing -> \$target (x\$HOST_FLOWS)" >> "\$STATUS_FILE"
+        echo "\$(date '+%F %T') testing -> \$target [\$conn_ip] (x\$HOST_FLOWS)" >> "\$STATUS_FILE"
         for (( flow=1; flow<=HOST_FLOWS; flow++ )); do
             if [ "\$HOST_FLOWS" -gt 1 ]; then
                 out="iperf_test_\${SOURCE_SAFE}_to_\${target_safe}_f\${flow}_\${RUN_ID}.log"
@@ -1283,13 +1417,15 @@ if [ \${#run_targets[@]} -gt 0 ]; then
             (
                 # Header line consumed by the parser. Keys are space-separated to keep parsing trivial.
                 # full_duplex=0 tells parse-csv this log carries one direction only (pair_a -> pair_b).
-                echo "# pair_a=\$SOURCE pair_b=\$target run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL host_flows=\$HOST_FLOWS flow=\$flow full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
+                # conn_ip records the actual destination handed to iperf -c, which differs from pair_b
+                # when the login IP and data-plane NIC live on different interfaces.
+                echo "# pair_a=\$SOURCE pair_b=\$target conn_ip=\$conn_ip run_id=\$RUN_ID duration=\$DURATION port=\$PORT parallel=\$PARALLEL host_flows=\$HOST_FLOWS flow=\$flow full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)" > "\$out"
                 # Build the exact iperf invocation as a single string and
                 # echo it into the per-test log BEFORE running. Anyone
                 # debugging a failure can copy-paste this directly.
-                cmd="iperf -c \$target -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
+                cmd="iperf -c \$conn_ip -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
                 echo "# cmd: \$cmd" >> "\$out"
-                iperf -c "\$target" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
+                iperf -c "\$conn_ip" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
                 rc=\$?
                 # iperf2 sometimes returns 0 even when the connection failed
                 # (it writes "connect failed" to stdout and exits cleanly).
@@ -1302,7 +1438,7 @@ if [ \${#run_targets[@]} -gt 0 ]; then
                     # collected back as run_<host>.log) so the operator
                     # sees the inciting command without having to grep
                     # every iperf_test_*.log.
-                    echo "[FAIL] \$SOURCE -> \$target flow=\$flow: \$err_tail" >&2
+                    echo "[FAIL] \$SOURCE -> \$target [\$conn_ip] flow=\$flow: \$err_tail" >&2
                     echo "       cmd: \$cmd" >&2
                 fi
             ) &
@@ -1415,6 +1551,9 @@ cmd_run_tests() {
     if [ "$mode" = "rolling" ]; then
         _ensure_run_id
         _validate_server_list
+        # Rolling mode is self-starting (no create-scripts step), so it
+        # needs its own peer-IP probe before _run_rolling spawns iperf.
+        _resolve_peer_bind_ips "$IPERF_BIND"
     else
         cmd_create_scripts
         cmd_distribute_scripts
@@ -1459,11 +1598,16 @@ _run_rolling() {
     while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
     local pids=() src
     for src in "${hosts[@]}"; do
-        local peers="" p
+        local peers="" peer_conn_ips_decl="declare -A PEER_CONN_IPS=( " p
         for p in "${hosts[@]}"; do
             [ "$p" = "$src" ] && continue
             peers+="\"$p\" "
+            # Embed an associative-array entry per peer so the rolling
+            # loop can look up the data-plane IP by name. Empty value
+            # when --bind wasn't set; the loop falls back to the login IP.
+            peer_conn_ips_decl+="[\"$p\"]=\"${PEER_BIND_IPS[$p]:-}\" "
         done
+        peer_conn_ips_decl+=")"
         local src_safe; src_safe=$(_sanitize_host "$src")
         local hostlog="$LOGS_DIR/rolling_${src_safe}.log"
         ssh_run "$src" "
@@ -1506,6 +1650,10 @@ _run_rolling() {
                 echo \"[bind] $src: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP\"
             fi
             PEERS=( $peers )
+            # Peer name -> data-plane IP (or empty when --bind unset).
+            # The rolling loop picks targets by name (for fair-share
+            # counting) but connects via the resolved conn IP.
+            $peer_conn_ips_decl
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
             declare -A counts
             for t in \"\${PEERS[@]}\"; do counts[\"\$t\"]=0; done
@@ -1530,6 +1678,8 @@ _run_rolling() {
                     fi
                 done
                 target=\${cands[\$((RANDOM % \${#cands[@]}))]}
+                conn_ip=\${PEER_CONN_IPS[\"\$target\"]:-\$target}
+                [ -z \"\$conn_ip\" ] && conn_ip=\"\$target\"
                 target_safe=\$(printf '%s' \"\$target\" | tr ':/[] \\t' '_______')
                 seq=\$((seq + 1))
                 counts[\"\$target\"]=\$((counts[\"\$target\"] + 1))
@@ -1538,16 +1688,16 @@ _run_rolling() {
                 # flows can be in flight at once.
                 (
                     sleep 0.\$((100 + RANDOM % 900))
-                    cmd=\"iperf -c \$target -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
-                    echo \"# pair_a=$src pair_b=\$target run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
+                    cmd=\"iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
+                    echo \"# pair_a=$src pair_b=\$target conn_ip=\$conn_ip run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
                     echo \"# cmd: \$cmd\" >> \"\$outfile\"
-                    iperf -c \"\$target\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
+                    iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
                     rc=\$?
                     if [ \"\$rc\" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' \"\$outfile\"; then
                         err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' \"\$outfile\" | head -n1)
                         [ -z \"\$err_tail\" ] && err_tail=\"exit_status=\$rc\"
                         echo \"# exit_status: \$rc\" >> \"\$outfile\"
-                        echo \"[FAIL] $src -> \$target seq=\$seq: \$err_tail\" >&2
+                        echo \"[FAIL] $src -> \$target [\$conn_ip] seq=\$seq: \$err_tail\" >&2
                         echo \"       cmd: \$cmd\" >&2
                     fi
                 ) &

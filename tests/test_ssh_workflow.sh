@@ -177,9 +177,45 @@ test_start_servers_omits_server_bind_when_unset() {
     }
 }
 
+test_start_servers_defaults_server_bind_to_bind() {
+    # Split-NIC fleets: when --bind is set but --server-bind is not,
+    # the orchestrator mirrors --bind into --server-bind so the daemon
+    # only accepts on the data-plane NIC (otherwise a misrouted client
+    # would land on a 0.0.0.0 listener and we'd silently measure the
+    # wrong interface).
+    prep_workflow a b
+    run_with_fake_path --bind mlx5 start-servers >/dev/null 2>&1
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q "BIND_RAW='mlx5'" "$FAKE_SSH_LOG" || {
+        echo "expected --bind value to default into --server-bind" >&2
+        grep BIND_RAW "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+}
+
+test_start_servers_explicit_server_bind_wins_over_bind_default() {
+    # If --server-bind is given explicitly, it takes precedence over
+    # the --bind-derived default.
+    prep_workflow a b
+    run_with_fake_path --bind mlx5 --server-bind bond0 start-servers >/dev/null 2>&1
+    assert_status 0 "$RUN_RC" || return 1
+    grep -q "BIND_RAW='bond0'" "$FAKE_SSH_LOG" || {
+        echo "explicit --server-bind should override --bind default" >&2
+        grep BIND_RAW "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -q "BIND_RAW='mlx5'" "$FAKE_SSH_LOG" && {
+        echo "--bind value should not appear when --server-bind explicitly set" >&2
+        return 1
+    }
+    return 0
+}
+
 run_test test_start_servers_dispatches_per_host
 run_test test_start_servers_embeds_server_bind_resolver_when_set
 run_test test_start_servers_omits_server_bind_when_unset
+run_test test_start_servers_defaults_server_bind_to_bind
+run_test test_start_servers_explicit_server_bind_wins_over_bind_default
 run_test test_stop_servers_kills_iperf_on_each_host
 run_test test_cleanup_removes_remote_dir
 run_test test_cleanup_without_yes_dies
