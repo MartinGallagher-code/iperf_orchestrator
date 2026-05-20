@@ -156,6 +156,15 @@ case "$remote_cmd" in
     *"chmod +x"*|*"mkdir -p"*)
         exit 0
         ;;
+    *"BIND_RAW="*"ip -o -4 addr show"*)
+        # _resolve_peer_bind_ips probe: emit a per-host data-plane IP so
+        # the orchestrator's PEER_BIND_IPS map gets populated. The exact
+        # IP doesn't matter for these tests -- they only assert on the
+        # presence of the probe and the embedded conn_ip wiring.
+        h_hash=$(printf '%s' "$host" | cksum | awk '{print ($1 % 250) + 1}')
+        echo "10.99.0.$h_hash"
+        exit 0
+        ;;
     *)
         exit 0
         ;;
