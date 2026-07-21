@@ -14,7 +14,7 @@ source "$DIR/test_helper.bash"
 install_failable_ssh() {
     install_fake_ssh
     local tool
-    for tool in scp ssh-copy-id ssh-keygen; do
+    for tool in scp ssh-keygen; do
         echo '#!/usr/bin/env bash' > "$FAKE_BIN/$tool"
         echo 'exit 0' >> "$FAKE_BIN/$tool"
         chmod +x "$FAKE_BIN/$tool"

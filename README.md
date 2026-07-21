@@ -50,8 +50,8 @@ cat > servers.txt <<EOF
 10.0.0.13
 EOF
 
-# 2. Distribute SSH keys (one-time; --ask-password prompts once for all)
-./iperf-orchestrator.sh --servers servers.txt ssh-setup --ask-password
+# 2. Make sure key-based SSH to every host is already set up, e.g.
+#    for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
 # 3. Run everything end-to-end
 ./iperf-orchestrator.sh --servers servers.txt all
@@ -89,11 +89,11 @@ iperf3's server is single-threaded and accepts only one client at a time. A full
 
 ## Subcommands
 
+Key-based SSH to every host must already be configured (the orchestrator
+connects non-interactively with `BatchMode=yes`).
+
 ```
 SETUP:
-  ssh-setup              Generate (if needed) and distribute SSH keys
-                         (--ask-password / --password-file / --password-env
-                         drive ssh-copy-id non-interactively)
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
 
@@ -120,7 +120,7 @@ INTERNAL (run-tests calls these for you; available standalone if needed):
 
 CONVENIENCE:
   all [MODE] [--keep-going]  Run the full sequence end-to-end
-                             (ssh-setup + start + run-tests + process + stop)
+                             (start + run-tests + process + stop)
   status                     Probe hosts live + list available runs
   doctor                     Check local prerequisites
   help                       Common commands and flags
@@ -153,9 +153,6 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
-| `SSH_PASSWORD_FILE` | `--password-file` | — | path to a file with the SSH password (single line; `chmod 600`); enables expect-driven `ssh-setup` |
-| `SSH_PASSWORD_ENV` | `--password-env` | — | env var name to read the SSH password from; enables expect-driven `ssh-setup` |
-| `SSH_ASK_PASSWORD` | `--ask-password` | `no` | prompt once and reuse for every host; enables expect-driven `ssh-setup` |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
 | `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; safe to point at a shared FS (every remote-side file embeds `<host>_<run-id>`) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
@@ -168,16 +165,15 @@ The default of `16` keeps the orchestrator host's SSH agent and the per-host ssh
 
 The actual `run-tests parallel` mode is *not* throttled by `--jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--jobs` only caps the setup/teardown fan-outs.
 
-#### Expect-driven, parallel `ssh-setup`
+#### SSH key setup
 
-By default `ssh-setup` is sequential and prompts you for a password per host. When you supply any of `--password-file`, `--password-env`, or `--ask-password`, the orchestrator drives `ssh-copy-id` non-interactively via `expect(1)` and runs the fan-out in parallel (capped by `--jobs`). On a 100-host fleet this turns ~15 minutes of typing into a handful of seconds. `expect` is required only when one of these password sources is set; `doctor` checks for it.
-
-Password-file mode is the recommended one for automation:
+The orchestrator does not distribute SSH keys. Configure key-based, non-interactive SSH to every host before running it — for example with `ssh-copy-id`:
 
 ```bash
-echo 'mypassword' > ~/.ssh-fleet-pw && chmod 600 ~/.ssh-fleet-pw
-./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
+for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 ```
+
+Every connection uses `BatchMode=yes`, so any host still requiring a password will simply fail rather than prompt.
 
 #### `--keep-going` for `all`
 
@@ -387,7 +383,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **`make-heatmap` errors out with `Missing Python package`.** `pip install matplotlib numpy` (or your distro's equivalent). Only the `make-heatmap` step needs these — the other steps work without them. Run `./iperf-orchestrator.sh doctor` to get a single report of every missing local prerequisite plus install hints.
 
-**`ssh-setup` says `expect: not found` after I passed `--password-file`.** Expect-driven `ssh-setup` requires `expect(1)` on the orchestrator host. Install it (`apt install expect` on Debian/Ubuntu, `dnf install expect` on RHEL family). Without a password source, `ssh-setup` falls back to its sequential per-host prompt and doesn't need expect.
+**Every host fails with a password prompt or `Permission denied`.** The orchestrator connects with `BatchMode=yes` and never distributes keys itself. Set up key-based SSH first, e.g. `for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done`.
 
 **A run aborted halfway and I want to pick up where it left off.** `./iperf-orchestrator.sh all --resume` consults `~/.iperf_orchestrator/state` and skips the steps already marked done. If the failure was on a single flaky host and you want to barrel past it instead, add `--keep-going`.
 
@@ -453,14 +449,12 @@ autoload -Uz compinit && compinit
 
 ## Tests
 
-The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `expect`-driven ssh-setup path, the `doctor` command, the `--keep-going`/`--resume` semantics on `all`, and a long tail of edge cases.
+The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `doctor` command, the `--keep-going` semantics on `all`, and a long tail of edge cases.
 
 ```bash
 ./tests/run_tests.sh                           # everything
 ./tests/test_pair_assignment.sh                # one suite
 ```
-
-The expect-integration suite drives the real `expect` interpreter (no mocks), so it requires `expect(1)` on the test host.
 
 ---
 

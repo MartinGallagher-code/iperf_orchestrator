@@ -41,7 +41,7 @@ test_orchestrator_uses_set_u() {
 # exiting 2 (the "unknown command" sentinel).
 test_every_documented_subcommand_is_dispatched() {
     local subcommands=(
-        status ssh-setup
+        status
         check-iperf check-servers
         start-servers create-scripts distribute-scripts
         run-tests collect-results stop-servers cleanup
@@ -138,7 +138,7 @@ test_help_includes_files_section() {
 
 test_help_includes_setup_quickstart() {
     run_orch help-advanced
-    assert_contains "$RUN_OUT" "ssh-setup" "help should mention ssh-setup" || return 1
+    assert_contains "$RUN_OUT" "start-servers" "help should mention start-servers" || return 1
     assert_contains "$RUN_OUT" "--servers" "help should mention --servers flag" || return 1
 }
 

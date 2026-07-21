@@ -14,7 +14,6 @@ test_help_with_no_args_prints_first_run_banner() {
     assert_status 0 "$RUN_RC" "no-args invocation should exit 0" || return 1
     assert_contains "$RUN_OUT" "iperf-orchestrator.sh" "banner missing program name" || return 1
     assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
-    assert_contains "$RUN_OUT" "ssh-setup" "banner should mention ssh-setup" || return 1
     assert_contains "$RUN_OUT" "--servers" "banner should mention --servers" || return 1
     assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
     # Banner should be terse, not the full usage.

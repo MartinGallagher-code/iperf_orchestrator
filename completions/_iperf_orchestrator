@@ -9,7 +9,6 @@ _iperf_orchestrator() {
     subcommands=(
         'init:Load a server list'
         'status:Show pipeline progress and next step'
-        'ssh-setup:Generate and distribute SSH keys'
         'check-iperf:Probe iperf2 + mpstat on every host'
         'check-servers:Probe for running iperf daemons'
         'start-servers:Start iperf -s on every host'
@@ -45,9 +44,6 @@ _iperf_orchestrator() {
         '--iperf-dir[local working dir]:dir:_files -/'
         '--remote-dir[remote working dir]:dir:'
         '--python[Python interpreter]:path:_files'
-        '--password-file[SSH password file]:file:_files'
-        '--password-env[env var holding SSH password]:var:'
-        '--ask-password[prompt for SSH password once]'
         '--retries[retry parallel_hosts workers N times]:N:'
         '--dry-run[print SSH/SCP commands without executing]'
         '-n[print SSH/SCP commands without executing]'

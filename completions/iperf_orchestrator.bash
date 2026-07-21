@@ -14,14 +14,14 @@ _iperf_orchestrator() {
         cword="$COMP_CWORD"
     }
 
-    local subcommands="init status ssh-setup check-iperf check-servers \
+    local subcommands="init status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
         make-pivot make-heatmap doctor results-summary all help"
 
     local global_flags="--port --duration -d --parallel -P --jobs -j \
         --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
-        --password-file --password-env --ask-password --retries \
+        --retries \
         --dry-run -n --verbose -v --quiet -q -h --help"
 
     local run_modes="parallel sequential-host sequential-pair"
@@ -37,10 +37,10 @@ _iperf_orchestrator() {
 
     # Value-taking flags: complete the value, not another flag.
     case "$prev" in
-        --iperf-dir|--remote-dir|--password-file|--python)
+        --iperf-dir|--remote-dir|--python)
             _filedir
             return ;;
-        --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--password-env|--ssh-user|-u)
+        --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--ssh-user|-u)
             return ;;  # numeric/text values, no completion
     esac
 

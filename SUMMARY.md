@@ -93,7 +93,7 @@ happen during execution:
 | `parallel_hosts` — capped-concurrency SSH fan-out primitive | 470–550 |
 | Pair-assignment helpers (`build_host_idx`, `is_client_for`) | 550–600 |
 | `usage()` / `usage_advanced()` | 600–760 |
-| Subcommand implementations: `cmd_status`, `cmd_ssh_setup`, `cmd_check_iperf`, `cmd_check_servers`, `cmd_start_servers`, `cmd_create_scripts`, `cmd_distribute_scripts`, `cmd_run_tests` (with `_run_rolling` and `_run_one_round` helpers), `cmd_collect_results`, `cmd_stop_servers`, `cmd_cleanup`, `cmd_parse_csv`, `cmd_parse_cpu`, `cmd_make_pivot`, `cmd_make_heatmap`, `cmd_results_summary`, `cmd_doctor`, `cmd_process`, `cmd_all` | 760–2900 |
+| Subcommand implementations: `cmd_status`, `cmd_check_iperf`, `cmd_check_servers`, `cmd_start_servers`, `cmd_create_scripts`, `cmd_distribute_scripts`, `cmd_run_tests` (with `_run_rolling` and `_run_one_round` helpers), `cmd_collect_results`, `cmd_stop_servers`, `cmd_cleanup`, `cmd_parse_csv`, `cmd_parse_cpu`, `cmd_make_pivot`, `cmd_make_heatmap`, `cmd_results_summary`, `cmd_doctor`, `cmd_process`, `cmd_all` | 760–2900 |
 | Dispatcher (case statement mapping subcommand → `cmd_*`) | 2900–2970 |
 
 Every subcommand follows the same pattern: `_resolve_existing_run` (or
@@ -282,9 +282,9 @@ command line, so all of these are equivalent:
 ./iperf_orchestrator.sh run-tests rolling --streams 4
 ```
 
-Subcommand-specific flags (`cleanup --yes`, `ssh-setup --ask-password`,
-`all --keep-going`) are parsed by the subcommand itself and may
-contain values that look like global flags without conflict.
+Subcommand-specific flags (`cleanup --yes`, `all --keep-going`) are
+parsed by the subcommand itself and may contain values that look like
+global flags without conflict.
 
 The `--bind` flag is unusual: its value is a *substring search
 pattern* matched against `ip -o -4 addr show` on each remote at

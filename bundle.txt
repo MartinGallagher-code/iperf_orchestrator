@@ -750,8 +750,8 @@ cat > servers.txt <<EOF
 10.0.0.13
 EOF
 
-# 2. Distribute SSH keys (one-time; --ask-password prompts once for all)
-./iperf-orchestrator.sh --servers servers.txt ssh-setup --ask-password
+# 2. Make sure key-based SSH to every host is already set up, e.g.
+#    for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
 # 3. Run everything end-to-end
 ./iperf-orchestrator.sh --servers servers.txt all
@@ -789,11 +789,11 @@ iperf3's server is single-threaded and accepts only one client at a time. A full
 
 ## Subcommands
 
+Key-based SSH to every host must already be configured (the orchestrator
+connects non-interactively with `BatchMode=yes`).
+
 ```
 SETUP:
-  ssh-setup              Generate (if needed) and distribute SSH keys
-                         (--ask-password / --password-file / --password-env
-                         drive ssh-copy-id non-interactively)
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
 
@@ -820,7 +820,7 @@ INTERNAL (run-tests calls these for you; available standalone if needed):
 
 CONVENIENCE:
   all [MODE] [--keep-going]  Run the full sequence end-to-end
-                             (ssh-setup + start + run-tests + process + stop)
+                             (start + run-tests + process + stop)
   status                     Probe hosts live + list available runs
   doctor                     Check local prerequisites
   help                       Common commands and flags
@@ -853,9 +853,6 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
-| `SSH_PASSWORD_FILE` | `--password-file` | — | path to a file with the SSH password (single line; `chmod 600`); enables expect-driven `ssh-setup` |
-| `SSH_PASSWORD_ENV` | `--password-env` | — | env var name to read the SSH password from; enables expect-driven `ssh-setup` |
-| `SSH_ASK_PASSWORD` | `--ask-password` | `no` | prompt once and reuse for every host; enables expect-driven `ssh-setup` |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
 | `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; safe to point at a shared FS (every remote-side file embeds `<host>_<run-id>`) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
@@ -868,16 +865,15 @@ The default of `16` keeps the orchestrator host's SSH agent and the per-host ssh
 
 The actual `run-tests parallel` mode is *not* throttled by `--jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--jobs` only caps the setup/teardown fan-outs.
 
-#### Expect-driven, parallel `ssh-setup`
+#### SSH key setup
 
-By default `ssh-setup` is sequential and prompts you for a password per host. When you supply any of `--password-file`, `--password-env`, or `--ask-password`, the orchestrator drives `ssh-copy-id` non-interactively via `expect(1)` and runs the fan-out in parallel (capped by `--jobs`). On a 100-host fleet this turns ~15 minutes of typing into a handful of seconds. `expect` is required only when one of these password sources is set; `doctor` checks for it.
-
-Password-file mode is the recommended one for automation:
+The orchestrator does not distribute SSH keys. Configure key-based, non-interactive SSH to every host before running it — for example with `ssh-copy-id`:
 
 ```bash
-echo 'mypassword' > ~/.ssh-fleet-pw && chmod 600 ~/.ssh-fleet-pw
-./iperf-orchestrator.sh --password-file ~/.ssh-fleet-pw ssh-setup
+for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 ```
+
+Every connection uses `BatchMode=yes`, so any host still requiring a password will simply fail rather than prompt.
 
 #### `--keep-going` for `all`
 
@@ -1087,7 +1083,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **`make-heatmap` errors out with `Missing Python package`.** `pip install matplotlib numpy` (or your distro's equivalent). Only the `make-heatmap` step needs these — the other steps work without them. Run `./iperf-orchestrator.sh doctor` to get a single report of every missing local prerequisite plus install hints.
 
-**`ssh-setup` says `expect: not found` after I passed `--password-file`.** Expect-driven `ssh-setup` requires `expect(1)` on the orchestrator host. Install it (`apt install expect` on Debian/Ubuntu, `dnf install expect` on RHEL family). Without a password source, `ssh-setup` falls back to its sequential per-host prompt and doesn't need expect.
+**Every host fails with a password prompt or `Permission denied`.** The orchestrator connects with `BatchMode=yes` and never distributes keys itself. Set up key-based SSH first, e.g. `for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done`.
 
 **A run aborted halfway and I want to pick up where it left off.** `./iperf-orchestrator.sh all --resume` consults `~/.iperf_orchestrator/state` and skips the steps already marked done. If the failure was on a single flaky host and you want to barrel past it instead, add `--keep-going`.
 
@@ -1153,14 +1149,12 @@ autoload -Uz compinit && compinit
 
 ## Tests
 
-The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `expect`-driven ssh-setup path, the `doctor` command, the `--keep-going`/`--resume` semantics on `all`, and a long tail of edge cases.
+The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `doctor` command, the `--keep-going` semantics on `all`, and a long tail of edge cases.
 
 ```bash
 ./tests/run_tests.sh                           # everything
 ./tests/test_pair_assignment.sh                # one suite
 ```
-
-The expect-integration suite drives the real `expect` interpreter (no mocks), so it requires `expect(1)` on the test host.
 
 ---
 
@@ -1268,7 +1262,7 @@ happen during execution:
 | `parallel_hosts` — capped-concurrency SSH fan-out primitive | 470–550 |
 | Pair-assignment helpers (`build_host_idx`, `is_client_for`) | 550–600 |
 | `usage()` / `usage_advanced()` | 600–760 |
-| Subcommand implementations: `cmd_status`, `cmd_ssh_setup`, `cmd_check_iperf`, `cmd_check_servers`, `cmd_start_servers`, `cmd_create_scripts`, `cmd_distribute_scripts`, `cmd_run_tests` (with `_run_rolling` and `_run_one_round` helpers), `cmd_collect_results`, `cmd_stop_servers`, `cmd_cleanup`, `cmd_parse_csv`, `cmd_parse_cpu`, `cmd_make_pivot`, `cmd_make_heatmap`, `cmd_results_summary`, `cmd_doctor`, `cmd_process`, `cmd_all` | 760–2900 |
+| Subcommand implementations: `cmd_status`, `cmd_check_iperf`, `cmd_check_servers`, `cmd_start_servers`, `cmd_create_scripts`, `cmd_distribute_scripts`, `cmd_run_tests` (with `_run_rolling` and `_run_one_round` helpers), `cmd_collect_results`, `cmd_stop_servers`, `cmd_cleanup`, `cmd_parse_csv`, `cmd_parse_cpu`, `cmd_make_pivot`, `cmd_make_heatmap`, `cmd_results_summary`, `cmd_doctor`, `cmd_process`, `cmd_all` | 760–2900 |
 | Dispatcher (case statement mapping subcommand → `cmd_*`) | 2900–2970 |
 
 Every subcommand follows the same pattern: `_resolve_existing_run` (or
@@ -1457,9 +1451,9 @@ command line, so all of these are equivalent:
 ./iperf_orchestrator.sh run-tests rolling --streams 4
 ```
 
-Subcommand-specific flags (`cleanup --yes`, `ssh-setup --ask-password`,
-`all --keep-going`) are parsed by the subcommand itself and may
-contain values that look like global flags without conflict.
+Subcommand-specific flags (`cleanup --yes`, `all --keep-going`) are
+parsed by the subcommand itself and may contain values that look like
+global flags without conflict.
 
 The `--bind` flag is unusual: its value is a *substring search
 pattern* matched against `ip -o -4 addr show` on each remote at
@@ -1524,7 +1518,6 @@ _iperf_orchestrator() {
     subcommands=(
         'init:Load a server list'
         'status:Show pipeline progress and next step'
-        'ssh-setup:Generate and distribute SSH keys'
         'check-iperf:Probe iperf2 + mpstat on every host'
         'check-servers:Probe for running iperf daemons'
         'start-servers:Start iperf -s on every host'
@@ -1560,9 +1553,6 @@ _iperf_orchestrator() {
         '--iperf-dir[local working dir]:dir:_files -/'
         '--remote-dir[remote working dir]:dir:'
         '--python[Python interpreter]:path:_files'
-        '--password-file[SSH password file]:file:_files'
-        '--password-env[env var holding SSH password]:var:'
-        '--ask-password[prompt for SSH password once]'
         '--retries[retry parallel_hosts workers N times]:N:'
         '--dry-run[print SSH/SCP commands without executing]'
         '-n[print SSH/SCP commands without executing]'
@@ -1628,14 +1618,14 @@ _iperf_orchestrator() {
         cword="$COMP_CWORD"
     }
 
-    local subcommands="init status ssh-setup check-iperf check-servers \
+    local subcommands="init status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
         make-pivot make-heatmap doctor results-summary all help"
 
     local global_flags="--port --duration -d --parallel -P --jobs -j \
         --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
-        --password-file --password-env --ask-password --retries \
+        --retries \
         --dry-run -n --verbose -v --quiet -q -h --help"
 
     local run_modes="parallel sequential-host sequential-pair"
@@ -1651,10 +1641,10 @@ _iperf_orchestrator() {
 
     # Value-taking flags: complete the value, not another flag.
     case "$prev" in
-        --iperf-dir|--remote-dir|--password-file|--python)
+        --iperf-dir|--remote-dir|--python)
             _filedir
             return ;;
-        --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--password-env|--ssh-user|-u)
+        --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--ssh-user|-u)
             return ;;  # numeric/text values, no completion
     esac
 
@@ -1846,8 +1836,7 @@ if __name__ == "__main__":  # pragma: no cover
 # Results are gathered, parsed into CSV, pivoted, and rendered as a
 # heatmap + bar chart on a single image.
 #
-# Quick start:
-#   ./iperf-orchestrator.sh --servers servers.txt ssh-setup
+# Quick start (key-based SSH to every host must already be configured):
 #   ./iperf-orchestrator.sh --servers servers.txt all
 #
 # The script is stateless: nothing is persisted between invocations except
@@ -1930,12 +1919,6 @@ SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -
 # Used when we want commands that require an existing key (no password prompts):
 SSH_BATCH_OPTS="$SSH_OPTS -o BatchMode=yes"
 
-# Optional password sources for ssh-setup. When any of these is set, the
-# script drives ssh-copy-id with `expect` instead of prompting interactively.
-SSH_PASSWORD_FILE="${SSH_PASSWORD_FILE:-}"
-SSH_PASSWORD_ENV="${SSH_PASSWORD_ENV:-}"
-SSH_ASK_PASSWORD="${SSH_ASK_PASSWORD:-no}"
-
 # Verbosity: 0 = quiet (errors and warnings only),
 #            1 = normal (default),
 #            2 = verbose (also prints every ssh/scp invocation).
@@ -2009,11 +1992,6 @@ while [ $# -gt 0 ]; do
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
         --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
-        --password-file)   _flag_need "$1" "${2:-}"; SSH_PASSWORD_FILE="$2"; shift 2 ;;
-        --password-file=*) SSH_PASSWORD_FILE="${1#*=}"; shift ;;
-        --password-env)    _flag_need "$1" "${2:-}"; SSH_PASSWORD_ENV="$2"; shift 2 ;;
-        --password-env=*)  SSH_PASSWORD_ENV="${1#*=}"; shift ;;
-        --ask-password)    SSH_ASK_PASSWORD=yes; shift ;;
         --dry-run|-n)      IPERF_DRY_RUN=1; shift ;;
         --verbose|-v)      IPERF_VERBOSITY=2; shift ;;
         --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
@@ -2023,7 +2001,7 @@ while [ $# -gt 0 ]; do
         # Unknown flags before any subcommand are treated as typos and
         # rejected at the top level. Once a subcommand has been seen,
         # unknown flags get forwarded so subcommand-specific flags
-        # (`cleanup --yes`, `ssh-setup --ask-password`, etc.) survive.
+        # (`cleanup --yes`, etc.) survive.
         --*|-?*)
             if [ "$_saw_subcommand" = "1" ]; then
                 _PARSED+=("$1"); shift
@@ -2242,18 +2220,6 @@ ssh_run() {
     fi
     # shellcheck disable=SC2086
     ssh $SSH_BATCH_OPTS "$SSH_USER@$host" "$@"
-}
-
-ssh_run_interactive() {
-    # Allows password prompts (used by ssh-setup before keys exist)
-    local host="$1"; shift
-    vlog "ssh (interactive) $SSH_USER@$host: $*"
-    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
-        echo "DRY-RUN ssh (interactive) $SSH_USER@$host -- $*"
-        return 0
-    fi
-    # shellcheck disable=SC2086
-    ssh $SSH_OPTS "$SSH_USER@$host" "$@"
 }
 
 scp_to() {
@@ -2489,10 +2455,8 @@ first_run_banner() {
     cat <<EOF
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
-Quick start:
-    1. $PROG --servers servers.txt ssh-setup --ask-password
-                                  # distribute SSH keys (one prompt for all hosts)
-    2. $PROG --servers servers.txt all
+Quick start (key-based SSH to every host must already be set up):
+    $PROG --servers servers.txt all
                                   # run the full pipeline + render heatmap.
                                   # Results land in $RESULTS_BASE/<run-id>/
 
@@ -2517,11 +2481,10 @@ USAGE:
     $PROG [flags] <command> [args]
 
 QUICK START:
-    $PROG --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
     $PROG --servers servers.txt all                        # run + analyze + cleanup
+    (key-based SSH to every host must already be configured)
 
 COMMON COMMANDS:
-    ssh-setup              Distribute SSH keys to every host (one-time)
     start-servers          Start iperf2 -s daemons on every host
     run-tests [MODE]       Run tests. MODE is one of:
                              parallel         (default) every host pairs up at once
@@ -2529,7 +2492,7 @@ COMMON COMMANDS:
                                               (--total-time SECONDS, --host-flows N)
     process                Pull results, parse CSV/CPU, render pivot + heatmap
     stop-servers           Kill iperf2 -s daemons
-    all [MODE]             ssh-setup + start-servers + run-tests + process + stop
+    all [MODE]             start-servers + run-tests + process + stop
     status                 List runs and probe hosts live
 
 COMMON FLAGS:
@@ -2546,7 +2509,6 @@ COMMON FLAGS:
     --length, -l SIZE          TCP r/w buffer size, e.g. 128K (iperf2 -l)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
-    --ask-password             prompt once for an SSH password, reuse for all hosts
     --output, -o DIR           results directory (default $RESULTS_BASE)
     -h, --help                 show this help
     --help-advanced            show every command, every flag, every env var
@@ -2613,17 +2575,13 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
                                Safe to point at a shared FS: filenames embed <host>_<run-id>.
     --python PATH              Python interpreter (default $PYTHON_BIN)
-    --password-file PATH       Read SSH password from PATH (single line; chmod 600).
-    --password-env VAR         Read SSH password from env var named VAR.
-    --ask-password             Prompt once for an SSH password and reuse it.
     -h, --help                 show the simple help
     --help-advanced            show this help
 
+Key-based SSH to every host must be configured before use (e.g. via
+ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
+
 SETUP:
-    ssh-setup              Generate ~/.ssh/id_ed25519 if needed and distribute the key.
-                           Default: per-host password prompt (sequential). With
-                           --password-file / --password-env / --ask-password, drive
-                           ssh-copy-id via 'expect' in parallel (capped by --ssh-jobs).
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts have iperf -s currently running
 
@@ -2656,11 +2614,10 @@ ANALYSIS:
                            iperf_results.csv.
 
 CONVENIENCE:
-    all [MODE] [--keep-going]  Run the full pipeline (doctor + ssh-setup +
-                               start-servers + run-tests + process + stop-servers
-                               + cleanup). --keep-going continues past per-host
-                               failures.
-    doctor                     Check local prerequisites (ssh tools, expect, Python,
+    all [MODE] [--keep-going]  Run the full pipeline (doctor + start-servers +
+                               run-tests + process + stop-servers + cleanup).
+                               --keep-going continues past per-host failures.
+    doctor                     Check local prerequisites (ssh tools, Python,
                                numpy, matplotlib) and print install hints.
     status                     Probe hosts (iperf installed? server running?) and
                                list available runs.
@@ -2685,9 +2642,6 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
     SSH_OPTS=$SSH_OPTS
-    SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-}
-    SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}
-    SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD
     START_DELAY=$START_DELAY
     IPERF_SERVERS=${IPERF_SERVERS:-}
     RESULTS_BASE=$RESULTS_BASE
@@ -2732,196 +2686,6 @@ cmd_status() {
         echo
         echo "Daemons:"
         parallel_hosts _worker_check_servers | sed 's/^/  /'
-    fi
-}
-
-#------------------------------------------------------------------------------
-# Resolve a single SSH password from --password-file / --password-env /
-# --ask-password and write it to a chmod-600 temp file whose path is
-# placed in the global _IPERF_ORCH_PW_FILE. Using a file (instead of an
-# env var that gets inherited and is visible via /proc/$pid/environ)
-# avoids a leak path. The caller is responsible for unlinking the file
-# via _scrub_ssh_password.
-_resolve_ssh_password() {
-    _IPERF_ORCH_PW_FILE=""
-    local pw=""
-    if [ -n "$SSH_PASSWORD_FILE" ]; then
-        [ -f "$SSH_PASSWORD_FILE" ] || { err "password file not found: $SSH_PASSWORD_FILE"; return 1; }
-        local perms=""
-        perms=$(stat -c '%a' "$SSH_PASSWORD_FILE" 2>/dev/null || stat -f '%A' "$SSH_PASSWORD_FILE" 2>/dev/null || echo "")
-        case "$perms" in
-            ''|400|600) ;;
-            *) warn "password file $SSH_PASSWORD_FILE has permissions $perms; recommend chmod 600" ;;
-        esac
-        IFS= read -r pw < "$SSH_PASSWORD_FILE" || true
-        [ -n "$pw" ] || { err "password file $SSH_PASSWORD_FILE is empty"; return 1; }
-    elif [ -n "$SSH_PASSWORD_ENV" ]; then
-        pw="${!SSH_PASSWORD_ENV:-}"
-        [ -n "$pw" ] || { err "env var \$$SSH_PASSWORD_ENV is empty or unset"; return 1; }
-    elif [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        printf "SSH password (used for all hosts): " >&2
-        IFS= read -rs pw < /dev/tty
-        printf '\n' >&2
-        [ -n "$pw" ] || { err "empty password"; return 1; }
-    else
-        err "no password source configured"
-        return 1
-    fi
-
-    # Write the resolved password into a chmod-600 temp file. We create
-    # the file mode-restricted before writing, to avoid a window where
-    # the password is on disk world-readable.
-    local f
-    f=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-pw.XXXXXX") \
-        || { err "mktemp failed for password file"; return 1; }
-    chmod 600 "$f" || { rm -f "$f"; err "chmod 600 failed on $f"; return 1; }
-    # Newline-terminated so expect's `gets` returns the line cleanly.
-    printf '%s\n' "$pw" > "$f"
-    _IPERF_ORCH_PW_FILE="$f"
-    return 0
-}
-
-# Tear down the password file (if any). Safe to call multiple times.
-_scrub_ssh_password() {
-    if [ -n "${_IPERF_ORCH_PW_FILE:-}" ] && [ -f "$_IPERF_ORCH_PW_FILE" ]; then
-        rm -f "$_IPERF_ORCH_PW_FILE"
-    fi
-    unset _IPERF_ORCH_PW_FILE
-}
-
-# Drive ssh-copy-id to a single host using `expect`. Reads the password
-# from the chmod-600 temp file pointed to by env var _IPERF_ORCH_PW_FILE
-# (set by _resolve_ssh_password). Using a file rather than an env var
-# avoids /proc/$pid/environ exposure. Returns 0 on success.
-_ssh_copy_id_expect() {
-    local host="$1"
-    expect -f - "$SSH_USER" "$host" <<'EXPECT_EOF'
-log_user 0
-set timeout 30
-set user [lindex $argv 0]
-set host [lindex $argv 1]
-if {![info exists env(_IPERF_ORCH_PW_FILE)]} {
-    puts stderr "expect: _IPERF_ORCH_PW_FILE not set"
-    exit 3
-}
-set pwfile $env(_IPERF_ORCH_PW_FILE)
-if {[catch {open $pwfile r} fp]} {
-    puts stderr "expect: cannot open password file $pwfile: $fp"
-    exit 3
-}
-set password [string trimright [read $fp] "\n"]
-close $fp
-set sent_pw 0
-spawn ssh-copy-id -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -- $user@$host
-expect {
-    -re {\(yes/no[^)]*\)\??} { send "yes\r"; exp_continue }
-    -nocase -re {password:[ ]*$} {
-        if {$sent_pw} {
-            puts stderr "authentication failed for $user@$host"
-            exit 5
-        }
-        incr sent_pw
-        send -- "$password\r"
-        exp_continue
-    }
-    -nocase "permission denied" {
-        puts stderr "permission denied for $user@$host"
-        exit 5
-    }
-    timeout { puts stderr "timeout connecting to $host"; exit 2 }
-    eof {}
-}
-catch wait result
-exit [lindex $result 3]
-EXPECT_EOF
-}
-
-# Parallel worker for the expect-driven path. _IPERF_ORCH_PW must be exported
-# in the parent so it's inherited by this subshell.
-_worker_ssh_copy_id() {
-    local host="$1"
-    log "Distributing key to $host (automated via expect)"
-    if _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
-        vlog "  OK: $host"
-        return 0
-    fi
-    warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-    return 1
-}
-
-cmd_ssh_setup() {
-    # Accept the password-source flags here too, not just as global flags.
-    # The mental model is `ssh-setup --ask-password`, and it was easy to
-    # land on the per-host interactive prompt path when the flag came
-    # after the subcommand.
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --ask-password)     SSH_ASK_PASSWORD=yes ;;
-            --password-file=*)  SSH_PASSWORD_FILE="${arg#*=}" ;;
-            --password-env=*)   SSH_PASSWORD_ENV="${arg#*=}" ;;
-            *) die "ssh-setup: unknown argument: $arg (expected --ask-password, --password-file=PATH, --password-env=VAR)" ;;
-        esac
-    done
-
-    # Server list must exist. The interactive path below would otherwise
-    # silently no-op (read_servers' die fires inside a $() subshell).
-    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
-        || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
-
-    # Make sure we have a key
-    local key="$HOME/.ssh/id_ed25519"
-    if [ ! -f "$key" ] && [ ! -f "$HOME/.ssh/id_rsa" ]; then
-        log "No SSH key found; generating $key"
-        mkdir -p "$HOME/.ssh"
-        chmod 700 "$HOME/.ssh"
-        ssh-keygen -t ed25519 -N "" -f "$key" -q
-    fi
-
-    # Resolve password source (if any). When set, we use `expect` to drive
-    # ssh-copy-id non-interactively, in parallel across hosts.
-    local use_expect=0
-    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        command -v expect >/dev/null 2>&1 \
-            || die "automated password entry requires 'expect' (install with: apt install expect / dnf install expect / brew install expect)"
-        _resolve_ssh_password \
-            || die "could not resolve SSH password (see above)"
-        # Export the path so subshells (parallel workers -> expect)
-        # inherit it. Make sure the temp file is unlinked even on
-        # signal so the password doesn't outlive an interrupted run.
-        export _IPERF_ORCH_PW_FILE
-        trap '_scrub_ssh_password' EXIT INT TERM
-        use_expect=1
-    fi
-
-    local failure_count=0
-    if [ "$use_expect" = "1" ]; then
-        log "Distributing keys in parallel (max $IPERF_SSH_JOBS concurrent)"
-        parallel_hosts _worker_ssh_copy_id
-        failure_count=${#PARALLEL_FAILED[@]}
-        _scrub_ssh_password
-        trap - EXIT INT TERM
-    else
-        # Interactive fallback: must stay sequential so password prompts
-        # don't collide on stdin.
-        local hosts; hosts=$(read_servers)
-        local host
-        while IFS= read -r host; do
-            [ -z "$host" ] && continue
-            log "Distributing key to $host (you may be prompted for the password)"
-            if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
-                vlog "  OK: $host"
-            else
-                warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-                failure_count=$((failure_count + 1))
-            fi
-        done <<< "$hosts"
-    fi
-
-    if [ "$failure_count" -eq 0 ]; then
-        log "SSH keys distributed to all hosts"
-    else
-        warn "ssh-setup completed with $failure_count failure(s)"
     fi
 }
 
@@ -4839,10 +4603,9 @@ PYEOF
 }
 
 #------------------------------------------------------------------------------
-# doctor: probe orchestrator-host prerequisites (ssh tools, expect when a
-# password source is configured, python + matplotlib stack) up front so a
-# missing dep fails fast instead of crashing 90s into `all`. Returns
-# non-zero if anything is missing.
+# doctor: probe orchestrator-host prerequisites (ssh tools, python +
+# matplotlib stack) up front so a missing dep fails fast instead of
+# crashing 90s into `all`. Returns non-zero if anything is missing.
 _doctor_check_tool() {
     local tool="$1" hint="$2"
     if command -v "$tool" >/dev/null 2>&1; then
@@ -4932,14 +4695,6 @@ cmd_doctor() {
 
     _doctor_check_tool ssh          "install openssh-client" || missing=$((missing + 1))
     _doctor_check_tool scp          "install openssh-client" || missing=$((missing + 1))
-    _doctor_check_tool ssh-copy-id  "install openssh-client" || missing=$((missing + 1))
-    _doctor_check_tool ssh-keygen   "install openssh-client" || missing=$((missing + 1))
-
-    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        _doctor_check_tool expect \
-            "install: apt install expect / dnf install expect / brew install expect" \
-            || missing=$((missing + 1))
-    fi
 
     _doctor_check_tool "$PYTHON_BIN" "install python3" || missing=$((missing + 1))
 
@@ -5011,7 +4766,6 @@ cmd_all() {
         fi
     }
 
-    cmd_ssh_setup
     cmd_check_iperf;         _all_gate check-iperf
     cmd_check_servers;       _all_gate check-servers
     cmd_start_servers;       _all_gate start-servers
@@ -5062,7 +4816,6 @@ shift || true
 case "$cmd" in
     "")                 first_run_banner ;;
     status)             cmd_status "$@" ;;
-    ssh-setup)          cmd_ssh_setup "$@" ;;
     check-iperf)        cmd_check_iperf ;;
     check-servers)      cmd_check_servers ;;
     start-servers)      cmd_start_servers ;;
@@ -5744,7 +5497,7 @@ test_orchestrator_uses_set_u() {
 # exiting 2 (the "unknown command" sentinel).
 test_every_documented_subcommand_is_dispatched() {
     local subcommands=(
-        status ssh-setup
+        status
         check-iperf check-servers
         start-servers create-scripts distribute-scripts
         run-tests collect-results stop-servers cleanup
@@ -5841,7 +5594,7 @@ test_help_includes_files_section() {
 
 test_help_includes_setup_quickstart() {
     run_orch help-advanced
-    assert_contains "$RUN_OUT" "ssh-setup" "help should mention ssh-setup" || return 1
+    assert_contains "$RUN_OUT" "start-servers" "help should mention start-servers" || return 1
     assert_contains "$RUN_OUT" "--servers" "help should mention --servers flag" || return 1
 }
 
@@ -5862,7 +5615,7 @@ report_tests
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Martin J. Gallagher
 # End-to-end tests for cmd_all -- the convenience entry point that
-# runs the full pipeline (ssh-setup, check-iperf, check-servers,
+# runs the full pipeline (check-iperf, check-servers,
 # start-servers, create-scripts, distribute-scripts, run-tests,
 # collect-results, stop-servers, cleanup, parse-csv, parse-cpu,
 # make-pivot, make-heatmap).
@@ -5979,17 +5732,6 @@ echo "12:00:01     all    1.00    0.00    0.50    0.00    0.00    0.20    0.00  
 echo "12:00:01       0    1.00    0.00    0.50    0.00    0.00    0.20    0.00    0.00    0.00   98.30"
 SHIM
     chmod +x "$FAKE_BIN/mpstat"
-
-    cat > "$FAKE_BIN/ssh-keygen" <<'SHIM'
-#!/usr/bin/env bash
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/ssh-keygen"
-    cat > "$FAKE_BIN/ssh-copy-id" <<'SHIM'
-#!/usr/bin/env bash
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/ssh-copy-id"
 
     mkdir -p "$TEST_TMPDIR/home/.ssh"
     : > "$TEST_TMPDIR/home/.ssh/id_ed25519"
@@ -6856,8 +6598,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test_helper.bash
 source "$DIR/test_helper.bash"
 
-# Build a minimal but realistic FAKE_BIN with the four ssh tools
-# present, so doctor can succeed-or-fail in a controlled way per test.
+# Build a minimal but realistic FAKE_BIN with the ssh tools doctor
+# probes present, so doctor can succeed-or-fail in a controlled way per test.
 populate_fake_bin() {
     mkdir -p "$FAKE_BIN"
     local tool
@@ -6882,25 +6624,23 @@ run_doctor() {
 # ---- Output / status -----------------------------------------------------
 
 test_doctor_prints_header() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     run_doctor
     assert_contains "$RUN_OUT" "doctor: orchestrator-host prerequisites" || return 1
 }
 
 test_doctor_all_tools_present_succeeds() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     run_doctor
     # The OK lines for each ssh tool should appear.
     assert_contains "$RUN_OUT" "OK  ssh" || return 1
     assert_contains "$RUN_OUT" "OK  scp" || return 1
-    assert_contains "$RUN_OUT" "OK  ssh-copy-id" || return 1
-    assert_contains "$RUN_OUT" "OK  ssh-keygen" || return 1
     # We don't have numpy/pandas/matplotlib in the test env, so doctor
     # WILL flag them. We only assert about the ssh tools here.
 }
 
 test_doctor_missing_ssh_is_flagged() {
-    populate_fake_bin scp ssh-copy-id ssh-keygen
+    populate_fake_bin scp
     # No ssh in FAKE_BIN, and our test env's PATH=$FAKE_BIN:/usr/bin:/bin --
     # ssh might still be in /usr/bin. Check if so.
     if [ -e /usr/bin/ssh ] || [ -e /bin/ssh ]; then
@@ -6914,7 +6654,7 @@ test_doctor_missing_ssh_is_flagged() {
 }
 
 test_doctor_reports_missing_count_in_summary() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     run_doctor
     # The test env definitely lacks numpy/pandas/matplotlib, so the
     # warning "doctor: N issue(s) above" should appear.
@@ -6931,45 +6671,16 @@ test_doctor_exits_zero_when_all_ok() {
         echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/pandas/matplotlib not installed"
         return 0
     fi
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     run_doctor
     assert_status 0 "$RUN_RC" "doctor should exit 0 when nothing missing" || return 1
     assert_contains "$RUN_OUT" "all prerequisites OK" || return 1
 }
 
-# ---- Conditional expect check ------------------------------------------
-
-test_doctor_skips_expect_check_when_no_password_source() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
-    run_doctor
-    # Without --password-* / --ask-password, the expect probe is skipped.
-    if echo "$RUN_OUT" | grep -q -i "expect"; then
-        echo "expect probe should not run without a password source" >&2
-        echo "$RUN_OUT" >&2
-        return 1
-    fi
-}
-
-test_doctor_runs_expect_check_when_password_file_set() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "secret" > "$pwf"
-    chmod 600 "$pwf"
-    PATH="$FAKE_BIN:/usr/bin:/bin" run_orch --password-file "$pwf" doctor
-    # expect isn't installed in this env -> should be flagged MISSING.
-    assert_contains "$RUN_OUT" "expect" "should mention expect probe" || return 1
-}
-
-test_doctor_runs_expect_check_when_ask_password_set() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
-    PATH="$FAKE_BIN:/usr/bin:/bin" run_orch --ask-password doctor
-    assert_contains "$RUN_OUT" "expect" "should mention expect probe" || return 1
-}
-
 # ---- Python module probes ------------------------------------------------
 
 test_doctor_probes_each_required_python_module() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     run_doctor
     # numpy/pandas/matplotlib should each be probed (either as OK or
     # MISSING depending on the env).
@@ -6987,7 +6698,7 @@ test_doctor_probes_each_required_python_module() {
 }
 
 test_doctor_uses_python_bin_flag() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     # Custom python interpreter wrapper that emits a marker line.
     local fakepy="$TEST_TMPDIR/python-marker"
     cat > "$fakepy" <<'EOF'
@@ -7007,7 +6718,7 @@ EOF
 test_doctor_tool_without_version_flag_reports_no_version_output() {
     # Tool exists but doesn't accept --version; doctor should still
     # mark it OK (with "(no --version output)" annotation).
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     # Replace ssh with one that ignores --version and prints nothing.
     cat > "$FAKE_BIN/ssh" <<'SHIM'
 #!/usr/bin/env bash
@@ -7022,7 +6733,7 @@ SHIM
 # ---- cmd_all integration -----------------------------------------------
 
 test_cmd_all_runs_doctor_first() {
-    populate_fake_bin ssh scp ssh-copy-id ssh-keygen
+    populate_fake_bin ssh scp
     # cmd_all without server list should still get to doctor (which
     # then succeeds for ssh tools, fails on python modules) before
     # dying on missing list. We just check that the doctor header
@@ -7038,9 +6749,6 @@ run_test test_doctor_all_tools_present_succeeds
 run_test test_doctor_missing_ssh_is_flagged
 run_test test_doctor_reports_missing_count_in_summary
 run_test test_doctor_exits_zero_when_all_ok
-run_test test_doctor_skips_expect_check_when_no_password_source
-run_test test_doctor_runs_expect_check_when_password_file_set
-run_test test_doctor_runs_expect_check_when_ask_password_set
 run_test test_doctor_probes_each_required_python_module
 run_test test_doctor_uses_python_bin_flag
 run_test test_doctor_tool_without_version_flag_reports_no_version_output
@@ -7057,7 +6765,6 @@ report_tests
 #
 #   IPERF_DIR, REMOTE_DIR, IPERF_PORT, IPERF_DURATION, IPERF_STREAMS,
 #   IPERF_SSH_JOBS, SSH_USER, SSH_OPTS, START_DELAY, PYTHON_BIN
-#   plus SSH_PASSWORD_FILE / SSH_PASSWORD_ENV / SSH_ASK_PASSWORD
 #
 # We verify each one actually changes behavior (or at least is
 # echoed back into help / generated artifacts) -- not just that
@@ -7266,249 +6973,6 @@ run_test test_ssh_opts_env_override_is_used
 run_test test_all_env_vars_set_at_once_dont_collide
 run_test test_env_var_invalid_int_is_rejected
 run_test test_env_var_zero_jobs_is_rejected
-
-report_tests
-===END===
-===FILE: tests/test_expect_integration.sh===
-#!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
-# Integration tests that drive the *real* `expect` interpreter against a
-# fake `ssh-copy-id` which emits realistic prompts. Unlike test_ssh_setup.sh
-# (which stubs `expect` itself and only verifies orchestration around it),
-# these tests actually execute the TCL heredoc inside _ssh_copy_id_expect
-# (see iperf_orchestrator.sh: function _ssh_copy_id_expect) and assert on
-# its prompt-handling, retry, and exit-status-propagation behaviour.
-#
-# Skips cleanly if `expect` is not installed on the test host.
-
-set -u
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=test_helper.bash
-source "$DIR/test_helper.bash"
-
-# Skip the whole file when expect is unavailable. We print a clear marker
-# and exit 0 so run_tests.sh treats this as a passing file.
-if ! command -v expect >/dev/null 2>&1; then
-    echo "  skipped: expect not installed (apt install expect / dnf install expect / brew install expect)"
-    exit 0
-fi
-
-# Install:
-#   - the orchestrator's normal fake ssh/scp shim (only used incidentally
-#     here, but harmless),
-#   - a fake ssh-copy-id whose behaviour is selected at runtime by reading
-#     $FAKE_BIN/sshcopyid.mode (set by each test before invoking the
-#     orchestrator). It writes everything it receives on stdin to
-#     $FAKE_BIN/received.log so tests can assert on the exact bytes the
-#     real expect script sent.
-#   - a pre-existing SSH key pair so cmd_ssh_setup skips ssh-keygen.
-install_real_expect_fakes() {
-    install_fake_ssh
-
-    cat > "$FAKE_BIN/ssh-copy-id" <<'SHIM'
-#!/usr/bin/env bash
-# Fake ssh-copy-id driven by mode file. Reads from stdin (pty slave)
-# and writes prompts to stdout. Strips trailing CR from each line so
-# tests don't have to care about pty line-ending translation.
-set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
-mode_file="$HERE/sshcopyid.mode"
-log="$HERE/received.log"
-mode="happy"
-[ -f "$mode_file" ] && mode="$(cat "$mode_file")"
-
-# Helper: read one line, strip trailing CR, append to received.log.
-read_one() {
-    local line=""
-    if IFS= read -r line; then
-        line="${line%$'\r'}"
-        printf '%s\n' "$line" >> "$log"
-        printf '%s' "$line"
-        return 0
-    fi
-    return 1
-}
-
-case "$mode" in
-    happy)
-        # Plain password prompt only.
-        printf "user@host's password: "
-        read_one >/dev/null || exit 1
-        exit 0
-        ;;
-    yesno_then_password)
-        # First the host-key prompt, then the password prompt.
-        printf 'The authenticity of host '\''x'\'' cannot be established.\n'
-        printf 'Are you sure you want to continue connecting (yes/no/[fingerprint])? '
-        read_one >/dev/null || exit 1
-        printf "user@host's password: "
-        read_one >/dev/null || exit 1
-        exit 0
-        ;;
-    retry_then_fail)
-        # First password prompt is answered, then we re-prompt to simulate
-        # a bad password. The expect TCL must NOT send a second time; it
-        # should detect the second prompt and exit 5 itself, which closes
-        # our pty. Our subsequent read returns EOF -> we exit non-zero,
-        # but expect has already reported failure first.
-        printf "user@host's password: "
-        read_one >/dev/null || exit 1
-        printf "user@host's password: "
-        # No more input will arrive -- expect exits 5 and closes the pty.
-        # Read will fail with EOF; exit any non-zero.
-        read_one >/dev/null || exit 1
-        exit 0
-        ;;
-    bad_exit)
-        # Answer the prompt normally, then exit with a non-zero status to
-        # verify the orchestrator records the failure (i.e. exit-status
-        # propagation through `catch wait` works).
-        printf "user@host's password: "
-        read_one >/dev/null || exit 1
-        exit 7
-        ;;
-    *)
-        echo "fake ssh-copy-id: unknown mode '$mode'" >&2
-        exit 99
-        ;;
-esac
-SHIM
-    chmod +x "$FAKE_BIN/ssh-copy-id"
-    : > "$FAKE_BIN/received.log"
-
-    # Pre-create a key pair so cmd_ssh_setup's keygen branch is skipped.
-    mkdir -p "$TEST_TMPDIR/home/.ssh"
-    : > "$TEST_TMPDIR/home/.ssh/id_ed25519"
-    : > "$TEST_TMPDIR/home/.ssh/id_ed25519.pub"
-    chmod 600 "$TEST_TMPDIR/home/.ssh/id_ed25519"
-    export HOME="$TEST_TMPDIR/home"
-}
-
-set_mode() {
-    echo "$1" > "$FAKE_BIN/sshcopyid.mode"
-}
-
-prep_servers() {
-    local src="$TEST_TMPDIR/srv.txt"
-    : > "$src"
-    local h
-    for h in "$@"; do
-        printf '%s\n' "$h" >> "$src"
-    done
-    PATH="$FAKE_BIN:$PATH" run_orch init "$src" >/dev/null 2>&1
-}
-
-# Run the orchestrator with our fakes prepended to PATH but NOT shadowing
-# the real `expect` -- the system PATH still resolves /usr/bin/expect.
-# IPERF_PROGRESS=0 keeps the parallel-hosts drainer quiet.
-run_with_fakes() {
-    IPERF_PROGRESS=0 PATH="$FAKE_BIN:$PATH" run_orch "$@"
-}
-
-# ---- Case 1: happy path through real expect ------------------------------
-
-test_real_expect_sends_password_on_prompt() {
-    install_real_expect_fakes
-    set_mode happy
-    prep_servers host1
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "s3cret-pw" > "$pwf"; chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" "ssh-setup should succeed end-to-end" || {
-        echo "--- run output ---" >&2
-        echo "$RUN_OUT" >&2
-        return 1
-    }
-    # The fake recorded everything it received on stdin. The first (and
-    # only) line should be the password.
-    assert_file_exists "$FAKE_BIN/received.log" || return 1
-    local first
-    first="$(head -n1 "$FAKE_BIN/received.log")"
-    assert_eq "s3cret-pw" "$first" "expect should have sent the password" || return 1
-    grep -q '^SSH_KEYS_DISTRIBUTED=yes$' "$IPERF_DIR/state" \
-        || { echo "SSH_KEYS_DISTRIBUTED not set" >&2; return 1; }
-}
-
-# ---- Case 2: host-key (yes/no) prompt is auto-answered -------------------
-
-test_real_expect_answers_yesno_then_password() {
-    install_real_expect_fakes
-    set_mode yesno_then_password
-    prep_servers host2
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "another-pw" > "$pwf"; chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" "ssh-setup should handle yes/no + password" || {
-        echo "--- run output ---" >&2
-        echo "$RUN_OUT" >&2
-        return 1
-    }
-    # received.log: line 1 = "yes", line 2 = the password.
-    local n yesno pw
-    n=$(wc -l < "$FAKE_BIN/received.log")
-    assert_eq "2" "$n" "fake should have received exactly two lines" || {
-        echo "--- received.log ---" >&2
-        cat "$FAKE_BIN/received.log" >&2
-        return 1
-    }
-    yesno="$(sed -n '1p' "$FAKE_BIN/received.log")"
-    pw="$(sed -n '2p' "$FAKE_BIN/received.log")"
-    assert_eq "yes" "$yesno" "expect should auto-answer yes to host-key prompt" || return 1
-    assert_eq "another-pw" "$pw" "expect should send password after yes" || return 1
-}
-
-# ---- Case 3: re-prompt -> auth retry-and-fail (exit 5) -------------------
-
-test_real_expect_fails_on_second_password_prompt() {
-    install_real_expect_fakes
-    set_mode retry_then_fail
-    prep_servers host3
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "wrong-pw" > "$pwf"; chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    # cmd_ssh_setup itself returns 0 (it summarises failures) -- but the
-    # state file must NOT mark keys distributed, and the warn line must
-    # name our host.
-    if grep -q '^SSH_KEYS_DISTRIBUTED=yes$' "$IPERF_DIR/state" 2>/dev/null; then
-        echo "SSH_KEYS_DISTRIBUTED was set despite auth failure" >&2
-        echo "--- run output ---" >&2
-        echo "$RUN_OUT" >&2
-        return 1
-    fi
-    assert_contains "$RUN_OUT" "FAILED: host3" "should warn about failed host" || return 1
-    # And expect must have only sent the password ONCE (the TCL guards
-    # against a second send via the sent_pw flag).
-    local n
-    n=$(grep -c '^wrong-pw$' "$FAKE_BIN/received.log")
-    assert_eq "1" "$n" "password should be sent exactly once before giving up" || {
-        echo "--- received.log ---" >&2
-        cat "$FAKE_BIN/received.log" >&2
-        return 1
-    }
-}
-
-# ---- Case 4: ssh-copy-id exit status is propagated -----------------------
-
-test_real_expect_propagates_nonzero_exit() {
-    install_real_expect_fakes
-    set_mode bad_exit
-    prep_servers host4
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "ok-pw" > "$pwf"; chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    if grep -q '^SSH_KEYS_DISTRIBUTED=yes$' "$IPERF_DIR/state" 2>/dev/null; then
-        echo "SSH_KEYS_DISTRIBUTED was set despite ssh-copy-id exit 7" >&2
-        return 1
-    fi
-    assert_contains "$RUN_OUT" "FAILED: host4" \
-        "non-zero ssh-copy-id exit must surface as a host failure" || return 1
-}
-
-run_test test_real_expect_sends_password_on_prompt
-run_test test_real_expect_answers_yesno_then_password
-run_test test_real_expect_fails_on_second_password_prompt
-run_test test_real_expect_propagates_nonzero_exit
 
 report_tests
 ===END===
@@ -8265,7 +7729,6 @@ test_help_with_no_args_prints_first_run_banner() {
     assert_status 0 "$RUN_RC" "no-args invocation should exit 0" || return 1
     assert_contains "$RUN_OUT" "iperf-orchestrator.sh" "banner missing program name" || return 1
     assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
-    assert_contains "$RUN_OUT" "ssh-setup" "banner should mention ssh-setup" || return 1
     assert_contains "$RUN_OUT" "--servers" "banner should mention --servers" || return 1
     assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
     # Banner should be terse, not the full usage.
@@ -8770,16 +8233,6 @@ test_ssh_run_propagates_user_and_host_to_argv() {
     }
 }
 
-test_ssh_run_interactive_uses_non_batch_opts() {
-    # ssh_run_interactive is identical to ssh_run except SSH_OPTS not
-    # SSH_BATCH_OPTS. Both should hit the fake. Sanity check that the
-    # function exists and is callable without error.
-    install_fake_ssh
-    source_orch
-    PATH="$FAKE_BIN:$PATH" ssh_run_interactive somehost "echo from-interactive"
-    grep -q "somehost" "$FAKE_SSH_LOG" || return 1
-}
-
 # ---- read_servers + ts integration --------------------------------------
 
 test_log_includes_timestamp_prefix() {
@@ -8808,7 +8261,6 @@ run_test test_validate_uint_accepts_decimal_zero_for_min_zero
 run_test test_validate_uint_rejects_empty_string
 run_test test_validate_uint_rejects_huge_garbage
 run_test test_ssh_run_propagates_user_and_host_to_argv
-run_test test_ssh_run_interactive_uses_non_batch_opts
 run_test test_log_includes_timestamp_prefix
 
 report_tests
@@ -8908,7 +8360,7 @@ source "$DIR/test_helper.bash"
 install_failable_ssh() {
     install_fake_ssh
     local tool
-    for tool in scp ssh-copy-id ssh-keygen; do
+    for tool in scp ssh-keygen; do
         echo '#!/usr/bin/env bash' > "$FAKE_BIN/$tool"
         echo 'exit 0' >> "$FAKE_BIN/$tool"
         chmod +x "$FAKE_BIN/$tool"
@@ -12117,271 +11569,6 @@ run_test test_read_servers_strips_surrounding_whitespace
 run_test test_read_servers_dies_when_file_missing
 run_test test_read_servers_handles_ipv4_and_hostnames
 run_test test_read_servers_count_matches_input
-
-report_tests
-===END===
-===FILE: tests/test_ssh_setup.sh===
-#!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
-# Tests for cmd_ssh_setup and the password-source resolver. Covers:
-#   - --password-file / SSH_PASSWORD_FILE
-#   - --password-env  / SSH_PASSWORD_ENV
-#   - --ask-password  / SSH_ASK_PASSWORD
-#   - missing `expect` binary -> dies with helpful message
-#   - empty / missing password file -> dies
-#   - permissions warning on a wide-open password file
-#   - parallel expect-driven path triggers when password source is set
-
-set -u
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=test_helper.bash
-source "$DIR/test_helper.bash"
-
-# Install fake `expect`, `ssh-copy-id`, `ssh-keygen`. The fake expect
-# just records that it was invoked. The fake ssh-copy-id always
-# succeeds. The fake ssh-keygen creates an empty pair of files.
-install_fake_setup_tools() {
-    install_fake_ssh
-    cat > "$FAKE_BIN/expect" <<'SHIM'
-#!/usr/bin/env bash
-echo "expect $*" >> "$FAKE_BIN/expect_calls.log"
-# Read stdin so the heredoc is consumed.
-cat >/dev/null
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/expect"
-    : > "$FAKE_BIN/expect_calls.log"
-
-    cat > "$FAKE_BIN/ssh-copy-id" <<'SHIM'
-#!/usr/bin/env bash
-echo "ssh-copy-id $*" >> "$FAKE_BIN/copyid_calls.log"
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/ssh-copy-id"
-    : > "$FAKE_BIN/copyid_calls.log"
-
-    # Generate a real-looking key pair on demand to avoid the script's
-    # ssh-keygen path. We create the pair upfront so cmd_ssh_setup
-    # skips the keygen branch entirely.
-    mkdir -p "$TEST_TMPDIR/home/.ssh"
-    : > "$TEST_TMPDIR/home/.ssh/id_ed25519"
-    : > "$TEST_TMPDIR/home/.ssh/id_ed25519.pub"
-    chmod 600 "$TEST_TMPDIR/home/.ssh/id_ed25519"
-    export HOME="$TEST_TMPDIR/home"
-}
-
-# Helper: prep a fresh server list (no init in stateless mode).
-prep_servers() {
-    write_server_list "$@" >/dev/null
-}
-
-run_with_fakes() {
-    PATH="$FAKE_BIN:$PATH" run_orch "$@"
-}
-
-# ---- Password source: file ------------------------------------------------
-
-test_ssh_setup_with_password_file_uses_expect() {
-    install_fake_setup_tools
-    prep_servers a b c
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "secretpass" > "$pwf"
-    chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" "ssh-setup with --password-file should succeed" || return 1
-    # expect should have been invoked once per host (parallel).
-    local n
-    n=$(wc -l < "$FAKE_BIN/expect_calls.log")
-    assert_eq "3" "$n" "expect should run once per host" || return 1
-    assert_contains "$RUN_OUT" "SSH keys distributed to all hosts" \
-        "expected success log line" || return 1
-}
-
-test_ssh_setup_password_file_missing_dies() {
-    install_fake_setup_tools
-    prep_servers a
-    run_with_fakes --password-file /nonexistent/pw.txt ssh-setup
-    assert_status 1 "$RUN_RC" "missing password file should die" || return 1
-    assert_contains "$RUN_OUT" "password file not found" || return 1
-}
-
-test_ssh_setup_empty_password_file_dies() {
-    install_fake_setup_tools
-    prep_servers a
-    local pwf="$TEST_TMPDIR/empty.txt"
-    : > "$pwf"
-    chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 1 "$RUN_RC" "empty password file should die" || return 1
-    assert_contains "$RUN_OUT" "is empty" || return 1
-}
-
-test_ssh_setup_warns_on_world_readable_password_file() {
-    install_fake_setup_tools
-    prep_servers a
-    local pwf="$TEST_TMPDIR/loose.txt"
-    echo "secretpass" > "$pwf"
-    chmod 644 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" "should still proceed despite warning" || return 1
-    assert_contains "$RUN_OUT" "permissions" "should warn about loose perms" || return 1
-    assert_contains "$RUN_OUT" "chmod 600" "should suggest chmod 600" || return 1
-}
-
-# ---- Password source: env var --------------------------------------------
-
-test_ssh_setup_with_password_env_uses_expect() {
-    install_fake_setup_tools
-    prep_servers a b
-    MY_TEST_PW="hunter2" run_with_fakes --password-env MY_TEST_PW ssh-setup
-    assert_status 0 "$RUN_RC" || return 1
-    local n
-    n=$(wc -l < "$FAKE_BIN/expect_calls.log")
-    assert_eq "2" "$n" "expect once per host with --password-env" || return 1
-}
-
-test_ssh_setup_password_env_unset_dies() {
-    install_fake_setup_tools
-    prep_servers a
-    # Don't define UNDEFINED_VAR.
-    unset UNDEFINED_VAR 2>/dev/null || true
-    run_with_fakes --password-env UNDEFINED_VAR ssh-setup
-    assert_status 1 "$RUN_RC" "unset env var should die" || return 1
-    assert_contains "$RUN_OUT" "is empty or unset" || return 1
-}
-
-test_ssh_setup_password_env_empty_dies() {
-    install_fake_setup_tools
-    prep_servers a
-    EMPTY_VAR="" run_with_fakes --password-env EMPTY_VAR ssh-setup
-    assert_status 1 "$RUN_RC" "empty env var should die" || return 1
-    assert_contains "$RUN_OUT" "is empty or unset" || return 1
-}
-
-# ---- Missing expect binary ------------------------------------------------
-
-test_ssh_setup_dies_when_expect_unavailable() {
-    install_fake_setup_tools
-    # Drop the fake expect so PATH lookup fails.
-    rm -f "$FAKE_BIN/expect"
-    prep_servers a
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "p" > "$pwf"; chmod 600 "$pwf"
-    # Build a sandbox bin dir that mirrors /bin + /usr/bin but omits
-    # `expect`. This keeps the test robust on hosts where the maintainer
-    # has `expect` installed system-wide (required to run the
-    # test_expect_integration.sh suite) -- without the sandbox, the
-    # orchestrator would resolve /usr/bin/expect and the test premise
-    # ("expect missing") would silently break.
-    local sandbox="$TEST_TMPDIR/no-expect-bin"
-    mkdir -p "$sandbox"
-    local d f b
-    for d in /bin /usr/bin; do
-        [ -d "$d" ] || continue
-        for f in "$d"/*; do
-            [ -e "$f" ] || continue
-            b=$(basename "$f")
-            [ "$b" = "expect" ] && continue
-            [ -e "$sandbox/$b" ] && continue
-            ln -s "$f" "$sandbox/$b"
-        done
-    done
-    HOME="$TEST_TMPDIR/home" PATH="$FAKE_BIN:$sandbox" run_orch --password-file "$pwf" ssh-setup
-    assert_ne 0 "$RUN_RC" "should have failed without expect on PATH" || return 1
-    assert_contains "$RUN_OUT" "expect" "error message should mention 'expect'" || return 1
-}
-
-# ---- Interactive (non-expect) path ---------------------------------------
-
-test_ssh_setup_without_password_uses_interactive_ssh_copy_id() {
-    install_fake_setup_tools
-    prep_servers a b
-    # No password options -> falls back to ssh-copy-id sequentially.
-    run_with_fakes ssh-setup
-    assert_status 0 "$RUN_RC" || return 1
-    local n
-    n=$(wc -l < "$FAKE_BIN/copyid_calls.log")
-    assert_eq "2" "$n" "ssh-copy-id should be called once per host" || return 1
-    # No expect calls in this path.
-    local e
-    e=$(wc -l < "$FAKE_BIN/expect_calls.log")
-    assert_eq "0" "$e" "expect should NOT be invoked when no password source" || return 1
-    assert_contains "$RUN_OUT" "SSH keys distributed to all hosts" \
-        "expected success log line" || return 1
-}
-
-# ---- --ask-password flag -------------------------------------------------
-
-test_ask_password_flag_sets_state_var() {
-    # We can't actually drive an interactive password prompt in tests,
-    # but we can check that the flag is parsed without error and is
-    # echoed back in usage output.
-    install_fake_setup_tools
-    run_with_fakes --ask-password help
-    assert_status 0 "$RUN_RC" || return 1
-}
-
-# ---- Password is not exposed via process-list ---------------------------
-
-test_ssh_setup_does_not_pass_password_in_argv() {
-    install_fake_setup_tools
-    prep_servers a
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "secretpassword12345" > "$pwf"
-    chmod 600 "$pwf"
-    run_with_fakes --password-file "$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" || return 1
-    # The fake expect logs its own argv. The password should NOT be
-    # in there (it's passed through env var _IPERF_ORCH_PW).
-    if grep -q "secretpassword12345" "$FAKE_BIN/expect_calls.log"; then
-        echo "password leaked into argv" >&2
-        cat "$FAKE_BIN/expect_calls.log" >&2
-        return 1
-    fi
-}
-
-# ---- Server-list still required -----------------------------------------
-
-test_ssh_setup_dies_with_no_server_list() {
-    install_fake_setup_tools
-    unset IPERF_SERVERS
-    PATH="$FAKE_BIN:$PATH" run_orch --servers /no/such.txt ssh-setup
-    assert_ne 0 "$RUN_RC" "ssh-setup should fail without a server list" || return 1
-}
-
-# ---- Flag forms -----------------------------------------------------------
-
-test_password_file_flag_equals_form() {
-    install_fake_setup_tools
-    prep_servers a
-    local pwf="$TEST_TMPDIR/pw.txt"
-    echo "p" > "$pwf"; chmod 600 "$pwf"
-    run_with_fakes --password-file="$pwf" ssh-setup
-    assert_status 0 "$RUN_RC" || return 1
-}
-
-test_password_env_flag_equals_form() {
-    install_fake_setup_tools
-    prep_servers a
-    MYPW=p run_with_fakes --password-env=MYPW ssh-setup
-    assert_status 0 "$RUN_RC" || return 1
-}
-
-run_test test_ssh_setup_with_password_file_uses_expect
-run_test test_ssh_setup_password_file_missing_dies
-run_test test_ssh_setup_empty_password_file_dies
-run_test test_ssh_setup_warns_on_world_readable_password_file
-run_test test_ssh_setup_with_password_env_uses_expect
-run_test test_ssh_setup_password_env_unset_dies
-run_test test_ssh_setup_password_env_empty_dies
-run_test test_ssh_setup_dies_when_expect_unavailable
-run_test test_ssh_setup_without_password_uses_interactive_ssh_copy_id
-run_test test_ask_password_flag_sets_state_var
-run_test test_ssh_setup_does_not_pass_password_in_argv
-run_test test_ssh_setup_dies_with_no_server_list
-run_test test_password_file_flag_equals_form
-run_test test_password_env_flag_equals_form
 
 report_tests
 ===END===
