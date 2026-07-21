@@ -64,12 +64,14 @@ jobs:
 ===FILE: .github/workflows/publish.yml===
 name: Publish to PyPI
 
-# Publishes the package when a GitHub Release is published. Uses PyPI
-# "trusted publishing" (OIDC) so no API token needs to be stored as a secret;
-# configure the trusted publisher on PyPI first (see PUBLISHING.md).
+# Publishes the package when a GitHub Release is published, or on a manual
+# workflow_dispatch. Uses PyPI "trusted publishing" (OIDC) so no API token
+# needs to be stored as a secret; configure the trusted publisher on PyPI
+# first (see PUBLISHING.md).
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -118,6 +120,10 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: a re-run (or a later Release-triggered run) for an
+          # already-published version is a no-op instead of a hard failure.
+          skip-existing: true
 ===END===
 ===FILE: .gitignore===
 # Python build / packaging artifacts
