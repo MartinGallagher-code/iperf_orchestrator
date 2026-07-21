@@ -79,8 +79,11 @@ test_doctor_reports_missing_count_in_summary() {
 }
 
 test_doctor_exits_zero_when_all_ok() {
-    # Only feasible if the entire stack happens to be installed.
-    if ! python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+    # Only feasible if the stack is importable by the SAME interpreter doctor
+    # resolves under its restricted PATH (/usr/bin/python3) -- not whatever
+    # python3 happens to be first on the ambient PATH (e.g. a CI setup-python
+    # venv where the modules were pip-installed but /usr/bin/python3 lacks them).
+    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
         echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/pandas/matplotlib not installed"
         return 0
     fi

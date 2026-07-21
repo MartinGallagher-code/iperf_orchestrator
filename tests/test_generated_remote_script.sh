@@ -133,9 +133,23 @@ test_generated_script_falls_back_to_proc_stat_when_mpstat_missing() {
     mkdir -p "$workdir"
     cp "$(scripts_dir)/run_${script}_${IPERF_RUN_ID}.sh" "$workdir/run_iperf.sh"
     chmod +x "$workdir/run_iperf.sh"
-    # Restricted PATH: only fake bin + system core so coreutils still work
-    # but mpstat is unavailable.
-    PATH="$FAKE_BIN:/usr/bin:/bin" bash "$workdir/run_iperf.sh" 0 >"$workdir/out" 2>&1
+    # Build a PATH that keeps coreutils but genuinely lacks mpstat, so the
+    # generated script's `command -v mpstat` fails even on hosts where sysstat
+    # is installed (e.g. CI runners) — otherwise a real /usr/bin/mpstat leaks
+    # in and the fallback path is never taken. Symlink every base binary
+    # except mpstat into a sandbox dir.
+    local nompstat="$TEST_TMPDIR/nompstat-bin"
+    mkdir -p "$nompstat"
+    local d b bn
+    for d in /usr/bin /bin; do
+        [ -d "$d" ] || continue
+        for b in "$d"/*; do
+            bn=$(basename "$b")
+            [ "$bn" = "mpstat" ] && continue
+            [ -e "$nompstat/$bn" ] || ln -s "$b" "$nompstat/$bn" 2>/dev/null || true
+        done
+    done
+    PATH="$FAKE_BIN:$nompstat" bash "$workdir/run_iperf.sh" 0 >"$workdir/out" 2>&1
     [ -f "$workdir/cpu_${script}_${IPERF_RUN_ID}.log" ] || {
         echo "expected cpu_${script}_${IPERF_RUN_ID}.log to be created" >&2
         return 1
