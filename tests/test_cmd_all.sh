@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Martin J. Gallagher
 # End-to-end tests for cmd_all -- the convenience entry point that
-# runs the full pipeline (ssh-setup, check-iperf, check-servers,
+# runs the full pipeline (check-iperf, check-servers,
 # start-servers, create-scripts, distribute-scripts, run-tests,
 # collect-results, stop-servers, cleanup, parse-csv, parse-cpu,
 # make-pivot, make-heatmap).
@@ -119,17 +119,6 @@ echo "12:00:01     all    1.00    0.00    0.50    0.00    0.00    0.20    0.00  
 echo "12:00:01       0    1.00    0.00    0.50    0.00    0.00    0.20    0.00    0.00    0.00   98.30"
 SHIM
     chmod +x "$FAKE_BIN/mpstat"
-
-    cat > "$FAKE_BIN/ssh-keygen" <<'SHIM'
-#!/usr/bin/env bash
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/ssh-keygen"
-    cat > "$FAKE_BIN/ssh-copy-id" <<'SHIM'
-#!/usr/bin/env bash
-exit 0
-SHIM
-    chmod +x "$FAKE_BIN/ssh-copy-id"
 
     mkdir -p "$TEST_TMPDIR/home/.ssh"
     : > "$TEST_TMPDIR/home/.ssh/id_ed25519"

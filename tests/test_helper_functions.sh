@@ -160,16 +160,6 @@ test_ssh_run_propagates_user_and_host_to_argv() {
     }
 }
 
-test_ssh_run_interactive_uses_non_batch_opts() {
-    # ssh_run_interactive is identical to ssh_run except SSH_OPTS not
-    # SSH_BATCH_OPTS. Both should hit the fake. Sanity check that the
-    # function exists and is callable without error.
-    install_fake_ssh
-    source_orch
-    PATH="$FAKE_BIN:$PATH" ssh_run_interactive somehost "echo from-interactive"
-    grep -q "somehost" "$FAKE_SSH_LOG" || return 1
-}
-
 # ---- read_servers + ts integration --------------------------------------
 
 test_log_includes_timestamp_prefix() {
@@ -198,7 +188,6 @@ run_test test_validate_uint_accepts_decimal_zero_for_min_zero
 run_test test_validate_uint_rejects_empty_string
 run_test test_validate_uint_rejects_huge_garbage
 run_test test_ssh_run_propagates_user_and_host_to_argv
-run_test test_ssh_run_interactive_uses_non_batch_opts
 run_test test_log_includes_timestamp_prefix
 
 report_tests

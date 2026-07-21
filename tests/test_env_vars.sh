@@ -6,7 +6,6 @@
 #
 #   IPERF_DIR, REMOTE_DIR, IPERF_PORT, IPERF_DURATION, IPERF_STREAMS,
 #   IPERF_SSH_JOBS, SSH_USER, SSH_OPTS, START_DELAY, PYTHON_BIN
-#   plus SSH_PASSWORD_FILE / SSH_PASSWORD_ENV / SSH_ASK_PASSWORD
 #
 # We verify each one actually changes behavior (or at least is
 # echoed back into help / generated artifacts) -- not just that

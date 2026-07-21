@@ -39,8 +39,7 @@
 # Results are gathered, parsed into CSV, pivoted, and rendered as a
 # heatmap + bar chart on a single image.
 #
-# Quick start:
-#   ./iperf-orchestrator.sh --servers servers.txt ssh-setup
+# Quick start (key-based SSH to every host must already be configured):
 #   ./iperf-orchestrator.sh --servers servers.txt all
 #
 # The script is stateless: nothing is persisted between invocations except
@@ -123,12 +122,6 @@ SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -
 # Used when we want commands that require an existing key (no password prompts):
 SSH_BATCH_OPTS="$SSH_OPTS -o BatchMode=yes"
 
-# Optional password sources for ssh-setup. When any of these is set, the
-# script drives ssh-copy-id with `expect` instead of prompting interactively.
-SSH_PASSWORD_FILE="${SSH_PASSWORD_FILE:-}"
-SSH_PASSWORD_ENV="${SSH_PASSWORD_ENV:-}"
-SSH_ASK_PASSWORD="${SSH_ASK_PASSWORD:-no}"
-
 # Verbosity: 0 = quiet (errors and warnings only),
 #            1 = normal (default),
 #            2 = verbose (also prints every ssh/scp invocation).
@@ -202,11 +195,6 @@ while [ $# -gt 0 ]; do
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
         --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
-        --password-file)   _flag_need "$1" "${2:-}"; SSH_PASSWORD_FILE="$2"; shift 2 ;;
-        --password-file=*) SSH_PASSWORD_FILE="${1#*=}"; shift ;;
-        --password-env)    _flag_need "$1" "${2:-}"; SSH_PASSWORD_ENV="$2"; shift 2 ;;
-        --password-env=*)  SSH_PASSWORD_ENV="${1#*=}"; shift ;;
-        --ask-password)    SSH_ASK_PASSWORD=yes; shift ;;
         --dry-run|-n)      IPERF_DRY_RUN=1; shift ;;
         --verbose|-v)      IPERF_VERBOSITY=2; shift ;;
         --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
@@ -216,7 +204,7 @@ while [ $# -gt 0 ]; do
         # Unknown flags before any subcommand are treated as typos and
         # rejected at the top level. Once a subcommand has been seen,
         # unknown flags get forwarded so subcommand-specific flags
-        # (`cleanup --yes`, `ssh-setup --ask-password`, etc.) survive.
+        # (`cleanup --yes`, etc.) survive.
         --*|-?*)
             if [ "$_saw_subcommand" = "1" ]; then
                 _PARSED+=("$1"); shift
@@ -435,18 +423,6 @@ ssh_run() {
     fi
     # shellcheck disable=SC2086
     ssh $SSH_BATCH_OPTS "$SSH_USER@$host" "$@"
-}
-
-ssh_run_interactive() {
-    # Allows password prompts (used by ssh-setup before keys exist)
-    local host="$1"; shift
-    vlog "ssh (interactive) $SSH_USER@$host: $*"
-    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
-        echo "DRY-RUN ssh (interactive) $SSH_USER@$host -- $*"
-        return 0
-    fi
-    # shellcheck disable=SC2086
-    ssh $SSH_OPTS "$SSH_USER@$host" "$@"
 }
 
 scp_to() {
@@ -682,10 +658,8 @@ first_run_banner() {
     cat <<EOF
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
-Quick start:
-    1. $PROG --servers servers.txt ssh-setup --ask-password
-                                  # distribute SSH keys (one prompt for all hosts)
-    2. $PROG --servers servers.txt all
+Quick start (key-based SSH to every host must already be set up):
+    $PROG --servers servers.txt all
                                   # run the full pipeline + render heatmap.
                                   # Results land in $RESULTS_BASE/<run-id>/
 
@@ -710,11 +684,10 @@ USAGE:
     $PROG [flags] <command> [args]
 
 QUICK START:
-    $PROG --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
     $PROG --servers servers.txt all                        # run + analyze + cleanup
+    (key-based SSH to every host must already be configured)
 
 COMMON COMMANDS:
-    ssh-setup              Distribute SSH keys to every host (one-time)
     start-servers          Start iperf2 -s daemons on every host
     run-tests [MODE]       Run tests. MODE is one of:
                              parallel         (default) every host pairs up at once
@@ -722,7 +695,7 @@ COMMON COMMANDS:
                                               (--total-time SECONDS, --host-flows N)
     process                Pull results, parse CSV/CPU, render pivot + heatmap
     stop-servers           Kill iperf2 -s daemons
-    all [MODE]             ssh-setup + start-servers + run-tests + process + stop
+    all [MODE]             start-servers + run-tests + process + stop
     status                 List runs and probe hosts live
 
 COMMON FLAGS:
@@ -739,7 +712,6 @@ COMMON FLAGS:
     --length, -l SIZE          TCP r/w buffer size, e.g. 128K (iperf2 -l)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
-    --ask-password             prompt once for an SSH password, reuse for all hosts
     --output, -o DIR           results directory (default $RESULTS_BASE)
     -h, --help                 show this help
     --help-advanced            show every command, every flag, every env var
@@ -806,17 +778,13 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
                                Safe to point at a shared FS: filenames embed <host>_<run-id>.
     --python PATH              Python interpreter (default $PYTHON_BIN)
-    --password-file PATH       Read SSH password from PATH (single line; chmod 600).
-    --password-env VAR         Read SSH password from env var named VAR.
-    --ask-password             Prompt once for an SSH password and reuse it.
     -h, --help                 show the simple help
     --help-advanced            show this help
 
+Key-based SSH to every host must be configured before use (e.g. via
+ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
+
 SETUP:
-    ssh-setup              Generate ~/.ssh/id_ed25519 if needed and distribute the key.
-                           Default: per-host password prompt (sequential). With
-                           --password-file / --password-env / --ask-password, drive
-                           ssh-copy-id via 'expect' in parallel (capped by --ssh-jobs).
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts have iperf -s currently running
 
@@ -849,11 +817,10 @@ ANALYSIS:
                            iperf_results.csv.
 
 CONVENIENCE:
-    all [MODE] [--keep-going]  Run the full pipeline (doctor + ssh-setup +
-                               start-servers + run-tests + process + stop-servers
-                               + cleanup). --keep-going continues past per-host
-                               failures.
-    doctor                     Check local prerequisites (ssh tools, expect, Python,
+    all [MODE] [--keep-going]  Run the full pipeline (doctor + start-servers +
+                               run-tests + process + stop-servers + cleanup).
+                               --keep-going continues past per-host failures.
+    doctor                     Check local prerequisites (ssh tools, Python,
                                numpy, matplotlib) and print install hints.
     status                     Probe hosts (iperf installed? server running?) and
                                list available runs.
@@ -878,9 +845,6 @@ CONFIG (env vars; CLI flags above take precedence):
     IPERF_DRY_RUN=$IPERF_DRY_RUN
     SSH_USER=$SSH_USER
     SSH_OPTS=$SSH_OPTS
-    SSH_PASSWORD_FILE=${SSH_PASSWORD_FILE:-}
-    SSH_PASSWORD_ENV=${SSH_PASSWORD_ENV:-}
-    SSH_ASK_PASSWORD=$SSH_ASK_PASSWORD
     START_DELAY=$START_DELAY
     IPERF_SERVERS=${IPERF_SERVERS:-}
     RESULTS_BASE=$RESULTS_BASE
@@ -925,196 +889,6 @@ cmd_status() {
         echo
         echo "Daemons:"
         parallel_hosts _worker_check_servers | sed 's/^/  /'
-    fi
-}
-
-#------------------------------------------------------------------------------
-# Resolve a single SSH password from --password-file / --password-env /
-# --ask-password and write it to a chmod-600 temp file whose path is
-# placed in the global _IPERF_ORCH_PW_FILE. Using a file (instead of an
-# env var that gets inherited and is visible via /proc/$pid/environ)
-# avoids a leak path. The caller is responsible for unlinking the file
-# via _scrub_ssh_password.
-_resolve_ssh_password() {
-    _IPERF_ORCH_PW_FILE=""
-    local pw=""
-    if [ -n "$SSH_PASSWORD_FILE" ]; then
-        [ -f "$SSH_PASSWORD_FILE" ] || { err "password file not found: $SSH_PASSWORD_FILE"; return 1; }
-        local perms=""
-        perms=$(stat -c '%a' "$SSH_PASSWORD_FILE" 2>/dev/null || stat -f '%A' "$SSH_PASSWORD_FILE" 2>/dev/null || echo "")
-        case "$perms" in
-            ''|400|600) ;;
-            *) warn "password file $SSH_PASSWORD_FILE has permissions $perms; recommend chmod 600" ;;
-        esac
-        IFS= read -r pw < "$SSH_PASSWORD_FILE" || true
-        [ -n "$pw" ] || { err "password file $SSH_PASSWORD_FILE is empty"; return 1; }
-    elif [ -n "$SSH_PASSWORD_ENV" ]; then
-        pw="${!SSH_PASSWORD_ENV:-}"
-        [ -n "$pw" ] || { err "env var \$$SSH_PASSWORD_ENV is empty or unset"; return 1; }
-    elif [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        printf "SSH password (used for all hosts): " >&2
-        IFS= read -rs pw < /dev/tty
-        printf '\n' >&2
-        [ -n "$pw" ] || { err "empty password"; return 1; }
-    else
-        err "no password source configured"
-        return 1
-    fi
-
-    # Write the resolved password into a chmod-600 temp file. We create
-    # the file mode-restricted before writing, to avoid a window where
-    # the password is on disk world-readable.
-    local f
-    f=$(mktemp "${TMPDIR:-/tmp}/iperf-orch-pw.XXXXXX") \
-        || { err "mktemp failed for password file"; return 1; }
-    chmod 600 "$f" || { rm -f "$f"; err "chmod 600 failed on $f"; return 1; }
-    # Newline-terminated so expect's `gets` returns the line cleanly.
-    printf '%s\n' "$pw" > "$f"
-    _IPERF_ORCH_PW_FILE="$f"
-    return 0
-}
-
-# Tear down the password file (if any). Safe to call multiple times.
-_scrub_ssh_password() {
-    if [ -n "${_IPERF_ORCH_PW_FILE:-}" ] && [ -f "$_IPERF_ORCH_PW_FILE" ]; then
-        rm -f "$_IPERF_ORCH_PW_FILE"
-    fi
-    unset _IPERF_ORCH_PW_FILE
-}
-
-# Drive ssh-copy-id to a single host using `expect`. Reads the password
-# from the chmod-600 temp file pointed to by env var _IPERF_ORCH_PW_FILE
-# (set by _resolve_ssh_password). Using a file rather than an env var
-# avoids /proc/$pid/environ exposure. Returns 0 on success.
-_ssh_copy_id_expect() {
-    local host="$1"
-    expect -f - "$SSH_USER" "$host" <<'EXPECT_EOF'
-log_user 0
-set timeout 30
-set user [lindex $argv 0]
-set host [lindex $argv 1]
-if {![info exists env(_IPERF_ORCH_PW_FILE)]} {
-    puts stderr "expect: _IPERF_ORCH_PW_FILE not set"
-    exit 3
-}
-set pwfile $env(_IPERF_ORCH_PW_FILE)
-if {[catch {open $pwfile r} fp]} {
-    puts stderr "expect: cannot open password file $pwfile: $fp"
-    exit 3
-}
-set password [string trimright [read $fp] "\n"]
-close $fp
-set sent_pw 0
-spawn ssh-copy-id -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -- $user@$host
-expect {
-    -re {\(yes/no[^)]*\)\??} { send "yes\r"; exp_continue }
-    -nocase -re {password:[ ]*$} {
-        if {$sent_pw} {
-            puts stderr "authentication failed for $user@$host"
-            exit 5
-        }
-        incr sent_pw
-        send -- "$password\r"
-        exp_continue
-    }
-    -nocase "permission denied" {
-        puts stderr "permission denied for $user@$host"
-        exit 5
-    }
-    timeout { puts stderr "timeout connecting to $host"; exit 2 }
-    eof {}
-}
-catch wait result
-exit [lindex $result 3]
-EXPECT_EOF
-}
-
-# Parallel worker for the expect-driven path. _IPERF_ORCH_PW must be exported
-# in the parent so it's inherited by this subshell.
-_worker_ssh_copy_id() {
-    local host="$1"
-    log "Distributing key to $host (automated via expect)"
-    if _ssh_copy_id_expect "$host" >/dev/null 2>&1; then
-        vlog "  OK: $host"
-        return 0
-    fi
-    warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-    return 1
-}
-
-cmd_ssh_setup() {
-    # Accept the password-source flags here too, not just as global flags.
-    # The mental model is `ssh-setup --ask-password`, and it was easy to
-    # land on the per-host interactive prompt path when the flag came
-    # after the subcommand.
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --ask-password)     SSH_ASK_PASSWORD=yes ;;
-            --password-file=*)  SSH_PASSWORD_FILE="${arg#*=}" ;;
-            --password-env=*)   SSH_PASSWORD_ENV="${arg#*=}" ;;
-            *) die "ssh-setup: unknown argument: $arg (expected --ask-password, --password-file=PATH, --password-env=VAR)" ;;
-        esac
-    done
-
-    # Server list must exist. The interactive path below would otherwise
-    # silently no-op (read_servers' die fires inside a $() subshell).
-    [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
-        || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
-
-    # Make sure we have a key
-    local key="$HOME/.ssh/id_ed25519"
-    if [ ! -f "$key" ] && [ ! -f "$HOME/.ssh/id_rsa" ]; then
-        log "No SSH key found; generating $key"
-        mkdir -p "$HOME/.ssh"
-        chmod 700 "$HOME/.ssh"
-        ssh-keygen -t ed25519 -N "" -f "$key" -q
-    fi
-
-    # Resolve password source (if any). When set, we use `expect` to drive
-    # ssh-copy-id non-interactively, in parallel across hosts.
-    local use_expect=0
-    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        command -v expect >/dev/null 2>&1 \
-            || die "automated password entry requires 'expect' (install with: apt install expect / dnf install expect / brew install expect)"
-        _resolve_ssh_password \
-            || die "could not resolve SSH password (see above)"
-        # Export the path so subshells (parallel workers -> expect)
-        # inherit it. Make sure the temp file is unlinked even on
-        # signal so the password doesn't outlive an interrupted run.
-        export _IPERF_ORCH_PW_FILE
-        trap '_scrub_ssh_password' EXIT INT TERM
-        use_expect=1
-    fi
-
-    local failure_count=0
-    if [ "$use_expect" = "1" ]; then
-        log "Distributing keys in parallel (max $IPERF_SSH_JOBS concurrent)"
-        parallel_hosts _worker_ssh_copy_id
-        failure_count=${#PARALLEL_FAILED[@]}
-        _scrub_ssh_password
-        trap - EXIT INT TERM
-    else
-        # Interactive fallback: must stay sequential so password prompts
-        # don't collide on stdin.
-        local hosts; hosts=$(read_servers)
-        local host
-        while IFS= read -r host; do
-            [ -z "$host" ] && continue
-            log "Distributing key to $host (you may be prompted for the password)"
-            if ssh-copy-id -o StrictHostKeyChecking=accept-new "$SSH_USER@$host" >/dev/null 2>&1; then
-                vlog "  OK: $host"
-            else
-                warn "  FAILED: $host (try manually: ssh-copy-id $SSH_USER@$host)"
-                failure_count=$((failure_count + 1))
-            fi
-        done <<< "$hosts"
-    fi
-
-    if [ "$failure_count" -eq 0 ]; then
-        log "SSH keys distributed to all hosts"
-    else
-        warn "ssh-setup completed with $failure_count failure(s)"
     fi
 }
 
@@ -3032,10 +2806,9 @@ PYEOF
 }
 
 #------------------------------------------------------------------------------
-# doctor: probe orchestrator-host prerequisites (ssh tools, expect when a
-# password source is configured, python + matplotlib stack) up front so a
-# missing dep fails fast instead of crashing 90s into `all`. Returns
-# non-zero if anything is missing.
+# doctor: probe orchestrator-host prerequisites (ssh tools, python +
+# matplotlib stack) up front so a missing dep fails fast instead of
+# crashing 90s into `all`. Returns non-zero if anything is missing.
 _doctor_check_tool() {
     local tool="$1" hint="$2"
     if command -v "$tool" >/dev/null 2>&1; then
@@ -3125,14 +2898,6 @@ cmd_doctor() {
 
     _doctor_check_tool ssh          "install openssh-client" || missing=$((missing + 1))
     _doctor_check_tool scp          "install openssh-client" || missing=$((missing + 1))
-    _doctor_check_tool ssh-copy-id  "install openssh-client" || missing=$((missing + 1))
-    _doctor_check_tool ssh-keygen   "install openssh-client" || missing=$((missing + 1))
-
-    if [ -n "$SSH_PASSWORD_FILE" ] || [ -n "$SSH_PASSWORD_ENV" ] || [ "$SSH_ASK_PASSWORD" = "yes" ]; then
-        _doctor_check_tool expect \
-            "install: apt install expect / dnf install expect / brew install expect" \
-            || missing=$((missing + 1))
-    fi
 
     _doctor_check_tool "$PYTHON_BIN" "install python3" || missing=$((missing + 1))
 
@@ -3204,7 +2969,6 @@ cmd_all() {
         fi
     }
 
-    cmd_ssh_setup
     cmd_check_iperf;         _all_gate check-iperf
     cmd_check_servers;       _all_gate check-servers
     cmd_start_servers;       _all_gate start-servers
@@ -3255,7 +3019,6 @@ shift || true
 case "$cmd" in
     "")                 first_run_banner ;;
     status)             cmd_status "$@" ;;
-    ssh-setup)          cmd_ssh_setup "$@" ;;
     check-iperf)        cmd_check_iperf ;;
     check-servers)      cmd_check_servers ;;
     start-servers)      cmd_start_servers ;;
