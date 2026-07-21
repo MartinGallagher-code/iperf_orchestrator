@@ -68,3 +68,15 @@ packages = ["iperf_orchestrator"]
 # console-script wrapper can locate and exec it.
 [tool.setuptools.package-data]
 iperf_orchestrator = ["iperf_orchestrator.sh"]
+
+[tool.coverage.run]
+source = ["iperf_orchestrator"]
+
+[tool.coverage.report]
+# The bundled bash script is measured separately (kcov); only the Python
+# wrapper is tracked here.
+omit = ["*/iperf_orchestrator.sh"]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

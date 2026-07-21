@@ -6,6 +6,13 @@ __pycache__/
 *.py[cod]
 .eggs/
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage*.xml
+htmlcov/
+.pytest_cache/
+
 # Virtual environments
 venv/
 .venv/
