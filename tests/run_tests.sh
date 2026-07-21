@@ -15,7 +15,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ORCH="$REPO_ROOT/iperf_orchestrator.sh"
+ORCH="$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh"
 export REPO_ROOT ORCH
 
 if [ ! -x "$ORCH" ]; then

@@ -1,3 +1,19 @@
+===FILE: .gitignore===
+# Python build / packaging artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+
+# Tool run output
+results/
+===END===
 ===FILE: LICENSE===
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
@@ -674,12 +690,52 @@ the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
 ===END===
+===FILE: MANIFEST.in===
+include LICENSE
+include README.md
+include SUMMARY.md
+include iperf_orchestrator/iperf_orchestrator.sh
+recursive-include completions *
+===END===
 ===FILE: README.md===
 # iperf-orchestrator
 
 A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
 Built primarily for **network fabric stress testing**: load every link in both directions simultaneously and find out what breaks or degrades. Also useful for one-off "is the network healthy" surveys of a fleet.
+
+---
+
+## Installation
+
+### With pip (recommended)
+
+```bash
+pip install iperf-orchestrator
+```
+
+This puts an `iperf-orchestrator` command on your PATH and installs the Python
+libraries the analysis steps need (`numpy`, `pandas`, `matplotlib`). Requires
+`bash` and Python 3.8+ on the orchestrator host. Everywhere below, wherever you
+see `./iperf_orchestrator.sh`, you can use the `iperf-orchestrator` command
+instead — e.g. `iperf-orchestrator --servers servers.txt all`. `python -m
+iperf_orchestrator` also works.
+
+When run as the installed command, results are written to `./results/` in your
+current working directory (and a `./servers.txt` there is picked up
+automatically if you don't pass `--servers`).
+
+### From a source checkout
+
+The orchestrator itself is a single self-contained bash script; you can run it
+directly without installing anything:
+
+```bash
+./iperf_orchestrator/iperf_orchestrator.sh --servers servers.txt all
+```
+
+The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3 with
+`numpy`, `pandas`, and `matplotlib` available; run `doctor` to check.
 
 ---
 
@@ -1152,7 +1208,7 @@ under `<script-dir>/results/<run-id>/` containing the raw logs, parsed
 
 ### Single-file script
 
-The whole orchestrator is one file: `iperf_orchestrator.sh`,
+The whole orchestrator is one file: `iperf_orchestrator/iperf_orchestrator.sh`,
 approximately 3000 lines of bash with embedded Python heredocs for the
 non-trivial parsing, pivoting, and rendering steps. There are no
 runtime dependencies beyond what every Linux box already has:
@@ -1167,6 +1223,19 @@ runtime dependencies beyond what every Linux box already has:
 
 This deliberate constraint keeps the script easy to drop onto a
 freshly-imaged jump host and use immediately.
+
+### Pip packaging
+
+For distribution, a thin Python wrapper package
+(`iperf_orchestrator/{__init__,cli,__main__}.py` + `pyproject.toml`) makes the
+tool `pip install`-able. It does not reimplement anything: the console-script
+entry point (`iperf-orchestrator`) locates the bundled `iperf_orchestrator.sh`
+and `exec`s it via `bash`, forwarding all arguments. The wrapper's only added
+behavior is resolving `RESULTS_BASE`/`servers.txt` relative to the current
+working directory (rather than the install location under `site-packages`) and
+setting `IPERF_ORCH_PROG` so help text shows the clean command name. `pip`
+pulls in `numpy`/`pandas`/`matplotlib` as declared dependencies so the analysis
+steps work out of the box.
 
 ### Stateless by design
 
@@ -1622,7 +1691,120 @@ _iperf_orchestrator() {
 complete -F _iperf_orchestrator iperf_orchestrator.sh
 complete -F _iperf_orchestrator ./iperf_orchestrator.sh
 ===END===
-===FILE: iperf_orchestrator.sh===
+===FILE: iperf_orchestrator/__init__.py===
+"""iperf-orchestrator: full-mesh iperf2 throughput testing across a fleet.
+
+The tool itself is a self-contained bash script (``iperf_orchestrator.sh``,
+shipped alongside this module). This package provides the pip-installable
+wrapper that puts an ``iperf-orchestrator`` command on your PATH and pulls in
+the Python libraries the analysis steps need.
+"""
+
+__version__ = "1.0.0"
+
+__all__ = ["__version__", "main"]
+
+
+def main() -> "int":
+    # Imported lazily so ``import iperf_orchestrator`` stays cheap.
+    from .cli import main as _main
+
+    return _main()
+===END===
+===FILE: iperf_orchestrator/__main__.py===
+"""Allow ``python -m iperf_orchestrator`` as an alternative to the console script."""
+
+from .cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+===END===
+===FILE: iperf_orchestrator/cli.py===
+"""Console-script entry point for iperf-orchestrator.
+
+Locates the bundled ``iperf_orchestrator.sh`` and hands off to it via
+``bash``, forwarding every argument unchanged. The bash script is the single
+source of truth for the CLI; this wrapper only exists so ``pip install`` can
+put an ``iperf-orchestrator`` command on PATH and resolve sane defaults for
+paths that would otherwise point inside the install location.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from pathlib import Path
+
+#: Name of the bundled orchestrator script (sits next to this module).
+SCRIPT_NAME = "iperf_orchestrator.sh"
+
+
+def script_path() -> Path:
+    """Absolute path to the bundled bash orchestrator."""
+    return Path(__file__).resolve().parent / SCRIPT_NAME
+
+
+def _default_environment() -> dict[str, str]:
+    """Environment for the child process.
+
+    When installed, this module lives under ``site-packages``; the script's
+    own defaults (``RESULTS_BASE`` and the ``servers.txt`` fallback) resolve
+    relative to *its* directory, which would drop results into the install
+    tree. Point them at the current working directory instead, but only when
+    the user hasn't already chosen a location via env var / flag.
+    """
+    env = dict(os.environ)
+    # Show a clean program name in the script's help/usage instead of the
+    # bundled site-packages path.
+    env.setdefault("IPERF_ORCH_PROG", "iperf-orchestrator")
+    env.setdefault("RESULTS_BASE", str(Path.cwd() / "results"))
+    if not env.get("IPERF_SERVERS"):
+        local_servers = Path.cwd() / "servers.txt"
+        if local_servers.is_file():
+            env["IPERF_SERVERS"] = str(local_servers)
+    return env
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the bundled orchestrator, forwarding ``argv`` to it.
+
+    Returns the script's exit status when it cannot ``exec`` (e.g. on
+    platforms without ``os.execvpe``); normally ``exec`` replaces this
+    process and the function does not return.
+    """
+    args = sys.argv[1:] if argv is None else argv
+
+    script = script_path()
+    if not script.is_file():
+        sys.stderr.write(
+            f"iperf-orchestrator: bundled script not found at {script}\n"
+        )
+        return 1
+
+    bash = shutil.which("bash")
+    if bash is None:
+        sys.stderr.write(
+            "iperf-orchestrator: 'bash' is required but was not found on PATH\n"
+        )
+        return 1
+
+    env = _default_environment()
+    cmd = [bash, str(script), *args]
+
+    # Replace this process so signals and the exit code pass straight through.
+    try:
+        os.execvpe(bash, cmd, env)
+    except OSError as exc:  # pragma: no cover - execvpe rarely returns
+        sys.stderr.write(f"iperf-orchestrator: failed to launch bash: {exc}\n")
+        return 1
+    return 0  # pragma: no cover - unreachable after a successful exec
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
+===END===
+===FILE: iperf_orchestrator/iperf_orchestrator.sh===
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #==============================================================================
@@ -1682,6 +1864,11 @@ set -u
 # default. --output overrides the base, --run-id selects an existing run.
 #------------------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+# Program name shown in help/usage text. The pip console-script wrapper sets
+# IPERF_ORCH_PROG=iperf-orchestrator so help reads cleanly; direct invocation
+# falls back to $0 (the path the script was run as), unchanged.
+PROG="${IPERF_ORCH_PROG:-$0}"
 
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
@@ -2303,9 +2490,9 @@ first_run_banner() {
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
 Quick start:
-    1. $0 --servers servers.txt ssh-setup --ask-password
+    1. $PROG --servers servers.txt ssh-setup --ask-password
                                   # distribute SSH keys (one prompt for all hosts)
-    2. $0 --servers servers.txt all
+    2. $PROG --servers servers.txt all
                                   # run the full pipeline + render heatmap.
                                   # Results land in $RESULTS_BASE/<run-id>/
 
@@ -2314,10 +2501,10 @@ The script is stateless. Re-running 'all' creates a fresh run-id; the
 an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 
 Other useful commands:
-    $0 doctor             Check that local prerequisites are installed
-    $0 status             Probe hosts and list available result runs
-    $0 help               Common commands and flags
-    $0 help-advanced      Every command, every flag, every env var
+    $PROG doctor             Check that local prerequisites are installed
+    $PROG status             Probe hosts and list available result runs
+    $PROG help               Common commands and flags
+    $PROG help-advanced      Every command, every flag, every env var
 
 EOF
 }
@@ -2327,11 +2514,11 @@ usage() {
 iperf-orchestrator.sh - full-mesh iperf2 throughput tests
 
 USAGE:
-    $0 [flags] <command> [args]
+    $PROG [flags] <command> [args]
 
 QUICK START:
-    $0 --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
-    $0 --servers servers.txt all                        # run + analyze + cleanup
+    $PROG --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
+    $PROG --servers servers.txt all                        # run + analyze + cleanup
 
 COMMON COMMANDS:
     ssh-setup              Distribute SSH keys to every host (one-time)
@@ -2381,7 +2568,7 @@ fresh \$RESULTS_BASE/<run-id>/ directory; analysis commands follow the
 'latest' symlink unless --run-id is passed explicitly.
 
 USAGE:
-    $0 [global flags] <command> [args]
+    $PROG [global flags] <command> [args]
 
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
@@ -4118,7 +4305,7 @@ cmd_make_pivot() {
     _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     local pivot="$RESULTS_DIR/iperf_pivot.txt"
-    [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV; run: $PROG parse-csv"
     log "Building pivot table -> $pivot"
 
     # Metadata captured for the header. Most fields reflect the run's
@@ -4377,7 +4564,7 @@ cmd_make_heatmap() {
     local csv="$RESULTS_DIR/iperf_results.csv"
     local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
     local png="$RESULTS_DIR/iperf_heatmap.png"
-    [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV; run: $PROG parse-csv"
     log "Rendering heatmap + bar chart -> $png"
 
     local meta_run_at meta_mode meta_duration
@@ -4692,7 +4879,7 @@ _doctor_check_python_module() {
 cmd_results_summary() {
     _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
-    [ -f "$csv" ] || die "No CSV at $csv; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV at $csv; run: $PROG parse-csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
 
     "$PYTHON_BIN" - "$csv" <<'PYEOF'
@@ -4898,6 +5085,53 @@ case "$cmd" in
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac
 ===END===
+===FILE: pyproject.toml===
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iperf-orchestrator"
+version = "1.0.0"
+description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Martin J. Gallagher" }]
+keywords = ["iperf", "iperf2", "network", "throughput", "benchmark", "mesh"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking :: Monitoring",
+]
+
+# The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
+# Python and need these; installing the package pulls them in automatically.
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+Repository = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+
+[project.scripts]
+iperf-orchestrator = "iperf_orchestrator.cli:main"
+
+[tool.setuptools]
+packages = ["iperf_orchestrator"]
+
+# Ship the bash script (the actual orchestrator) inside the wheel so the
+# console-script wrapper can locate and exec it.
+[tool.setuptools.package-data]
+iperf_orchestrator = ["iperf_orchestrator.sh"]
+===END===
 ===FILE: tests/run_tests.sh===
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
@@ -4916,7 +5150,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ORCH="$REPO_ROOT/iperf_orchestrator.sh"
+ORCH="$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh"
 export REPO_ROOT ORCH
 
 if [ ! -x "$ORCH" ]; then
@@ -8091,7 +8325,7 @@ report_tests
 set -u
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-ORCH="${ORCH:-$REPO_ROOT/iperf_orchestrator.sh}"
+ORCH="${ORCH:-$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh}"
 export REPO_ROOT ORCH
 
 # ---- Per-test environment ---------------------------------------------------

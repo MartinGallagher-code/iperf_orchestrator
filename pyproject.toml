@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iperf-orchestrator"
+version = "1.0.0"
+description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Martin J. Gallagher" }]
+keywords = ["iperf", "iperf2", "network", "throughput", "benchmark", "mesh"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking :: Monitoring",
+]
+
+# The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
+# Python and need these; installing the package pulls them in automatically.
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+Repository = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+
+[project.scripts]
+iperf-orchestrator = "iperf_orchestrator.cli:main"
+
+[tool.setuptools]
+packages = ["iperf_orchestrator"]
+
+# Ship the bash script (the actual orchestrator) inside the wheel so the
+# console-script wrapper can locate and exec it.
+[tool.setuptools.package-data]
+iperf_orchestrator = ["iperf_orchestrator.sh"]
