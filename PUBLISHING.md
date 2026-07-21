@@ -64,23 +64,7 @@ API token is stored in the repo. One-time setup:
 3. Push a tag and publish a Release (e.g. `v1.0.0`). The workflow builds,
    runs `twine check`, and publishes to PyPI.
 
-## Continuous integration & coverage
+## Continuous integration
 
-`.github/workflows/ci.yml` runs the tests on every push and pull request to
-`main` and reports coverage to [Codecov](https://about.codecov.io/):
-
-- the **bash** orchestrator is measured with
-  [`kcov`](https://github.com/SimonKagstrom/kcov) (built from source, since it
-  is no longer packaged on Ubuntu 24.04);
-- the **Python** console-script wrapper is measured with `coverage.py` via
-  `pytest tests/test_cli_wrapper.py`.
-
-Note that kcov measures *bash* lines only: the embedded Python heredocs
-(parse/pivot/heatmap) and the remote-command strings sent over SSH execute in
-separate interpreters/hosts and cannot be line-instrumented by a bash coverage
-tool, so the reported bash percentage has a structural ceiling well below 100%.
-
-To enable the upload, add a `CODECOV_TOKEN` repository secret (Settings →
-Secrets and variables → Actions) with the token from your Codecov project. The
-Codecov step does not fail CI if the token is missing, so the test job stays
-green either way.
+`.github/workflows/ci.yml` runs the bash test suite (`tests/run_tests.sh`) on
+every push and pull request to `main`.
