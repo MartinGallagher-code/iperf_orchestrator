@@ -33,7 +33,7 @@ under `<script-dir>/results/<run-id>/` containing the raw logs, parsed
 
 ### Single-file script
 
-The whole orchestrator is one file: `iperf_orchestrator.sh`,
+The whole orchestrator is one file: `iperf_orchestrator/iperf_orchestrator.sh`,
 approximately 3000 lines of bash with embedded Python heredocs for the
 non-trivial parsing, pivoting, and rendering steps. There are no
 runtime dependencies beyond what every Linux box already has:
@@ -48,6 +48,19 @@ runtime dependencies beyond what every Linux box already has:
 
 This deliberate constraint keeps the script easy to drop onto a
 freshly-imaged jump host and use immediately.
+
+### Pip packaging
+
+For distribution, a thin Python wrapper package
+(`iperf_orchestrator/{__init__,cli,__main__}.py` + `pyproject.toml`) makes the
+tool `pip install`-able. It does not reimplement anything: the console-script
+entry point (`iperf-orchestrator`) locates the bundled `iperf_orchestrator.sh`
+and `exec`s it via `bash`, forwarding all arguments. The wrapper's only added
+behavior is resolving `RESULTS_BASE`/`servers.txt` relative to the current
+working directory (rather than the install location under `site-packages`) and
+setting `IPERF_ORCH_PROG` so help text shows the clean command name. `pip`
+pulls in `numpy`/`pandas`/`matplotlib` as declared dependencies so the analysis
+steps work out of the box.
 
 ### Stateless by design
 

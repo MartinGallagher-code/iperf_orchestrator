@@ -1,0 +1,14 @@
+# Python build / packaging artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+
+# Tool run output
+results/

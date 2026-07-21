@@ -6,6 +6,39 @@ Built primarily for **network fabric stress testing**: load every link in both d
 
 ---
 
+## Installation
+
+### With pip (recommended)
+
+```bash
+pip install iperf-orchestrator
+```
+
+This puts an `iperf-orchestrator` command on your PATH and installs the Python
+libraries the analysis steps need (`numpy`, `pandas`, `matplotlib`). Requires
+`bash` and Python 3.8+ on the orchestrator host. Everywhere below, wherever you
+see `./iperf_orchestrator.sh`, you can use the `iperf-orchestrator` command
+instead — e.g. `iperf-orchestrator --servers servers.txt all`. `python -m
+iperf_orchestrator` also works.
+
+When run as the installed command, results are written to `./results/` in your
+current working directory (and a `./servers.txt` there is picked up
+automatically if you don't pass `--servers`).
+
+### From a source checkout
+
+The orchestrator itself is a single self-contained bash script; you can run it
+directly without installing anything:
+
+```bash
+./iperf_orchestrator/iperf_orchestrator.sh --servers servers.txt all
+```
+
+The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3 with
+`numpy`, `pandas`, and `matplotlib` available; run `doctor` to check.
+
+---
+
 ## Quick Start
 
 ```bash

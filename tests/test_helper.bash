@@ -15,7 +15,7 @@
 set -u
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-ORCH="${ORCH:-$REPO_ROOT/iperf_orchestrator.sh}"
+ORCH="${ORCH:-$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh}"
 export REPO_ROOT ORCH
 
 # ---- Per-test environment ---------------------------------------------------

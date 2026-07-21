@@ -58,6 +58,11 @@ set -u
 #------------------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
+# Program name shown in help/usage text. The pip console-script wrapper sets
+# IPERF_ORCH_PROG=iperf-orchestrator so help reads cleanly; direct invocation
+# falls back to $0 (the path the script was run as), unchanged.
+PROG="${IPERF_ORCH_PROG:-$0}"
+
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
 #------------------------------------------------------------------------------
@@ -678,9 +683,9 @@ first_run_banner() {
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
 Quick start:
-    1. $0 --servers servers.txt ssh-setup --ask-password
+    1. $PROG --servers servers.txt ssh-setup --ask-password
                                   # distribute SSH keys (one prompt for all hosts)
-    2. $0 --servers servers.txt all
+    2. $PROG --servers servers.txt all
                                   # run the full pipeline + render heatmap.
                                   # Results land in $RESULTS_BASE/<run-id>/
 
@@ -689,10 +694,10 @@ The script is stateless. Re-running 'all' creates a fresh run-id; the
 an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 
 Other useful commands:
-    $0 doctor             Check that local prerequisites are installed
-    $0 status             Probe hosts and list available result runs
-    $0 help               Common commands and flags
-    $0 help-advanced      Every command, every flag, every env var
+    $PROG doctor             Check that local prerequisites are installed
+    $PROG status             Probe hosts and list available result runs
+    $PROG help               Common commands and flags
+    $PROG help-advanced      Every command, every flag, every env var
 
 EOF
 }
@@ -702,11 +707,11 @@ usage() {
 iperf-orchestrator.sh - full-mesh iperf2 throughput tests
 
 USAGE:
-    $0 [flags] <command> [args]
+    $PROG [flags] <command> [args]
 
 QUICK START:
-    $0 --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
-    $0 --servers servers.txt all                        # run + analyze + cleanup
+    $PROG --servers servers.txt ssh-setup --ask-password   # one-time, prompts once
+    $PROG --servers servers.txt all                        # run + analyze + cleanup
 
 COMMON COMMANDS:
     ssh-setup              Distribute SSH keys to every host (one-time)
@@ -756,7 +761,7 @@ fresh \$RESULTS_BASE/<run-id>/ directory; analysis commands follow the
 'latest' symlink unless --run-id is passed explicitly.
 
 USAGE:
-    $0 [global flags] <command> [args]
+    $PROG [global flags] <command> [args]
 
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
@@ -2493,7 +2498,7 @@ cmd_make_pivot() {
     _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
     local pivot="$RESULTS_DIR/iperf_pivot.txt"
-    [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV; run: $PROG parse-csv"
     log "Building pivot table -> $pivot"
 
     # Metadata captured for the header. Most fields reflect the run's
@@ -2752,7 +2757,7 @@ cmd_make_heatmap() {
     local csv="$RESULTS_DIR/iperf_results.csv"
     local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
     local png="$RESULTS_DIR/iperf_heatmap.png"
-    [ -f "$csv" ] || die "No CSV; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV; run: $PROG parse-csv"
     log "Rendering heatmap + bar chart -> $png"
 
     local meta_run_at meta_mode meta_duration
@@ -3067,7 +3072,7 @@ _doctor_check_python_module() {
 cmd_results_summary() {
     _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
-    [ -f "$csv" ] || die "No CSV at $csv; run: $0 parse-csv"
+    [ -f "$csv" ] || die "No CSV at $csv; run: $PROG parse-csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
 
     "$PYTHON_BIN" - "$csv" <<'PYEOF'
