@@ -1,5 +1,11 @@
 # iperf-orchestrator
 
+[![PyPI version](https://img.shields.io/pypi/v/iperf-orchestrator.svg)](https://pypi.org/project/iperf-orchestrator/)
+[![Python versions](https://img.shields.io/pypi/pyversions/iperf-orchestrator.svg)](https://pypi.org/project/iperf-orchestrator/)
+[![CI](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/MartinGallagher-code/iperf_orchestrator/branch/main/graph/badge.svg)](https://codecov.io/gh/MartinGallagher-code/iperf_orchestrator)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
 Built primarily for **network fabric stress testing**: load every link in both directions simultaneously and find out what breaks or degrades. Also useful for one-off "is the network healthy" surveys of a fleet.

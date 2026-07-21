@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,17 +8,40 @@ version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "GPL-3.0-or-later" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
-keywords = ["iperf", "iperf2", "network", "throughput", "benchmark", "mesh"]
+maintainers = [{ name = "Martin J. Gallagher" }]
+keywords = [
+    "iperf",
+    "iperf2",
+    "network",
+    "throughput",
+    "bandwidth",
+    "benchmark",
+    "mesh",
+    "fabric",
+    "load-testing",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Intended Audience :: Information Technology",
     "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
     "Topic :: System :: Networking :: Monitoring",
+    "Topic :: System :: Benchmark",
 ]
 
 # The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
@@ -32,6 +55,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/MartinGallagher-code/iperf_orchestrator"
 Repository = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+Issues = "https://github.com/MartinGallagher-code/iperf_orchestrator/issues"
+Changelog = "https://github.com/MartinGallagher-code/iperf_orchestrator/blob/main/CHANGELOG.md"
 
 [project.scripts]
 iperf-orchestrator = "iperf_orchestrator.cli:main"

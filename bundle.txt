@@ -1,3 +1,104 @@
+===FILE: .github/workflows/ci.yml===
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python analysis dependencies
+        run: python -m pip install --upgrade pip numpy pandas matplotlib
+
+      - name: Install kcov (bash coverage)
+        run: sudo apt-get update && sudo apt-get install -y kcov
+
+      # The test suite is bash (tests/*.sh). Run it under kcov so we get a
+      # real coverage report for the orchestrator script and the tests.
+      - name: Run test suite with coverage
+        run: |
+          mkdir -p coverage
+          kcov \
+            --include-path="$PWD/iperf_orchestrator,$PWD/tests" \
+            coverage \
+            ./tests/run_tests.sh
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+===END===
+===FILE: .github/workflows/publish.yml===
+name: Publish to PyPI
+
+# Publishes the package when a GitHub Release is published. Uses PyPI
+# "trusted publishing" (OIDC) so no API token needs to be stored as a secret;
+# configure the trusted publisher on PyPI first (see PUBLISHING.md).
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Check metadata
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/iperf-orchestrator/
+    permissions:
+      id-token: write # required for PyPI trusted publishing (OIDC)
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+===END===
 ===FILE: .gitignore===
 # Python build / packaging artifacts
 build/
@@ -13,6 +114,39 @@ venv/
 
 # Tool run output
 results/
+===END===
+===FILE: CHANGELOG.md===
+# Changelog
+
+All notable changes to this project are documented here. The format is based
+on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-07-21
+
+First packaged release.
+
+### Added
+- **pip installable**: `pip install iperf-orchestrator` installs an
+  `iperf-orchestrator` console command (and `python -m iperf_orchestrator`).
+  A thin Python wrapper bundles and execs the bash orchestrator; `numpy`,
+  `pandas`, and `matplotlib` are pulled in automatically for the analysis
+  steps.
+- When run as the installed command, results and the `servers.txt` fallback
+  resolve against the current working directory instead of the install
+  location.
+
+### Changed
+- The orchestrator script now lives at `iperf_orchestrator/iperf_orchestrator.sh`
+  inside the package (still runnable directly from a source checkout).
+
+### Removed
+- The `ssh-setup` key-sharing capability and its password-source flags
+  (`--password-file`, `--password-env`, `--ask-password`). Key-based,
+  non-interactive SSH to every host is now a prerequisite you configure
+  yourself (for example with `ssh-copy-id`).
+
+[1.0.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.0.0
 ===END===
 ===FILE: LICENSE===
                     GNU GENERAL PUBLIC LICENSE
@@ -697,8 +831,91 @@ include SUMMARY.md
 include iperf_orchestrator/iperf_orchestrator.sh
 recursive-include completions *
 ===END===
+===FILE: PUBLISHING.md===
+# Publishing to PyPI
+
+This project ships as the `iperf-orchestrator` distribution on PyPI. The
+package is a thin Python wrapper that bundles and runs the bash orchestrator;
+see `pyproject.toml` for the metadata.
+
+## Prerequisites
+
+- Python 3.8+ with `build` and `twine`:
+  ```bash
+  python -m pip install --upgrade build twine
+  ```
+
+## Cut a release
+
+1. **Bump the version** in `pyproject.toml` (`[project].version`) and add a
+   matching entry to `CHANGELOG.md`. Follow [SemVer](https://semver.org/).
+
+2. **Build the distributions** (sdist + wheel) into `dist/`:
+   ```bash
+   rm -rf dist
+   python -m build
+   ```
+
+3. **Validate the metadata** — this must pass before uploading:
+   ```bash
+   python -m twine check dist/*
+   ```
+
+4. **(Optional) Smoke-test the built wheel** in a throwaway virtualenv:
+   ```bash
+   python -m venv /tmp/iperf-orch-check
+   /tmp/iperf-orch-check/bin/pip install dist/*.whl
+   /tmp/iperf-orch-check/bin/iperf-orchestrator help
+   ```
+
+5. **(Optional) Upload to TestPyPI first**:
+   ```bash
+   python -m twine upload --repository testpypi dist/*
+   pip install --index-url https://test.pypi.org/simple/ \
+       --extra-index-url https://pypi.org/simple/ iperf-orchestrator
+   ```
+
+6. **Upload to PyPI**:
+   ```bash
+   python -m twine upload dist/*
+   ```
+
+## Automated release (recommended)
+
+`.github/workflows/publish.yml` builds and publishes automatically whenever a
+**GitHub Release is published**. It uses PyPI
+[trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC), so no
+API token is stored in the repo. One-time setup:
+
+1. On PyPI, go to the project (or "Publishing" → "Add a pending publisher")
+   and add a **GitHub Actions** trusted publisher:
+   - Owner: `MartinGallagher-code`
+   - Repository: `iperf_orchestrator`
+   - Workflow name: `publish.yml`
+   - Environment name: `pypi`
+2. In the GitHub repo, create an environment named `pypi` (Settings →
+   Environments) if you want approval gates.
+3. Push a tag and publish a Release (e.g. `v1.0.0`). The workflow builds,
+   runs `twine check`, and publishes to PyPI.
+
+## Continuous integration & coverage
+
+`.github/workflows/ci.yml` runs the bash test suite on every push and pull
+request to `main`, measuring coverage with [`kcov`](https://github.com/SimonKagstrom/kcov)
+and uploading the report to [Codecov](https://about.codecov.io/). To enable the
+upload, add a `CODECOV_TOKEN` repository secret (Settings → Secrets and
+variables → Actions) with the token from your Codecov project. The Codecov
+step does not fail CI if the token is missing, so the test job stays green
+either way.
+===END===
 ===FILE: README.md===
 # iperf-orchestrator
+
+[![PyPI version](https://img.shields.io/pypi/v/iperf-orchestrator.svg)](https://pypi.org/project/iperf-orchestrator/)
+[![Python versions](https://img.shields.io/pypi/pyversions/iperf-orchestrator.svg)](https://pypi.org/project/iperf-orchestrator/)
+[![CI](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/MartinGallagher-code/iperf_orchestrator/branch/main/graph/badge.svg)](https://codecov.io/gh/MartinGallagher-code/iperf_orchestrator)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
@@ -4840,7 +5057,7 @@ esac
 ===END===
 ===FILE: pyproject.toml===
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -4849,17 +5066,40 @@ version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
 requires-python = ">=3.8"
-license = { text = "GPL-3.0-or-later" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
-keywords = ["iperf", "iperf2", "network", "throughput", "benchmark", "mesh"]
+maintainers = [{ name = "Martin J. Gallagher" }]
+keywords = [
+    "iperf",
+    "iperf2",
+    "network",
+    "throughput",
+    "bandwidth",
+    "benchmark",
+    "mesh",
+    "fabric",
+    "load-testing",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Intended Audience :: Information Technology",
     "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
     "Topic :: System :: Networking :: Monitoring",
+    "Topic :: System :: Benchmark",
 ]
 
 # The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
@@ -4873,6 +5113,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/MartinGallagher-code/iperf_orchestrator"
 Repository = "https://github.com/MartinGallagher-code/iperf_orchestrator"
+Issues = "https://github.com/MartinGallagher-code/iperf_orchestrator/issues"
+Changelog = "https://github.com/MartinGallagher-code/iperf_orchestrator/blob/main/CHANGELOG.md"
 
 [project.scripts]
 iperf-orchestrator = "iperf_orchestrator.cli:main"
