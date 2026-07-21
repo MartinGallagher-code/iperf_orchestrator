@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python analysis dependencies
+        run: python -m pip install --upgrade pip numpy pandas matplotlib
+
+      # Authoritative pass/fail: run the bash test suite directly.
+      - name: Run test suite
+        run: ./tests/run_tests.sh
+
+      # kcov is no longer packaged on Ubuntu 24.04, so build it from source.
+      - name: Install kcov (bash coverage)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils-dev libcurl4-openssl-dev zlib1g-dev libdw-dev \
+            libelf-dev libiberty-dev cmake g++ pkg-config
+          git clone --depth 1 --branch v43 https://github.com/SimonKagstrom/kcov.git /tmp/kcov-src
+          cmake -S /tmp/kcov-src -B /tmp/kcov-src/build
+          cmake --build /tmp/kcov-src/build --parallel "$(nproc)"
+          sudo cmake --install /tmp/kcov-src/build
+
+      # Best effort: coverage collection must not fail the build (the step
+      # above already asserts the suite passes).
+      - name: Collect coverage with kcov
+        run: |
+          mkdir -p coverage
+          kcov --include-path="$PWD/iperf_orchestrator,$PWD/tests" \
+            coverage ./tests/run_tests.sh || true
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

@@ -1,0 +1,31 @@
+# Changelog
+
+All notable changes to this project are documented here. The format is based
+on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-07-21
+
+First packaged release.
+
+### Added
+- **pip installable**: `pip install iperf-orchestrator` installs an
+  `iperf-orchestrator` console command (and `python -m iperf_orchestrator`).
+  A thin Python wrapper bundles and execs the bash orchestrator; `numpy`,
+  `pandas`, and `matplotlib` are pulled in automatically for the analysis
+  steps.
+- When run as the installed command, results and the `servers.txt` fallback
+  resolve against the current working directory instead of the install
+  location.
+
+### Changed
+- The orchestrator script now lives at `iperf_orchestrator/iperf_orchestrator.sh`
+  inside the package (still runnable directly from a source checkout).
+
+### Removed
+- The `ssh-setup` key-sharing capability and its password-source flags
+  (`--password-file`, `--password-env`, `--ask-password`). Key-based,
+  non-interactive SSH to every host is now a prerequisite you configure
+  yourself (for example with `ssh-copy-id`).
+
+[1.0.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.0.0
