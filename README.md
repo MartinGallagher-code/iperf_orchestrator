@@ -4,6 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/iperf-orchestrator.svg)](https://pypi.org/project/iperf-orchestrator/)
 [![CI](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/iperf_orchestrator)](https://api.reuse.software/info/github.com/MartinGallagher-code/iperf_orchestrator)
 
 A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
