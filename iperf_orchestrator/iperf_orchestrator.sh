@@ -62,6 +62,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 # falls back to $0 (the path the script was run as), unchanged.
 PROG="${IPERF_ORCH_PROG:-$0}"
 
+# Reported by --version / the version subcommand. Keep in sync with the
+# version in pyproject.toml and iperf_orchestrator/__init__.py.
+ORCH_VERSION="1.0.0"
+
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
 #------------------------------------------------------------------------------
@@ -201,6 +205,7 @@ while [ $# -gt 0 ]; do
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
         --help-advanced) _PARSED+=("help-advanced"); shift ;;
+        --version)       _PARSED+=("version"); shift ;;
         # Unknown flags before any subcommand are treated as typos and
         # rejected at the top level. Once a subcommand has been seen,
         # unknown flags get forwarded so subcommand-specific flags
@@ -670,8 +675,9 @@ an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 Other useful commands:
     $PROG doctor             Check that local prerequisites are installed
     $PROG status             Probe hosts and list available result runs
-    $PROG help               Common commands and flags
+    $PROG --help             Common commands and flags (also: help, -h)
     $PROG help-advanced      Every command, every flag, every env var
+    $PROG --version          Print the version and exit
 
 EOF
 }
@@ -715,6 +721,7 @@ COMMON FLAGS:
     --output, -o DIR           results directory (default $RESULTS_BASE)
     -h, --help                 show this help
     --help-advanced            show every command, every flag, every env var
+    --version                  print the version and exit
 
 Each invocation creates \$RESULTS_BASE/<run-id>/. \$RESULTS_BASE/latest tracks
 the most recent run. Pass --run-id <id> to operate on an older run.
@@ -780,6 +787,7 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --python PATH              Python interpreter (default $PYTHON_BIN)
     -h, --help                 show the simple help
     --help-advanced            show this help
+    --version                  print the version and exit
 
 Key-based SSH to every host must be configured before use (e.g. via
 ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
@@ -826,6 +834,7 @@ CONVENIENCE:
                                list available runs.
     help                       Show the simple help (this command's short form).
     help-advanced              Show this message.
+    version                    Print the version and exit (same as --version).
 
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
@@ -3038,5 +3047,6 @@ case "$cmd" in
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
     help-advanced|--help-advanced) usage_advanced ;;
+    version|--version)  echo "iperf-orchestrator $ORCH_VERSION" ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac

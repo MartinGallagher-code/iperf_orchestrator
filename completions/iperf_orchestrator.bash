@@ -17,12 +17,12 @@ _iperf_orchestrator() {
     local subcommands="init status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
-        make-pivot make-heatmap doctor results-summary all help"
+        make-pivot make-heatmap doctor results-summary all help version"
 
     local global_flags="--port --duration -d --parallel -P --jobs -j \
         --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
         --retries \
-        --dry-run -n --verbose -v --quiet -q -h --help"
+        --dry-run -n --verbose -v --quiet -q -h --help --version"
 
     local run_modes="parallel sequential-host sequential-pair"
 

@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `--version` flag (and `version` subcommand) that prints the program name
+  and version.
+- The no-args quick-start banner now points at `--help` and `--version`.
+
 ## [1.0.0] - 2026-07-21
 
 First packaged release.

@@ -46,7 +46,7 @@ test_every_documented_subcommand_is_dispatched() {
         start-servers create-scripts distribute-scripts
         run-tests collect-results stop-servers cleanup
         parse-csv parse-cpu make-pivot make-heatmap
-        all help
+        all help version
     )
     local cmd
     for cmd in "${subcommands[@]}"; do

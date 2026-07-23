@@ -16,6 +16,8 @@ test_help_with_no_args_prints_first_run_banner() {
     assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
     assert_contains "$RUN_OUT" "--servers" "banner should mention --servers" || return 1
     assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
+    assert_contains "$RUN_OUT" "--help" "banner should mention --help" || return 1
+    assert_contains "$RUN_OUT" "--version" "banner should mention --version" || return 1
     # Banner should be terse, not the full usage.
     if echo "$RUN_OUT" | grep -q '^USAGE:$'; then
         echo "no-args output should be the brief banner, not full usage" >&2
@@ -41,6 +43,33 @@ test_help_double_dash_help_flag() {
     assert_contains "$RUN_OUT" "USAGE:" "--help should print usage" || return 1
 }
 
+test_version_flag() {
+    run_orch --version
+    assert_status 0 "$RUN_RC" "--version should exit 0" || return 1
+    if ! echo "$RUN_OUT" | grep -qE '^iperf-orchestrator [0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "--version should print 'iperf-orchestrator <semver>', got: $RUN_OUT" >&2
+        return 1
+    fi
+}
+
+test_version_subcommand() {
+    run_orch version
+    assert_status 0 "$RUN_RC" "version subcommand should exit 0" || return 1
+    assert_contains "$RUN_OUT" "iperf-orchestrator" "version output missing program name" || return 1
+}
+
+test_version_matches_pyproject() {
+    run_orch --version
+    local pkg_ver
+    pkg_ver=$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$REPO_ROOT/pyproject.toml" | head -n1)
+    [ -n "$pkg_ver" ] || {
+        echo "could not read version from pyproject.toml" >&2
+        return 1
+    }
+    assert_eq "iperf-orchestrator $pkg_ver" "$RUN_OUT" \
+        "--version should match the version in pyproject.toml" || return 1
+}
+
 test_unknown_subcommand_is_rejected() {
     run_orch this-is-not-a-real-command
     assert_status 2 "$RUN_RC" "unknown subcommand should exit 2" || return 1
@@ -51,6 +80,9 @@ run_test test_help_with_no_args_prints_first_run_banner
 run_test test_help_explicit_subcommand
 run_test test_help_dash_h_flag
 run_test test_help_double_dash_help_flag
+run_test test_version_flag
+run_test test_version_subcommand
+run_test test_version_matches_pyproject
 run_test test_unknown_subcommand_is_rejected
 
 report_tests
