@@ -132,6 +132,13 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `--version` flag (and `version` subcommand) that prints the program name
+  and version.
+- The no-args quick-start banner now points at `--help` and `--version`.
+
 ## [1.0.0] - 2026-07-21
 
 First packaged release.
@@ -2006,6 +2013,7 @@ _iperf_orchestrator() {
         'results-summary:Print P50/P95/slowest pairs from CSV'
         'all:Run the full pipeline end-to-end'
         'help:Show full usage'
+        'version:Print the version and exit'
     )
 
     run_modes=(parallel sequential-host sequential-pair)
@@ -2033,6 +2041,7 @@ _iperf_orchestrator() {
         '-q[suppress non-WARN/ERROR log lines]'
         '-h[show help]'
         '--help[show help]'
+        '--version[print the version and exit]'
     )
 
     _arguments -C \
@@ -2092,12 +2101,12 @@ _iperf_orchestrator() {
     local subcommands="init status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
-        make-pivot make-heatmap doctor results-summary all help"
+        make-pivot make-heatmap doctor results-summary all help version"
 
     local global_flags="--port --duration -d --parallel -P --jobs -j \
         --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
         --retries \
-        --dry-run -n --verbose -v --quiet -q -h --help"
+        --dry-run -n --verbose -v --quiet -q -h --help --version"
 
     local run_modes="parallel sequential-host sequential-pair"
 
@@ -2330,6 +2339,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 # falls back to $0 (the path the script was run as), unchanged.
 PROG="${IPERF_ORCH_PROG:-$0}"
 
+# Reported by --version / the version subcommand. Keep in sync with the
+# version in pyproject.toml and iperf_orchestrator/__init__.py.
+ORCH_VERSION="1.0.0"
+
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
 #------------------------------------------------------------------------------
@@ -2469,6 +2482,7 @@ while [ $# -gt 0 ]; do
         --)              shift; _PARSED+=("$@"); break ;;
         -h|--help)       _PARSED+=("help"); shift ;;
         --help-advanced) _PARSED+=("help-advanced"); shift ;;
+        --version)       _PARSED+=("version"); shift ;;
         # Unknown flags before any subcommand are treated as typos and
         # rejected at the top level. Once a subcommand has been seen,
         # unknown flags get forwarded so subcommand-specific flags
@@ -2938,8 +2952,9 @@ an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 Other useful commands:
     $PROG doctor             Check that local prerequisites are installed
     $PROG status             Probe hosts and list available result runs
-    $PROG help               Common commands and flags
+    $PROG --help             Common commands and flags (also: help, -h)
     $PROG help-advanced      Every command, every flag, every env var
+    $PROG --version          Print the version and exit
 
 EOF
 }
@@ -2983,6 +2998,7 @@ COMMON FLAGS:
     --output, -o DIR           results directory (default $RESULTS_BASE)
     -h, --help                 show this help
     --help-advanced            show every command, every flag, every env var
+    --version                  print the version and exit
 
 Each invocation creates \$RESULTS_BASE/<run-id>/. \$RESULTS_BASE/latest tracks
 the most recent run. Pass --run-id <id> to operate on an older run.
@@ -3048,6 +3064,7 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --python PATH              Python interpreter (default $PYTHON_BIN)
     -h, --help                 show the simple help
     --help-advanced            show this help
+    --version                  print the version and exit
 
 Key-based SSH to every host must be configured before use (e.g. via
 ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
@@ -3094,6 +3111,7 @@ CONVENIENCE:
                                list available runs.
     help                       Show the simple help (this command's short form).
     help-advanced              Show this message.
+    version                    Print the version and exit (same as --version).
 
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
@@ -5306,6 +5324,7 @@ case "$cmd" in
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
     help-advanced|--help-advanced) usage_advanced ;;
+    version|--version)  echo "iperf-orchestrator $ORCH_VERSION" ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac
 ===END===
@@ -5998,7 +6017,7 @@ test_every_documented_subcommand_is_dispatched() {
         start-servers create-scripts distribute-scripts
         run-tests collect-results stop-servers cleanup
         parse-csv parse-cpu make-pivot make-heatmap
-        all help
+        all help version
     )
     local cmd
     for cmd in "${subcommands[@]}"; do
@@ -8244,6 +8263,8 @@ test_help_with_no_args_prints_first_run_banner() {
     assert_contains "$RUN_OUT" "Quick start" "banner missing 'Quick start' header" || return 1
     assert_contains "$RUN_OUT" "--servers" "banner should mention --servers" || return 1
     assert_contains "$RUN_OUT" "all" "banner should mention 'all'" || return 1
+    assert_contains "$RUN_OUT" "--help" "banner should mention --help" || return 1
+    assert_contains "$RUN_OUT" "--version" "banner should mention --version" || return 1
     # Banner should be terse, not the full usage.
     if echo "$RUN_OUT" | grep -q '^USAGE:$'; then
         echo "no-args output should be the brief banner, not full usage" >&2
@@ -8269,6 +8290,33 @@ test_help_double_dash_help_flag() {
     assert_contains "$RUN_OUT" "USAGE:" "--help should print usage" || return 1
 }
 
+test_version_flag() {
+    run_orch --version
+    assert_status 0 "$RUN_RC" "--version should exit 0" || return 1
+    if ! echo "$RUN_OUT" | grep -qE '^iperf-orchestrator [0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "--version should print 'iperf-orchestrator <semver>', got: $RUN_OUT" >&2
+        return 1
+    fi
+}
+
+test_version_subcommand() {
+    run_orch version
+    assert_status 0 "$RUN_RC" "version subcommand should exit 0" || return 1
+    assert_contains "$RUN_OUT" "iperf-orchestrator" "version output missing program name" || return 1
+}
+
+test_version_matches_pyproject() {
+    run_orch --version
+    local pkg_ver
+    pkg_ver=$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$REPO_ROOT/pyproject.toml" | head -n1)
+    [ -n "$pkg_ver" ] || {
+        echo "could not read version from pyproject.toml" >&2
+        return 1
+    }
+    assert_eq "iperf-orchestrator $pkg_ver" "$RUN_OUT" \
+        "--version should match the version in pyproject.toml" || return 1
+}
+
 test_unknown_subcommand_is_rejected() {
     run_orch this-is-not-a-real-command
     assert_status 2 "$RUN_RC" "unknown subcommand should exit 2" || return 1
@@ -8279,6 +8327,9 @@ run_test test_help_with_no_args_prints_first_run_banner
 run_test test_help_explicit_subcommand
 run_test test_help_dash_h_flag
 run_test test_help_double_dash_help_flag
+run_test test_version_flag
+run_test test_version_subcommand
+run_test test_version_matches_pyproject
 run_test test_unknown_subcommand_is_rejected
 
 report_tests

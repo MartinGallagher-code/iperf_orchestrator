@@ -26,6 +26,7 @@ _iperf_orchestrator() {
         'results-summary:Print P50/P95/slowest pairs from CSV'
         'all:Run the full pipeline end-to-end'
         'help:Show full usage'
+        'version:Print the version and exit'
     )
 
     run_modes=(parallel sequential-host sequential-pair)
@@ -53,6 +54,7 @@ _iperf_orchestrator() {
         '-q[suppress non-WARN/ERROR log lines]'
         '-h[show help]'
         '--help[show help]'
+        '--version[print the version and exit]'
     )
 
     _arguments -C \
