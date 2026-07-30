@@ -21,8 +21,8 @@ pip install iperf-orchestrator
 ```
 
 This puts an `iperf-orchestrator` command on your PATH and installs the Python
-libraries the analysis steps need (`numpy`, `pandas`, `matplotlib`). Requires
-`bash` and Python 3.8+ on the orchestrator host. Everywhere below, wherever you
+libraries the heatmap step needs (`numpy`, `matplotlib`). Requires
+`bash` and Python 3.6+ on the orchestrator host. Everywhere below, wherever you
 see `./iperf_orchestrator.sh`, you can use the `iperf-orchestrator` command
 instead — e.g. `iperf-orchestrator --servers servers.txt all`. `python -m
 iperf_orchestrator` also works.
@@ -40,8 +40,9 @@ directly without installing anything:
 ./iperf_orchestrator/iperf_orchestrator.sh --servers servers.txt all
 ```
 
-The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3 with
-`numpy`, `pandas`, and `matplotlib` available; run `doctor` to check.
+The analysis steps need Python 3.6+. Only `make-heatmap` needs third-party
+packages (`numpy` and `matplotlib`); `make-pivot`, `parse-cpu`,
+`collect-results` and `results-summary` are stdlib-only. Run `doctor` to check.
 
 ---
 
@@ -78,7 +79,7 @@ Results in `./results/<run-id>/`:
 ### On the orchestrator host (where you run the script)
 - bash 4+
 - ssh, scp
-- Python 3 with `numpy` and `matplotlib` (for the heatmap step only)
+- Python 3.6+ (stdlib only), plus `numpy` and `matplotlib` for the heatmap step
 - tar, gzip
 
 ### On every server in the mesh

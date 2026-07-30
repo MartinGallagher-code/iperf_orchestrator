@@ -48,7 +48,7 @@ test_doctor_all_tools_present_succeeds() {
     # The OK lines for each ssh tool should appear.
     assert_contains "$RUN_OUT" "OK  ssh" || return 1
     assert_contains "$RUN_OUT" "OK  scp" || return 1
-    # We don't have numpy/pandas/matplotlib in the test env, so doctor
+    # We don't have numpy/matplotlib in the test env, so doctor
     # WILL flag them. We only assert about the ssh tools here.
 }
 
@@ -69,7 +69,7 @@ test_doctor_missing_ssh_is_flagged() {
 test_doctor_reports_missing_count_in_summary() {
     populate_fake_bin ssh scp
     run_doctor
-    # The test env definitely lacks numpy/pandas/matplotlib, so the
+    # The test env definitely lacks numpy/matplotlib, so the
     # warning "doctor: N issue(s) above" should appear.
     if echo "$RUN_OUT" | grep -q "doctor: all prerequisites OK"; then
         # Surprise: everything was present. Don't fail the test, just skip.
@@ -83,8 +83,8 @@ test_doctor_exits_zero_when_all_ok() {
     # resolves under its restricted PATH (/usr/bin/python3) -- not whatever
     # python3 happens to be first on the ambient PATH (e.g. a CI setup-python
     # venv where the modules were pip-installed but /usr/bin/python3 lacks them).
-    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
-        echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/pandas/matplotlib not installed"
+    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, matplotlib' 2>/dev/null; then
+        echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/matplotlib not installed"
         return 0
     fi
     populate_fake_bin ssh scp
@@ -98,9 +98,9 @@ test_doctor_exits_zero_when_all_ok() {
 test_doctor_probes_each_required_python_module() {
     populate_fake_bin ssh scp
     run_doctor
-    # numpy/pandas/matplotlib should each be probed (either as OK or
+    # numpy/matplotlib should each be probed (either as OK or
     # MISSING depending on the env).
-    for mod in numpy pandas matplotlib; do
+    for mod in numpy matplotlib; do
         if ! echo "$RUN_OUT" | grep -q -E "(OK|MISSING) (python )?${mod}|module '$mod'"; then
             # The exact format is "OK  python -m matplotlib   X.Y" or
             # "MISSING python module 'matplotlib'".

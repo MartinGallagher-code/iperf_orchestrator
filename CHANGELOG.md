@@ -10,6 +10,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--version` flag (and `version` subcommand) that prints the program name
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
+- `tests/check_python_compat.sh`, which extracts the Python embedded in
+  `iperf_orchestrator.sh` heredocs and byte-compiles it, so the supported
+  interpreter floor is actually enforced rather than just declared.
+- CI job that scans for post-3.6 syntax and stdlib APIs (`vermin`) and runs
+  the suite under a real Python 3.6 container.
+
+### Changed
+- **Lowered the supported Python floor from 3.8 to 3.6**
+  (`requires-python = ">=3.6"`), so the orchestrator host can be a stock
+  RHEL/CentOS 8 or Ubuntu 18.04 box using its system interpreter. Required
+  two changes: the pip wrapper no longer uses `from __future__ import
+  annotations` (3.7+) or PEP 585/604 annotations, and `results-summary` uses
+  `statistics.mean` instead of `statistics.fmean` (3.8+).
+
+### Removed
+- `pandas` as a declared dependency, and from the `doctor` probes. Nothing in
+  the project has ever imported it; only `make-heatmap` needs third-party
+  packages, and it uses `numpy` and `matplotlib`.
 
 ## [1.0.0] - 2026-07-21
 

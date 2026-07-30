@@ -77,7 +77,7 @@ test_unknown_cmd_all_argument_is_rejected() {
 # ---- Doctor gate ---------------------------------------------------------
 
 test_cmd_all_dies_without_keep_going_when_doctor_fails() {
-    if python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+    if python3 -c 'import numpy, matplotlib' 2>/dev/null; then
         echo "    SKIP test_cmd_all_dies_without_keep_going_when_doctor_fails: full python stack installed"
         return 0
     fi
@@ -93,7 +93,7 @@ test_cmd_all_dies_without_keep_going_when_doctor_fails() {
 }
 
 test_cmd_all_continues_with_keep_going_when_doctor_fails() {
-    if python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+    if python3 -c 'import numpy, matplotlib' 2>/dev/null; then
         echo "    SKIP test_cmd_all_continues_with_keep_going_when_doctor_fails: full python stack installed"
         return 0
     fi

@@ -41,10 +41,11 @@ runtime dependencies beyond what every Linux box already has:
 - `bash` 4+
 - `ssh`, `scp`
 - `iperf2` (≥ 2.0.13 for `--full-duplex`; 2.0.14+ recommended)
-- `python3` (stdlib only — no third-party packages)
+- `python3` 3.6+ (stdlib only — no third-party packages)
 - `mpstat` (optional; falls back to `/proc/stat` sampling)
-- `matplotlib` is the *only* non-stdlib Python dependency, and only
-  needed by `make-heatmap`. Everything else works without it.
+- `numpy` and `matplotlib` are the *only* non-stdlib Python
+  dependencies, and are only needed by `make-heatmap`. Everything else
+  works without them.
 
 This deliberate constraint keeps the script easy to drop onto a
 freshly-imaged jump host and use immediately.
@@ -59,8 +60,8 @@ and `exec`s it via `bash`, forwarding all arguments. The wrapper's only added
 behavior is resolving `RESULTS_BASE`/`servers.txt` relative to the current
 working directory (rather than the install location under `site-packages`) and
 setting `IPERF_ORCH_PROG` so help text shows the clean command name. `pip`
-pulls in `numpy`/`pandas`/`matplotlib` as declared dependencies so the analysis
-steps work out of the box.
+pulls in `numpy`/`matplotlib` as declared dependencies so the heatmap step
+works out of the box.
 
 ### Stateless by design
 

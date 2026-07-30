@@ -21,10 +21,60 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python analysis dependencies
-        run: python -m pip install --upgrade pip numpy pandas matplotlib
+        run: python -m pip install --upgrade pip numpy matplotlib
 
       - name: Run bash test suite
         run: ./tests/run_tests.sh
+
+  # Guards the `requires-python = ">=3.6"` floor in pyproject.toml. The
+  # analysis steps live in heredocs inside iperf_orchestrator.sh, so they get
+  # extracted before scanning -- see tests/check_python_compat.sh.
+  python-floor:
+    name: Python 3.6 compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Catches stdlib APIs newer than the floor (e.g. statistics.fmean, 3.8),
+      # which a syntax-only compile check cannot see.
+      - name: Scan for post-3.6 syntax and stdlib APIs
+        run: |
+          python -m pip install --upgrade vermin
+          ./tests/check_python_compat.sh --extract-to "$RUNNER_TEMP/pyblocks"
+          vermin --eval-annotations --violations --target=3.6 \
+            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py
+
+      # GitHub's hosted runners no longer offer a 3.6 toolchain (it only ever
+      # shipped for the retired ubuntu-20.04 image), so use the container
+      # instead. Checkout runs on the host, so no node20-on-buster problem.
+      - name: Byte-compile and run the suite under real Python 3.6
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w python:3.6-slim \
+            bash -euxc './tests/check_python_compat.sh && ./tests/run_tests.sh'
+
+      # The wheel is built by modern setuptools (>=77) and so carries PEP 639
+      # Metadata-Version 2.4 license metadata, which postdates the newest pip
+      # that runs on 3.6 (21.3.1). Install the real artifact with that real pip
+      # to prove the metadata is still readable there. --no-deps keeps this
+      # about our metadata rather than numpy/matplotlib's 3.6 backsolve.
+      - name: Install the built wheel with Python 3.6's pip
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel -o dist/
+          docker run --rm -v "$PWD:/w" -w /w python:3.6-slim \
+            bash -euxc '
+              pip --version
+              pip install --no-deps dist/*.whl
+              iperf-orchestrator --version
+              python -m iperf_orchestrator --version
+            '
 ===END===
 ===FILE: .github/workflows/publish.yml===
 name: Publish to PyPI
@@ -138,6 +188,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--version` flag (and `version` subcommand) that prints the program name
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
+- `tests/check_python_compat.sh`, which extracts the Python embedded in
+  `iperf_orchestrator.sh` heredocs and byte-compiles it, so the supported
+  interpreter floor is actually enforced rather than just declared.
+- CI job that scans for post-3.6 syntax and stdlib APIs (`vermin`) and runs
+  the suite under a real Python 3.6 container.
+
+### Changed
+- **Lowered the supported Python floor from 3.8 to 3.6**
+  (`requires-python = ">=3.6"`), so the orchestrator host can be a stock
+  RHEL/CentOS 8 or Ubuntu 18.04 box using its system interpreter. Required
+  two changes: the pip wrapper no longer uses `from __future__ import
+  annotations` (3.7+) or PEP 585/604 annotations, and `results-summary` uses
+  `statistics.mean` instead of `statistics.fmean` (3.8+).
+
+### Removed
+- `pandas` as a declared dependency, and from the `doctor` probes. Nothing in
+  the project has ever imported it; only `make-heatmap` needs third-party
+  packages, and it uses `numpy` and `matplotlib`.
 
 ## [1.0.0] - 2026-07-21
 
@@ -1093,10 +1161,15 @@ see `pyproject.toml` for the metadata.
 
 ## Prerequisites
 
-- Python 3.8+ with `build` and `twine`:
+- Python 3.9+ with `build` and `twine`:
   ```bash
   python -m pip install --upgrade build twine
   ```
+
+  This is the **build host** requirement, and is deliberately higher than the
+  package's own `requires-python` (3.6+): current `setuptools` (>=77, needed
+  for the PEP 639 license metadata), `build`, and `twine` all require 3.9+.
+  The wheel they produce is `py3`-generic and installs fine on 3.6.
 
 ## Cut a release
 
@@ -1180,8 +1253,8 @@ pip install iperf-orchestrator
 ```
 
 This puts an `iperf-orchestrator` command on your PATH and installs the Python
-libraries the analysis steps need (`numpy`, `pandas`, `matplotlib`). Requires
-`bash` and Python 3.8+ on the orchestrator host. Everywhere below, wherever you
+libraries the heatmap step needs (`numpy`, `matplotlib`). Requires
+`bash` and Python 3.6+ on the orchestrator host. Everywhere below, wherever you
 see `./iperf_orchestrator.sh`, you can use the `iperf-orchestrator` command
 instead — e.g. `iperf-orchestrator --servers servers.txt all`. `python -m
 iperf_orchestrator` also works.
@@ -1199,8 +1272,9 @@ directly without installing anything:
 ./iperf_orchestrator/iperf_orchestrator.sh --servers servers.txt all
 ```
 
-The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3 with
-`numpy`, `pandas`, and `matplotlib` available; run `doctor` to check.
+The analysis steps need Python 3.6+. Only `make-heatmap` needs third-party
+packages (`numpy` and `matplotlib`); `make-pivot`, `parse-cpu`,
+`collect-results` and `results-summary` are stdlib-only. Run `doctor` to check.
 
 ---
 
@@ -1237,7 +1311,7 @@ Results in `./results/<run-id>/`:
 ### On the orchestrator host (where you run the script)
 - bash 4+
 - ssh, scp
-- Python 3 with `numpy` and `matplotlib` (for the heatmap step only)
+- Python 3.6+ (stdlib only), plus `numpy` and `matplotlib` for the heatmap step
 - tar, gzip
 
 ### On every server in the mesh
@@ -1688,10 +1762,11 @@ runtime dependencies beyond what every Linux box already has:
 - `bash` 4+
 - `ssh`, `scp`
 - `iperf2` (≥ 2.0.13 for `--full-duplex`; 2.0.14+ recommended)
-- `python3` (stdlib only — no third-party packages)
+- `python3` 3.6+ (stdlib only — no third-party packages)
 - `mpstat` (optional; falls back to `/proc/stat` sampling)
-- `matplotlib` is the *only* non-stdlib Python dependency, and only
-  needed by `make-heatmap`. Everything else works without it.
+- `numpy` and `matplotlib` are the *only* non-stdlib Python
+  dependencies, and are only needed by `make-heatmap`. Everything else
+  works without them.
 
 This deliberate constraint keeps the script easy to drop onto a
 freshly-imaged jump host and use immediately.
@@ -1706,8 +1781,8 @@ and `exec`s it via `bash`, forwarding all arguments. The wrapper's only added
 behavior is resolving `RESULTS_BASE`/`servers.txt` relative to the current
 working directory (rather than the install location under `site-packages`) and
 setting `IPERF_ORCH_PROG` so help text shows the clean command name. `pip`
-pulls in `numpy`/`pandas`/`matplotlib` as declared dependencies so the analysis
-steps work out of the box.
+pulls in `numpy`/`matplotlib` as declared dependencies so the heatmap step
+works out of the box.
 
 ### Stateless by design
 
@@ -2189,6 +2264,109 @@ from .cli import main
 if __name__ == "__main__":
     raise SystemExit(main())
 ===END===
+===FILE-B64: iperf_orchestrator/__pycache__/__init__.cpython-311.pyc===
+pw0NCgAAAABjrGtqLgIAAOMAAAAAAAAAAAAAAAACAAAAAAAAAPMeAAAAlwBkAFoAZAFaAWQCZANn
+AloCZAhkBoQEWgNkB1MAKQlhWwEAAGlwZXJmLW9yY2hlc3RyYXRvcjogZnVsbC1tZXNoIGlwZXJm
+MiB0aHJvdWdocHV0IHRlc3RpbmcgYWNyb3NzIGEgZmxlZXQuCgpUaGUgdG9vbCBpdHNlbGYgaXMg
+YSBzZWxmLWNvbnRhaW5lZCBiYXNoIHNjcmlwdCAoYGBpcGVyZl9vcmNoZXN0cmF0b3Iuc2hgYCwK
+c2hpcHBlZCBhbG9uZ3NpZGUgdGhpcyBtb2R1bGUpLiBUaGlzIHBhY2thZ2UgcHJvdmlkZXMgdGhl
+IHBpcC1pbnN0YWxsYWJsZQp3cmFwcGVyIHRoYXQgcHV0cyBhbiBgYGlwZXJmLW9yY2hlc3RyYXRv
+cmBgIGNvbW1hbmQgb24geW91ciBQQVRIIGFuZCBwdWxscyBpbgp0aGUgUHl0aG9uIGxpYnJhcmll
+cyB0aGUgYW5hbHlzaXMgc3RlcHMgbmVlZC4KegUxLjAuMNoLX192ZXJzaW9uX1/aBG1haW7aBnJl
+dHVybtoDaW50YwAAAAAAAAAAAAAAAAIAAAADAAAA8yIAAACXAGQBZAJsAG0BfQABAAIAfACmAAAA
+qwAAAAAAAAAAAFMAKQNO6QEAAAApAXIDAAAAKQLaA2NsaXIDAAAAKQHaBV9tYWlucwEAAAAg+jwv
+aG9tZS91c2VyL2lwZXJmX29yY2hlc3RyYXRvci9pcGVyZl9vcmNoZXN0cmF0b3IvX19pbml0X18u
+cHlyAwAAAHIDAAAADgAAAHMfAAAAgADgBCLQBCLQBCLQBCLQBCLQBCLgCxCINYk3jDeATvMAAAAA
+TikCcgQAAAByBQAAACkE2gdfX2RvY19fcgIAAADaB19fYWxsX19yAwAAAKkAcgsAAAByCgAAAPoI
+PG1vZHVsZT5yDwAAAAEAAABzPgAAAPADAQEB8AIGAQTwAAYBBPAQAA8WgAvgCxiYJtAKIYAH8AYE
+ARPwAAQBE/AABAET8AAEARPwAAQBE/AABAETcgsAAAA=
+===END===
+===FILE-B64: iperf_orchestrator/__pycache__/__main__.cpython-311.pyc===
+pw0NCgAAAABjrGtqpgAAAOMAAAAAAAAAAAAAAAAEAAAAAAAAAPNIAAAAlwBkAFoAZAFkAmwBbQJa
+AgEAZQNkA2sCAAAAAHITAgBlBAIAZQKmAAAAqwAAAAAAAAAAAKYBAACrAQAAAAAAAAAAggFkBFMA
+KQV6T0FsbG93IGBgcHl0aG9uIC1tIGlwZXJmX29yY2hlc3RyYXRvcmBgIGFzIGFuIGFsdGVybmF0
+aXZlIHRvIHRoZSBjb25zb2xlIHNjcmlwdC7pAQAAACkB2gRtYWlu2ghfX21haW5fX04pBdoHX19k
+b2NfX9oDY2xpcgMAAADaCF9fbmFtZV9f2gpTeXN0ZW1FeGl0qQDzAAAAAPo8L2hvbWUvdXNlci9p
+cGVyZl9vcmNoZXN0cmF0b3IvaXBlcmZfb3JjaGVzdHJhdG9yL19fbWFpbl9fLnB5+gg8bW9kdWxl
+PnIMAAAAAQAAAHNGAAAA8AMBAQHYAFXQAFXgABXQABXQABXQABXQABXQABXgAwuIetIDGdADGdgK
+FIgqkFSQVJFWlFbRChzUChzQBBzwAwAEGtADGXIKAAAA
+===END===
+===FILE-B64: iperf_orchestrator/__pycache__/cli.cpython-311.pyc===
+pw0NCgAAAABirmtqggsAAOMAAAAAAAAAAAAAAAAFAAAAAAAAAPPKAAAAlwBkAFoAZAFkAmwBWgFk
+AWQCbAJaAmQBZAJsA1oDZAFkA2wEbQVaBQEAZAFkBGwGbQdaB20IWghtCVoJAQBkBVoKZAZlBWYC
+ZAeEBFoLZAZlB2UMZQxmAhkAAAAAAAAAAABmAmQIhARaDWQMZAllCWUIZQwZAAAAAAAAAAAAGQAA
+AAAAAAAAAGQGZQ5mBGQKhAVaD2UQZAtrAgAAAAByEwIAZRECAGUPpgAAAKsAAAAAAAAAAACmAQAA
+qwEAAAAAAAAAAIIBZAJTACkNYZ4BAABDb25zb2xlLXNjcmlwdCBlbnRyeSBwb2ludCBmb3IgaXBl
+cmYtb3JjaGVzdHJhdG9yLgoKTG9jYXRlcyB0aGUgYnVuZGxlZCBgYGlwZXJmX29yY2hlc3RyYXRv
+ci5zaGBgIGFuZCBoYW5kcyBvZmYgdG8gaXQgdmlhCmBgYmFzaGBgLCBmb3J3YXJkaW5nIGV2ZXJ5
+IGFyZ3VtZW50IHVuY2hhbmdlZC4gVGhlIGJhc2ggc2NyaXB0IGlzIHRoZSBzaW5nbGUKc291cmNl
+IG9mIHRydXRoIGZvciB0aGUgQ0xJOyB0aGlzIHdyYXBwZXIgb25seSBleGlzdHMgc28gYGBwaXAg
+aW5zdGFsbGBgIGNhbgpwdXQgYW4gYGBpcGVyZi1vcmNoZXN0cmF0b3JgYCBjb21tYW5kIG9uIFBB
+VEggYW5kIHJlc29sdmUgc2FuZSBkZWZhdWx0cyBmb3IKcGF0aHMgdGhhdCB3b3VsZCBvdGhlcndp
+c2UgcG9pbnQgaW5zaWRlIHRoZSBpbnN0YWxsIGxvY2F0aW9uLgrpAAAAAE4pAdoEUGF0aCkD2gRE
+aWN02gRMaXN02ghPcHRpb25hbHoVaXBlcmZfb3JjaGVzdHJhdG9yLnNo2gZyZXR1cm5jAAAAAAAA
+AAAAAAAAAwAAAAMAAADzaAAAAJcAdAEAAAAAAAAAAAAAdAIAAAAAAAAAAAAApgEAAKsBAAAAAAAA
+AACgAgAAAAAAAAAAAAAAAAAAAAAAAAAApgAAAKsAAAAAAAAAAABqAwAAAAAAAAAAdAgAAAAAAAAA
+AAAAegsAAFMAKQF6L0Fic29sdXRlIHBhdGggdG8gdGhlIGJ1bmRsZWQgYmFzaCBvcmNoZXN0cmF0
+b3IuKQVyAwAAANoIX19maWxlX1/aB3Jlc29sdmXaBnBhcmVudNoLU0NSSVBUX05BTUWpAPMAAAAA
++jcvaG9tZS91c2VyL2lwZXJmX29yY2hlc3RyYXRvci9pcGVyZl9vcmNoZXN0cmF0b3IvY2xpLnB5
+2gtzY3JpcHRfcGF0aHIQAAAAFAAAAHMiAAAAgADlCw+VCIk+jD7XCyHSCyHRCyPUCyPUCyqtW9EL
+ONAEOHIOAAAAYwAAAAAAAAAAAAAAAAcAAAADAAAA83QBAACXAHQBAAAAAAAAAAAAAHQCAAAAAAAA
+AAAAAGoCAAAAAAAAAACmAQAAqwEAAAAAAAAAAH0AfACgAwAAAAAAAAAAAAAAAAAAAAAAAAAAZAFk
+AqYCAACrAgAAAAAAAAAAAQB8AKADAAAAAAAAAAAAAAAAAAAAAAAAAABkA3QJAAAAAAAAAAAAAHQL
+AAAAAAAAAAAAAGoGAAAAAAAAAACmAAAAqwAAAAAAAAAAAGQEegsAAKYBAACrAQAAAAAAAAAApgIA
+AKsCAAAAAAAAAAABAHwAoAcAAAAAAAAAAAAAAAAAAAAAAAAAAGQFpgEAAKsBAAAAAAAAAABzPHQL
+AAAAAAAAAAAAAGoGAAAAAAAAAACmAAAAqwAAAAAAAAAAAGQGegsAAH0BfAGgCAAAAAAAAAAAAAAA
+AAAAAAAAAAAApgAAAKsAAAAAAAAAAAByEnQJAAAAAAAAAAAAAHwBpgEAAKsBAAAAAAAAAAB8AGQF
+PAAAAHwAUwApB2GbAQAARW52aXJvbm1lbnQgZm9yIHRoZSBjaGlsZCBwcm9jZXNzLgoKICAgIFdo
+ZW4gaW5zdGFsbGVkLCB0aGlzIG1vZHVsZSBsaXZlcyB1bmRlciBgYHNpdGUtcGFja2FnZXNgYDsg
+dGhlIHNjcmlwdCdzCiAgICBvd24gZGVmYXVsdHMgKGBgUkVTVUxUU19CQVNFYGAgYW5kIHRoZSBg
+YHNlcnZlcnMudHh0YGAgZmFsbGJhY2spIHJlc29sdmUKICAgIHJlbGF0aXZlIHRvICppdHMqIGRp
+cmVjdG9yeSwgd2hpY2ggd291bGQgZHJvcCByZXN1bHRzIGludG8gdGhlIGluc3RhbGwKICAgIHRy
+ZWUuIFBvaW50IHRoZW0gYXQgdGhlIGN1cnJlbnQgd29ya2luZyBkaXJlY3RvcnkgaW5zdGVhZCwg
+YnV0IG9ubHkgd2hlbgogICAgdGhlIHVzZXIgaGFzbid0IGFscmVhZHkgY2hvc2VuIGEgbG9jYXRp
+b24gdmlhIGVudiB2YXIgLyBmbGFnLgogICAg2g9JUEVSRl9PUkNIX1BST0d6EmlwZXJmLW9yY2hl
+c3RyYXRvctoMUkVTVUxUU19CQVNF2gdyZXN1bHRz2g1JUEVSRl9TRVJWRVJTegtzZXJ2ZXJzLnR4
+dCkJ2gRkaWN02gJvc9oHZW52aXJvbtoKc2V0ZGVmYXVsdNoDc3RycgMAAADaA2N3ZNoDZ2V02gdp
+c19maWxlKQLaA2VudtoNbG9jYWxfc2VydmVyc3MCAAAAICByDwAAANoUX2RlZmF1bHRfZW52aXJv
+bm1lbnRyIAAAABkAAABzoQAAAIAA9RIACw+Ncox60Qoa1AoagEPwBgAFCIdOgk7QEyTQJjrRBDvU
+BDvQBDvYBAeHToJOkD6lM6V0pHiheqR6sEnRJz3RIz7UIz7RBD/UBD/QBD/YCw6PN4o3kD/RCyPU
+CyPwAAMFNt0YHJwImQqcCqBd0RgyiA3YCxjXCyDSCyDRCyLUCyLwAAEJNt0jJqB90SM11CM1iEOQ
+D9EMINgLDoBKcg4AAADaBGFyZ3ZjAQAAAAAAAAAAAAAABgAAAAMAAADzGgIAAJcAfACAFHQAAAAA
+AAAAAAAAAGoBAAAAAAAAAABkAmQBhQIZAAAAAAAAAAAAbgF8AH0BdAUAAAAAAAAAAAAApgAAAKsA
+AAAAAAAAAAB9AnwCoAMAAAAAAAAAAAAAAAAAAAAAAAAAAKYAAACrAAAAAAAAAAAAcyV0AAAAAAAA
+AAAAAABqBAAAAAAAAAAAoAUAAAAAAAAAAAAAAAAAAAAAAAAAAGQDfAKbAGQEnQOmAQAAqwEAAAAA
+AAAAAAEAZAJTAHQNAAAAAAAAAAAAAGoHAAAAAAAAAABkBaYBAACrAQAAAAAAAAAAfQN8A4AhdAAA
+AAAAAAAAAAAAagQAAAAAAAAAAKAFAAAAAAAAAAAAAAAAAAAAAAAAAABkBqYBAACrAQAAAAAAAAAA
+AQBkAlMAdBEAAAAAAAAAAAAApgAAAKsAAAAAAAAAAAB9BHwDdBMAAAAAAAAAAAAAfAKmAQAAqwEA
+AAAAAAAAAGcCfAGiAX0FCQB0FQAAAAAAAAAAAABqCwAAAAAAAAAAfAN8BXwEpgMAAKsDAAAAAAAA
+AAABAG47IwB0GAAAAAAAAAAAAAAkAHIufQZ0AAAAAAAAAAAAAABqBAAAAAAAAAAAoAUAAAAAAAAA
+AAAAAAAAAAAAAAAAAGQHfAabAGQEnQOmAQAAqwEAAAAAAAAAAAEAWQBkAX0GfgZkAlMAZAF9Bn4G
+dwF3AHgDWQB3AWQIUwApCXr5UnVuIHRoZSBidW5kbGVkIG9yY2hlc3RyYXRvciwgZm9yd2FyZGlu
+ZyBgYGFyZ3ZgYCB0byBpdC4KCiAgICBSZXR1cm5zIHRoZSBzY3JpcHQncyBleGl0IHN0YXR1cyB3
+aGVuIGl0IGNhbm5vdCBgYGV4ZWNgYCAoZS5nLiBvbgogICAgcGxhdGZvcm1zIHdpdGhvdXQgYGBv
+cy5leGVjdnBlYGApOyBub3JtYWxseSBgYGV4ZWNgYCByZXBsYWNlcyB0aGlzCiAgICBwcm9jZXNz
+IGFuZCB0aGUgZnVuY3Rpb24gZG9lcyBub3QgcmV0dXJuLgogICAgTukBAAAAejBpcGVyZi1vcmNo
+ZXN0cmF0b3I6IGJ1bmRsZWQgc2NyaXB0IG5vdCBmb3VuZCBhdCD6AQraBGJhc2h6QWlwZXJmLW9y
+Y2hlc3RyYXRvcjogJ2Jhc2gnIGlzIHJlcXVpcmVkIGJ1dCB3YXMgbm90IGZvdW5kIG9uIFBBVEgK
+eitpcGVyZi1vcmNoZXN0cmF0b3I6IGZhaWxlZCB0byBsYXVuY2ggYmFzaDogcgIAAAApDdoDc3lz
+ciEAAAByEAAAAHIdAAAA2gZzdGRlcnLaBXdyaXRl2gZzaHV0aWzaBXdoaWNociAAAAByGgAAAHIX
+AAAA2gdleGVjdnBl2gdPU0Vycm9yKQdyIQAAANoEYXJnc9oGc2NyaXB0ciUAAAByHgAAANoDY21k
+2gNleGNzBwAAACAgICAgICByDwAAANoEbWFpbnIxAAAALgAAAHMuAQAAgADwDgAcIJg8jTOMOJBB
+kEKQQow8iDyoVIBE5Q0YiV2MXYBG2AsRjz6KPtELG9QLG/AABAUR3QgLjArXCBjSCBjYDEm4dtAM
+SdAMSdAMSfEDAgkK9AACCQrwAAIJCvAGABARiHHlCxGMPJgG0Qsf1AsfgETYBwuAfN0IC4wK1wgY
+0ggY2AxQ8QMCCQr0AAIJCvAAAgkK8AYAEBGIceUKHtEKINQKIIBD2AsPlROQVpEblBvQCiSYdNAK
+JIBD8AYEBRHdCAqMCpA0mBOYY9EIItQIItAIItAIIvjdCxLwAAIFEfAAAgUR8AACBRHdCAuMCtcI
+GNIIGNAZTsBz0BlO0BlO0BlO0QhP1AhP0AhP2A8QiHGIcYhxiHGIcfj4+PjwBQIFEfj4+PAGAAwN
+iDFzGAAAAMI5FkMQAMMQCkQIA8MaI0QDA8QDBUQIA9oIX19tYWluX18pAU4pEtoHX19kb2NfX3IX
+AAAAcikAAAByJgAAANoHcGF0aGxpYnIDAAAA2gZ0eXBpbmdyBAAAAHIFAAAAcgYAAAByDAAAAHIQ
+AAAAchoAAAByIAAAANoDaW50cjEAAADaCF9fbmFtZV9f2gpTeXN0ZW1FeGl0cg0AAAByDgAAAHIP
+AAAA+gg8bW9kdWxlPnI5AAAAAQAAAHP9AAAA8AMBAQHwAgcBBPAABwEE8BIAAQqACYAJgAnYAA2A
+DYANgA3YAAqACoAKgArYABjQABjQABjQABjQABjQABjYACfQACfQACfQACfQACfQACfQACfQACfQ
+ACfQACfwBgAPJoAL8AYCATmQVPAAAgE58AACATnwAAIBOfAAAgE58AoSAQ+YZKAzqAOgOJxu8AAS
+AQ/wABIBD/AAEgEP8AASAQ/wKiABDfAAIAENiHiYBJhTnAnUDyLwACABDahj8AAgAQ3wACABDfAA
+IAEN8AAgAQ3wRgEABAyIetIDGdADGdgKFIgqkFSQVJFWlFbRChzUChzQBBzwAwAEGtADGXIOAAAA
+===END===
 ===FILE: iperf_orchestrator/cli.py===
 """Console-script entry point for iperf-orchestrator.
 
@@ -2199,12 +2377,11 @@ put an ``iperf-orchestrator`` command on PATH and resolve sane defaults for
 paths that would otherwise point inside the install location.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Dict, List, Optional
 
 #: Name of the bundled orchestrator script (sits next to this module).
 SCRIPT_NAME = "iperf_orchestrator.sh"
@@ -2215,7 +2392,7 @@ def script_path() -> Path:
     return Path(__file__).resolve().parent / SCRIPT_NAME
 
 
-def _default_environment() -> dict[str, str]:
+def _default_environment() -> Dict[str, str]:
     """Environment for the child process.
 
     When installed, this module lives under ``site-packages``; the script's
@@ -2236,7 +2413,7 @@ def _default_environment() -> dict[str, str]:
     return env
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     """Run the bundled orchestrator, forwarding ``argv`` to it.
 
     Returns the script's exit status when it cannot ``exec`` (e.g. on
@@ -5166,7 +5343,7 @@ def pct(p):
 print(f"Throughput summary across {n} measured directions ({errors} errored/missing)")
 print(f"  min:    {mbps[0]:>10.2f} Mbps")
 print(f"  P50:    {pct(50):>10.2f} Mbps")
-print(f"  mean:   {statistics.fmean(mbps):>10.2f} Mbps")
+print(f"  mean:   {statistics.mean(mbps):>10.2f} Mbps")
 print(f"  P95:    {pct(95):>10.2f} Mbps")
 print(f"  max:    {mbps[-1]:>10.2f} Mbps")
 
@@ -5188,7 +5365,7 @@ cmd_doctor() {
     _doctor_check_tool "$PYTHON_BIN" "install python3" || missing=$((missing + 1))
 
     local mod
-    for mod in numpy pandas matplotlib; do
+    for mod in numpy matplotlib; do
         _doctor_check_python_module "$mod" || missing=$((missing + 1))
     done
 
@@ -5338,7 +5515,7 @@ name = "iperf-orchestrator"
 version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.6"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
@@ -5364,6 +5541,8 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -5375,11 +5554,11 @@ classifiers = [
     "Topic :: System :: Benchmark",
 ]
 
-# The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
-# Python and need these; installing the package pulls them in automatically.
+# Only `make-heatmap` needs third-party Python; every other analysis step
+# (collect-results, parse-cpu, make-pivot, results-summary) is stdlib-only.
+# Installing the package pulls these in so the heatmap works out of the box.
 dependencies = [
     "numpy",
-    "pandas",
     "matplotlib",
 ]
 
@@ -5399,6 +5578,111 @@ packages = ["iperf_orchestrator"]
 # console-script wrapper can locate and exec it.
 [tool.setuptools.package-data]
 iperf_orchestrator = ["iperf_orchestrator.sh"]
+===END===
+===FILE: tests/check_python_compat.sh===
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
+#
+# Python version-compatibility guard.
+#
+# The orchestrator is bash, but it shells out to Python for the analysis
+# steps, and that Python lives in `<<'PYEOF'` heredocs inside
+# iperf_orchestrator.sh where no linter would normally look. This script
+# extracts every such block (plus the pip-wrapper modules) and byte-compiles
+# them, so a construct newer than our declared `requires-python` floor gets
+# caught rather than blowing up on a user's older interpreter.
+#
+# Usage:
+#   tests/check_python_compat.sh              # compile with $PYTHON_BIN (default python3)
+#   PYTHON_BIN=python3.6 tests/check_python_compat.sh
+#   tests/check_python_compat.sh --extract-to DIR   # just dump the blocks
+#
+# Compiling under the *oldest* supported interpreter catches syntax-level
+# regressions (a `from __future__ import annotations`, a walrus). It does not
+# catch stdlib functions added in a later version -- `vermin --target=3.6` in
+# CI covers that axis.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ORCH="$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+extract_to=""
+if [ "${1:-}" = "--extract-to" ]; then
+    extract_to="${2:?--extract-to needs a directory}"
+    mkdir -p "$extract_to"
+fi
+
+if [ -n "$extract_to" ]; then
+    workdir="$extract_to"
+    cleanup() { :; }
+else
+    workdir="$(mktemp -d)"
+    cleanup() { rm -rf "$workdir"; }
+fi
+trap cleanup EXIT
+
+[ -f "$ORCH" ] || { echo "ERROR: $ORCH not found" >&2; exit 2; }
+
+# Split out each heredoc body into its own file. The block name is taken from
+# the enclosing `cmd_*`/function line most recently seen, so failures point at
+# a subcommand rather than an anonymous index.
+awk -v out="$workdir" '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{/ {
+        fn = $0; sub(/\(\).*/, "", fn)
+    }
+    /<<'"'"'PYEOF'"'"'/ {
+        n++
+        name = (fn != "" ? fn : "block")
+        file = out "/" n "_" name ".py"
+        collecting = 1
+        next
+    }
+    /^PYEOF$/ { collecting = 0; file = ""; next }
+    collecting { print > file }
+' "$ORCH"
+
+shopt -s nullglob
+blocks=("$workdir"/*.py)
+shopt -u nullglob
+
+if [ ${#blocks[@]} -eq 0 ]; then
+    echo "ERROR: no PYEOF blocks extracted from $ORCH -- extractor is broken" >&2
+    exit 2
+fi
+
+if [ -n "$extract_to" ]; then
+    printf '%s\n' "${blocks[@]}"
+    exit 0
+fi
+
+pyver="$("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+echo "python-compat check: $PYTHON_BIN ($pyver)"
+echo "  embedded blocks: ${#blocks[@]}"
+
+fail=0
+for f in "${blocks[@]}" "$REPO_ROOT"/iperf_orchestrator/*.py; do
+    if "$PYTHON_BIN" -m py_compile "$f" 2>/tmp/pycompat.$$ ; then
+        echo "  OK       $(basename "$f")"
+    else
+        echo "  FAIL     $(basename "$f")"
+        sed 's/^/           /' /tmp/pycompat.$$ >&2
+        fail=$((fail + 1))
+    fi
+    rm -f /tmp/pycompat.$$
+done
+
+# py_compile leaves __pycache__ next to the package sources; don't dirty the tree.
+rm -rf "$REPO_ROOT/iperf_orchestrator/__pycache__"
+
+if [ "$fail" -ne 0 ]; then
+    echo "python-compat: $fail file(s) failed to compile under $pyver" >&2
+    exit 1
+fi
+echo "python-compat: all files compile under $pyver"
 ===END===
 ===FILE: tests/run_tests.sh===
 #!/usr/bin/env bash
@@ -7150,7 +7434,7 @@ test_doctor_all_tools_present_succeeds() {
     # The OK lines for each ssh tool should appear.
     assert_contains "$RUN_OUT" "OK  ssh" || return 1
     assert_contains "$RUN_OUT" "OK  scp" || return 1
-    # We don't have numpy/pandas/matplotlib in the test env, so doctor
+    # We don't have numpy/matplotlib in the test env, so doctor
     # WILL flag them. We only assert about the ssh tools here.
 }
 
@@ -7171,7 +7455,7 @@ test_doctor_missing_ssh_is_flagged() {
 test_doctor_reports_missing_count_in_summary() {
     populate_fake_bin ssh scp
     run_doctor
-    # The test env definitely lacks numpy/pandas/matplotlib, so the
+    # The test env definitely lacks numpy/matplotlib, so the
     # warning "doctor: N issue(s) above" should appear.
     if echo "$RUN_OUT" | grep -q "doctor: all prerequisites OK"; then
         # Surprise: everything was present. Don't fail the test, just skip.
@@ -7185,8 +7469,8 @@ test_doctor_exits_zero_when_all_ok() {
     # resolves under its restricted PATH (/usr/bin/python3) -- not whatever
     # python3 happens to be first on the ambient PATH (e.g. a CI setup-python
     # venv where the modules were pip-installed but /usr/bin/python3 lacks them).
-    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
-        echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/pandas/matplotlib not installed"
+    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, matplotlib' 2>/dev/null; then
+        echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/matplotlib not installed"
         return 0
     fi
     populate_fake_bin ssh scp
@@ -7200,9 +7484,9 @@ test_doctor_exits_zero_when_all_ok() {
 test_doctor_probes_each_required_python_module() {
     populate_fake_bin ssh scp
     run_doctor
-    # numpy/pandas/matplotlib should each be probed (either as OK or
+    # numpy/matplotlib should each be probed (either as OK or
     # MISSING depending on the env).
-    for mod in numpy pandas matplotlib; do
+    for mod in numpy matplotlib; do
         if ! echo "$RUN_OUT" | grep -q -E "(OK|MISSING) (python )?${mod}|module '$mod'"; then
             # The exact format is "OK  python -m matplotlib   X.Y" or
             # "MISSING python module 'matplotlib'".
@@ -8987,7 +9271,7 @@ test_unknown_cmd_all_argument_is_rejected() {
 # ---- Doctor gate ---------------------------------------------------------
 
 test_cmd_all_dies_without_keep_going_when_doctor_fails() {
-    if python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+    if python3 -c 'import numpy, matplotlib' 2>/dev/null; then
         echo "    SKIP test_cmd_all_dies_without_keep_going_when_doctor_fails: full python stack installed"
         return 0
     fi
@@ -9003,7 +9287,7 @@ test_cmd_all_dies_without_keep_going_when_doctor_fails() {
 }
 
 test_cmd_all_continues_with_keep_going_when_doctor_fails() {
-    if python3 -c 'import numpy, pandas, matplotlib' 2>/dev/null; then
+    if python3 -c 'import numpy, matplotlib' 2>/dev/null; then
         echo "    SKIP test_cmd_all_continues_with_keep_going_when_doctor_fails: full python stack installed"
         return 0
     fi
