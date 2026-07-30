@@ -28,10 +28,24 @@ SHIM
     done
 }
 
-# Run doctor with a controlled PATH (FAKE_BIN only, plus /bin and
-# /usr/bin so coreutils still resolve).
+# The restricted PATH below exists to control which *tools* doctor can
+# discover (that's what FAKE_BIN is for), not to hide the interpreter. Don't
+# assume python3 lives in /usr/bin: the official python docker images -- which
+# CI uses to exercise the 3.6 floor -- install it under /usr/local/bin, and
+# with that hidden doctor reports "MISSING python3" and never gets as far as
+# probing the modules these tests are about. Resolve its real location instead.
+_ambient_python_dir() {
+    local p
+    p="$(command -v python3 2>/dev/null)" || return 0
+    dirname "$p"
+}
+PYTHON_DIR="$(_ambient_python_dir)"
+DOCTOR_PATH="${PYTHON_DIR:+$PYTHON_DIR:}/usr/bin:/bin"
+
+# Run doctor with a controlled PATH (FAKE_BIN plus the ambient interpreter,
+# /bin and /usr/bin so coreutils still resolve).
 run_doctor() {
-    PATH="$FAKE_BIN:/usr/bin:/bin" run_orch doctor
+    PATH="$FAKE_BIN:$DOCTOR_PATH" run_orch doctor
 }
 
 # ---- Output / status -----------------------------------------------------
@@ -80,10 +94,10 @@ test_doctor_reports_missing_count_in_summary() {
 
 test_doctor_exits_zero_when_all_ok() {
     # Only feasible if the stack is importable by the SAME interpreter doctor
-    # resolves under its restricted PATH (/usr/bin/python3) -- not whatever
-    # python3 happens to be first on the ambient PATH (e.g. a CI setup-python
-    # venv where the modules were pip-installed but /usr/bin/python3 lacks them).
-    if ! PATH="/usr/bin:/bin" python3 -c 'import numpy, matplotlib' 2>/dev/null; then
+    # resolves under its restricted PATH -- not whatever python3 happens to be
+    # first on the ambient PATH (e.g. a CI setup-python venv where the modules
+    # were pip-installed but the interpreter doctor finds lacks them).
+    if ! PATH="$DOCTOR_PATH" python3 -c 'import numpy, matplotlib' 2>/dev/null; then
         echo "    SKIP test_doctor_exits_zero_when_all_ok: numpy/matplotlib not installed"
         return 0
     fi
@@ -123,7 +137,7 @@ echo "DOCTOR_PYTHON_WAS_USED" >&2
 exec python3 "$@"
 EOF
     chmod +x "$fakepy"
-    PATH="$FAKE_BIN:/usr/bin:/bin" run_orch --python "$fakepy" doctor
+    PATH="$FAKE_BIN:$DOCTOR_PATH" run_orch --python "$fakepy" doctor
     # The wrapper prints to stderr; that's captured into RUN_OUT.
     assert_contains "$RUN_OUT" "DOCTOR_PYTHON_WAS_USED" \
         "doctor should use --python interpreter for module probes" || return 1
