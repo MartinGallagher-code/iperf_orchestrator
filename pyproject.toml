@@ -7,7 +7,7 @@ name = "iperf-orchestrator"
 version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
@@ -33,7 +33,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

@@ -11,6 +11,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every version the package claims to support, so the floor in
+        # pyproject.toml's requires-python is actually exercised.
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    name: test (python ${{ matrix.python-version }})
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -18,7 +27,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python-version }}"
 
       - name: Install Python analysis dependencies
         run: python -m pip install --upgrade pip numpy pandas matplotlib
@@ -138,6 +147,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--version` flag (and `version` subcommand) that prints the program name
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
+
+### Changed
+- Minimum supported Python is now 3.9 (`requires-python = ">=3.9"`); 3.8 is
+  no longer supported.
+- CI runs the test suite against every supported Python (3.9 through 3.13)
+  instead of only 3.12, so the declared floor is actually exercised.
 
 ## [1.0.0] - 2026-07-21
 
@@ -1181,7 +1196,7 @@ pip install iperf-orchestrator
 
 This puts an `iperf-orchestrator` command on your PATH and installs the Python
 libraries the analysis steps need (`numpy`, `pandas`, `matplotlib`). Requires
-`bash` and Python 3.8+ on the orchestrator host. Everywhere below, wherever you
+`bash` and Python 3.9+ on the orchestrator host. Everywhere below, wherever you
 see `./iperf_orchestrator.sh`, you can use the `iperf-orchestrator` command
 instead — e.g. `iperf-orchestrator --servers servers.txt all`. `python -m
 iperf_orchestrator` also works.
@@ -1199,7 +1214,7 @@ directly without installing anything:
 ./iperf_orchestrator/iperf_orchestrator.sh --servers servers.txt all
 ```
 
-The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3 with
+The analysis steps (`make-pivot`, `make-heatmap`) still need Python 3.9+ with
 `numpy`, `pandas`, and `matplotlib` available; run `doctor` to check.
 
 ---
@@ -1237,7 +1252,7 @@ Results in `./results/<run-id>/`:
 ### On the orchestrator host (where you run the script)
 - bash 4+
 - ssh, scp
-- Python 3 with `numpy` and `matplotlib` (for the heatmap step only)
+- Python 3.9+ with `numpy` and `matplotlib` (for the heatmap step only)
 - tar, gzip
 
 ### On every server in the mesh
@@ -5338,7 +5353,7 @@ name = "iperf-orchestrator"
 version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
@@ -5364,7 +5379,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
