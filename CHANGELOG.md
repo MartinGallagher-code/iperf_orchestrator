@@ -10,6 +10,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--version` flag (and `version` subcommand) that prints the program name
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
+- `tests/check_python_compat.sh`, which extracts the Python embedded in
+  `iperf_orchestrator.sh` heredocs and byte-compiles it, so the supported
+  interpreter floor is actually enforced rather than just declared.
+- CI job that scans for post-3.6 syntax and stdlib APIs (`vermin`) and runs
+  the suite under a real Python 3.6 container.
+- `matrix_agent/`: a stdlib-only Python agent that *sustains* an all-to-all
+  traffic matrix indefinitely (paced flows to every peer at prescribed
+  rates, receiver-side achieved-rate reporting), for load emulation at
+  scales where a full-mesh iperf sweep is impractical. Includes matrix
+  generation, admissibility checking, and report summarization; see
+  `matrix_agent/README.md`.
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files
@@ -19,6 +30,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any order into the same destination.
 
 ### Changed
+- **Lowered the supported Python floor to 3.6** (`requires-python = ">=3.6"`),
+  so the orchestrator host can be a stock RHEL/CentOS 8 or Ubuntu 18.04 box
+  using its system interpreter. Required two changes: the pip wrapper no
+  longer uses `from __future__ import annotations` (3.7+) or PEP 585/604
+  annotations, and `results-summary` uses `statistics.mean` instead of
+  `statistics.fmean` (3.8+).
+
+  This supersedes the unreleased 3.9 floor, which briefly raised the minimum
+  on the way to this release. The motivation there — that a declared floor CI
+  never runs is not a real floor — is kept and extended: the version matrix
+  below still runs, and the floor itself is now exercised too.
+- CI runs the bash test suite against every Python the hosted runners provide
+  (3.9 through 3.13) instead of only 3.12, and additionally exercises the 3.6
+  floor in a container, so the declared minimum is verified rather than
+  assumed.
 - `merge.sh` / `split.sh` replaced with the hardened v2 bundle format shared
   with the meridian_commander project: per-file sha256 verified on expansion,
   preserved permissions, symlinks, empty directories and missing trailing
@@ -27,10 +53,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bundle-controlled strings to a shell.
 - `bundle.txt` is no longer committed. It is a generated snapshot of the tree,
   now gitignored and rebuilt on demand with `./merge.sh`.
-- Minimum supported Python is now 3.9 (`requires-python = ">=3.9"`); 3.8 is
-  no longer supported.
-- CI runs the test suite against every supported Python (3.9 through 3.13)
-  instead of only 3.12, so the declared floor is actually exercised.
+
+### Removed
+- `pandas` as a declared dependency, and from the `doctor` probes. Nothing in
+  the project has ever imported it; only `make-heatmap` needs third-party
+  packages, and it uses `numpy` and `matplotlib`.
 
 ## [1.0.0] - 2026-07-21
 

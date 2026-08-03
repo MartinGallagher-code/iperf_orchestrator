@@ -7,7 +7,7 @@ name = "iperf-orchestrator"
 version = "1.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.6"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Martin J. Gallagher" }]
@@ -33,6 +33,9 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -43,11 +46,11 @@ classifiers = [
     "Topic :: System :: Benchmark",
 ]
 
-# The analysis steps (parse-cpu, make-pivot, make-heatmap) shell out to
-# Python and need these; installing the package pulls them in automatically.
+# Only `make-heatmap` needs third-party Python; every other analysis step
+# (collect-results, parse-cpu, make-pivot, results-summary) is stdlib-only.
+# Installing the package pulls these in so the heatmap works out of the box.
 dependencies = [
     "numpy",
-    "pandas",
     "matplotlib",
 ]
 

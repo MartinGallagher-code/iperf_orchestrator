@@ -2889,7 +2889,7 @@ def pct(p):
 print(f"Throughput summary across {n} measured directions ({errors} errored/missing)")
 print(f"  min:    {mbps[0]:>10.2f} Mbps")
 print(f"  P50:    {pct(50):>10.2f} Mbps")
-print(f"  mean:   {statistics.fmean(mbps):>10.2f} Mbps")
+print(f"  mean:   {statistics.mean(mbps):>10.2f} Mbps")
 print(f"  P95:    {pct(95):>10.2f} Mbps")
 print(f"  max:    {mbps[-1]:>10.2f} Mbps")
 
@@ -2911,7 +2911,7 @@ cmd_doctor() {
     _doctor_check_tool "$PYTHON_BIN" "install python3" || missing=$((missing + 1))
 
     local mod
-    for mod in numpy pandas matplotlib; do
+    for mod in numpy matplotlib; do
         _doctor_check_python_module "$mod" || missing=$((missing + 1))
     done
 

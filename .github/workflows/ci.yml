@@ -13,8 +13,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every version the package claims to support, so the floor in
-        # pyproject.toml's requires-python is actually exercised.
+        # Every version the hosted runners still provide. The declared floor
+        # is 3.6, which setup-python can no longer install (3.6/3.7/3.8 were
+        # dropped along with the ubuntu-20.04 image), so the bottom of the
+        # supported range is executed by the `python-floor` job below in a
+        # container instead. Between them: 3.6 and 3.9-3.13 actually run, and
+        # the vermin scan statically covers 3.7/3.8.
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
 
     name: test (python ${{ matrix.python-version }})
@@ -29,7 +33,57 @@ jobs:
           python-version: "${{ matrix.python-version }}"
 
       - name: Install Python analysis dependencies
-        run: python -m pip install --upgrade pip numpy pandas matplotlib
+        run: python -m pip install --upgrade pip numpy matplotlib
 
       - name: Run bash test suite
         run: ./tests/run_tests.sh
+
+  # Guards the `requires-python = ">=3.6"` floor in pyproject.toml. The
+  # analysis steps live in heredocs inside iperf_orchestrator.sh, so they get
+  # extracted before scanning -- see tests/check_python_compat.sh.
+  python-floor:
+    name: Python 3.6 compatibility
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Catches stdlib APIs newer than the floor (e.g. statistics.fmean, 3.8),
+      # which a syntax-only compile check cannot see.
+      - name: Scan for post-3.6 syntax and stdlib APIs
+        run: |
+          python -m pip install --upgrade vermin
+          ./tests/check_python_compat.sh --extract-to "$RUNNER_TEMP/pyblocks"
+          vermin --eval-annotations --violations --target=3.6 \
+            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py matrix_agent/*.py
+
+      # GitHub's hosted runners no longer offer a 3.6 toolchain (it only ever
+      # shipped for the retired ubuntu-20.04 image), so use the container
+      # instead. Checkout runs on the host, so no node20-on-buster problem.
+      - name: Byte-compile and run the suite under real Python 3.6
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w python:3.6-slim \
+            bash -euxc './tests/check_python_compat.sh && ./tests/run_tests.sh'
+
+      # The wheel is built by modern setuptools (>=77) and so carries PEP 639
+      # Metadata-Version 2.4 license metadata, which postdates the newest pip
+      # that runs on 3.6 (21.3.1). Install the real artifact with that real pip
+      # to prove the metadata is still readable there. --no-deps keeps this
+      # about our metadata rather than numpy/matplotlib's 3.6 backsolve.
+      - name: Install the built wheel with Python 3.6's pip
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel -o dist/
+          docker run --rm -v "$PWD:/w" -w /w python:3.6-slim \
+            bash -euxc '
+              pip --version
+              pip install --no-deps dist/*.whl
+              iperf-orchestrator --version
+              python -m iperf_orchestrator --version
+            '

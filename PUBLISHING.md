@@ -6,10 +6,15 @@ see `pyproject.toml` for the metadata.
 
 ## Prerequisites
 
-- Python 3.8+ with `build` and `twine`:
+- Python 3.9+ with `build` and `twine`:
   ```bash
   python -m pip install --upgrade build twine
   ```
+
+  This is the **build host** requirement, and is deliberately higher than the
+  package's own `requires-python` (3.6+): current `setuptools` (>=77, needed
+  for the PEP 639 license metadata), `build`, and `twine` all require 3.9+.
+  The wheel they produce is `py3`-generic and installs fine on 3.6.
 
 ## Cut a release
 

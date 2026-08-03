@@ -7,12 +7,11 @@ put an ``iperf-orchestrator`` command on PATH and resolve sane defaults for
 paths that would otherwise point inside the install location.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Dict, List, Optional
 
 #: Name of the bundled orchestrator script (sits next to this module).
 SCRIPT_NAME = "iperf_orchestrator.sh"
@@ -23,7 +22,7 @@ def script_path() -> Path:
     return Path(__file__).resolve().parent / SCRIPT_NAME
 
 
-def _default_environment() -> dict[str, str]:
+def _default_environment() -> Dict[str, str]:
     """Environment for the child process.
 
     When installed, this module lives under ``site-packages``; the script's
@@ -44,7 +43,7 @@ def _default_environment() -> dict[str, str]:
     return env
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     """Run the bundled orchestrator, forwarding ``argv`` to it.
 
     Returns the script's exit status when it cannot ``exec`` (e.g. on
