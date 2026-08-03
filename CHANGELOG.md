@@ -11,6 +11,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
 
+### Changed
+- Minimum supported Python is now 3.9 (`requires-python = ">=3.9"`); 3.8 is
+  no longer supported.
+- CI runs the test suite against every supported Python (3.9 through 3.13)
+  instead of only 3.12, so the declared floor is actually exercised.
+
 ## [1.0.0] - 2026-07-21
 
 First packaged release.
