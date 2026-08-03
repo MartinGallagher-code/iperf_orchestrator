@@ -61,7 +61,7 @@ jobs:
           python -m pip install --upgrade vermin
           ./tests/check_python_compat.sh --extract-to "$RUNNER_TEMP/pyblocks"
           vermin --eval-annotations --violations --target=3.6 \
-            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py
+            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py matrix_agent/*.py
 
       # GitHub's hosted runners no longer offer a 3.6 toolchain (it only ever
       # shipped for the retired ubuntu-20.04 image), so use the container

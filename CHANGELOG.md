@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interpreter floor is actually enforced rather than just declared.
 - CI job that scans for post-3.6 syntax and stdlib APIs (`vermin`) and runs
   the suite under a real Python 3.6 container.
+- `matrix_agent/`: a stdlib-only Python agent that *sustains* an all-to-all
+  traffic matrix indefinitely (paced flows to every peer at prescribed
+  rates, receiver-side achieved-rate reporting), for load emulation at
+  scales where a full-mesh iperf sweep is impractical. Includes matrix
+  generation, admissibility checking, and report summarization; see
+  `matrix_agent/README.md`.
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files

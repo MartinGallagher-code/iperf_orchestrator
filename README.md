@@ -74,6 +74,16 @@ Results in `./results/<run-id>/`:
 
 ---
 
+## Sustained load emulation (matrix_agent)
+
+The orchestrator *sweeps* a mesh: test every pair once, analyze afterwards.
+For the complementary job — hold a prescribed traffic matrix across the whole
+fleet indefinitely and watch whether the fabric sustains it — see
+[`matrix_agent/`](matrix_agent/README.md): a stdlib-only Python agent with
+paced per-pair flows, receiver-side achieved-rate reporting, and matrix
+admissibility checking. It scales where a sweep can't, because flows are
+rate-limited rather than saturating.
+
 ## Requirements
 
 ### On the orchestrator host (where you run the script)
