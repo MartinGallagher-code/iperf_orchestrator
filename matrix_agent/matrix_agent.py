@@ -19,12 +19,22 @@ Subcommands:
   gen        build a uniform matrix from a server list
   check      admissibility: row/column sums vs NIC capacity
   run        the agent itself (sender + receiver + reporter)
+  hosts      list the hosts a matrix names (name addr port per line)
   summarize  aggregate report CSVs into a deficit summary
 
 Matrix format: a grid CSV. Header row and first column carry host
 tokens of the form  name[=addr[:port]]  (addr defaults to the name,
-port to 5220). Cells are target rates in Mbit/s; empty or 0 means no
-flow; the diagonal is ignored.
+port to 5220). Bare IPs are fine as tokens ('10.0.0.7', or
+'10.0.0.7:5299' with a port) -- the address doubles as the name, and
+`run` then identifies its own row by matching the matrix addresses
+against local interface addresses, no --hostname needed. Cells are
+target rates in Mbit/s; empty or 0 means no flow; the diagonal is
+ignored.
+
+Traffic can be pinned to one NIC with --bind SPEC (or $IPERF_BIND),
+using the same semantics as iperf-orchestrator's --bind: the spec is
+substring-matched against `ip -o -4 addr show`, so it accepts an
+interface name or an address.
 
 Python 3.6+, stdlib only.
 """
@@ -35,6 +45,7 @@ import os
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -53,15 +64,23 @@ _SO_MAX_PACING_RATE = getattr(socket, "SO_MAX_PACING_RATE", 47)  # Linux value
 # ---------------------------------------------------------------------------
 
 def parse_token(tok):
-    """'name[=addr[:port]]' -> (name, addr, port)."""
+    """'name[=addr[:port]]' -> (name, addr, port).
+
+    Bare IPs work as host tokens ('10.0.0.7' or '10.0.0.7:5299'); for a
+    bare token with a port, the name is the address without the port.
+    """
     tok = tok.strip()
-    name, addr, port = tok, tok, DEFAULT_PORT
-    if "=" in tok:
-        name, rest = tok.split("=", 1)
-        addr = rest
+    bare = "=" not in tok
+    if bare:
+        name = addr = tok
+    else:
+        name, addr = tok.split("=", 1)
+    port = DEFAULT_PORT
     if ":" in addr:
         addr, p = addr.rsplit(":", 1)
         port = int(p)
+        if bare:
+            name = addr
     return name, addr, port
 
 
@@ -106,7 +125,24 @@ def load_matrix(path, overrides=None):
     return hosts, endpoints, rates
 
 
-def resolve_self(hosts, override):
+def _is_local_ipv4(addr):
+    # True iff addr is an IPv4 literal assigned to a local interface --
+    # probed by binding, which needs no privileges and no `ip` binary.
+    try:
+        socket.inet_aton(addr)
+    except OSError:
+        return False
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((addr, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def resolve_self(hosts, endpoints, override):
     if override:
         if override in hosts:
             return override
@@ -115,8 +151,36 @@ def resolve_self(hosts, override):
     for cand in (full, full.split(".")[0]):
         if cand in hosts:
             return cand
+    # IP-based matrices: this host is the row whose address is one of
+    # our own interface addresses.
+    local = [h for h in hosts if _is_local_ipv4(endpoints[h][0])]
+    if len(local) == 1:
+        return local[0]
+    if len(local) > 1:
+        raise SystemExit(
+            "multiple matrix hosts are local addresses (%s); pass --hostname"
+            % ", ".join(local))
     raise SystemExit(
-        "hostname %r not found in matrix; pass --hostname. Hosts: %s" % (full, ", ".join(hosts)))
+        "hostname %r not found in matrix and no matrix address is local; "
+        "pass --hostname. Hosts: %s" % (full, ", ".join(hosts)))
+
+
+def resolve_bind(spec):
+    """Resolve --bind exactly like iperf-orchestrator: the spec is a
+    substring matched against `ip -o -4 addr show` output (so it matches
+    an interface name OR an address); the first matching line's IPv4
+    wins. Returns (iface, ip)."""
+    try:
+        out = subprocess.check_output(["ip", "-o", "-4", "addr", "show"],
+                                      stderr=subprocess.DEVNULL).decode()
+    except (OSError, subprocess.CalledProcessError):
+        raise SystemExit("--bind %r: `ip -o -4 addr show` failed; is iproute2 installed?" % spec)
+    for line in out.splitlines():
+        if spec in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                return parts[1], parts[3].split("/")[0]
+    raise SystemExit("--bind %r: no interface matched" % spec)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +257,8 @@ class Flow(object):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
+        if t["bind_ip"]:
+            sock.bind((t["bind_ip"], 0))
         sock.connect((self.addr, self.port))
         return sock
 
@@ -250,6 +316,8 @@ class Flow(object):
                                     self.tuning["sndbuf"])
                 except OSError:
                     pass
+            if self.tuning["bind_ip"]:
+                sock.bind((self.tuning["bind_ip"], 0))
             sock.connect((self.addr, self.port))
             state = {"tokens": 0.0, "last": time.monotonic()}
             cur_mbps = self.mbps
@@ -334,7 +402,7 @@ def _tcp_conn_reader(conn, peer_addr, book, stop):
             pass
 
 
-def tcp_listener(port, book, stop, rcvbuf=0):
+def tcp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if rcvbuf:
@@ -343,7 +411,7 @@ def tcp_listener(port, book, stop, rcvbuf=0):
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         except OSError:
             pass
-    srv.bind(("", port))
+    srv.bind((bind_ip, port))
     srv.listen(1024)
     srv.settimeout(1)
     while not stop.is_set():
@@ -359,7 +427,7 @@ def tcp_listener(port, book, stop, rcvbuf=0):
     srv.close()
 
 
-def udp_listener(port, book, stop, rcvbuf=0):
+def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -367,7 +435,7 @@ def udp_listener(port, book, stop, rcvbuf=0):
                         rcvbuf or 4 * 1024 * 1024)
     except OSError:
         pass
-    sock.bind(("", port))
+    sock.bind((bind_ip, port))
     sock.settimeout(1)
     hlen = len(MAGIC) + 1
     while not stop.is_set():
@@ -467,8 +535,13 @@ def cmd_run(args):
         pass
 
     hosts, endpoints, rates = load_matrix(args.matrix, args.map)
-    me = resolve_self(hosts, args.hostname)
+    me = resolve_self(hosts, endpoints, args.hostname)
     port = endpoints[me][1]
+
+    bind_ip = ""
+    if args.bind:
+        bind_iface, bind_ip = resolve_bind(args.bind)
+        print("[bind] %s: %r -> iface=%s ip=%s" % (me, args.bind, bind_iface, bind_ip))
 
     stop = threading.Event()
     reload_flag = {"v": False}
@@ -483,14 +556,14 @@ def cmd_run(args):
 
     tuning = {"chunk": args.chunk_bytes, "udp_payload": args.udp_payload,
               "sndbuf": args.sndbuf, "rcvbuf": args.rcvbuf,
-              "mss": args.mss, "nodelay": args.nodelay}
+              "mss": args.mss, "nodelay": args.nodelay, "bind_ip": bind_ip}
 
     book = RxBook()
     if not args.no_recv:
         threading.Thread(target=tcp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
         threading.Thread(target=udp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
 
     flows = []
     if not args.no_send:
@@ -703,6 +776,11 @@ def main(argv=None):
                    help="SO_RCVBUF on listeners (default: kernel autotuning; UDP 4MB)")
     r.add_argument("--mss", type=int, default=0, metavar="BYTES",
                    help="TCP_MAXSEG: cap TCP segment size (approximates packet-size control)")
+    r.add_argument("--bind", default=os.environ.get("IPERF_BIND", ""), metavar="SPEC",
+                   help="pin traffic to a NIC, iperf-orchestrator style: substring "
+                        "matched against `ip -o -4 addr show` (iface name or address); "
+                        "binds sender source addresses and both listeners "
+                        "(default: $IPERF_BIND, same env var as the orchestrator)")
     r.add_argument("--nodelay", action="store_true",
                    help="set TCP_NODELAY (with --chunk-bytes, emulates small-message senders)")
 

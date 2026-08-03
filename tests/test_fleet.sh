@@ -71,6 +71,17 @@ test_start_passes_hostname_and_agent_flags() {
     assert_contains "$log" "nohup python3 matrix_agent.py run" || return 1
 }
 
+test_bind_option_forwarded_to_every_agent() {
+    _fleet_env
+    _run_fleet --bind eth1 start || { cat "$TEST_TMPDIR/out"; return 1; }
+    local log; log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "--bind eth1" "--bind reaches the remote agents" || return 1
+    # Same via the orchestrator's env var, no flag.
+    : > "$FLEET_LOG"
+    IPERF_BIND=eth2 _run_fleet start || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$FLEET_LOG")" "--bind eth2" "IPERF_BIND honored" || return 1
+}
+
 test_stop_and_reload_signal_agents() {
     _fleet_env
     _run_fleet stop || { cat "$TEST_TMPDIR/out"; return 1; }
@@ -163,6 +174,7 @@ run_test test_matrix_dispatch_survives_lost_executable_bit
 run_test test_matrix_dispatch_reports_missing_tooling_clearly
 run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
+run_test test_bind_option_forwarded_to_every_agent
 run_test test_stop_and_reload_signal_agents
 run_test test_ssh_user_and_remote_dir_options
 run_test test_failed_host_is_reported_and_exit_nonzero

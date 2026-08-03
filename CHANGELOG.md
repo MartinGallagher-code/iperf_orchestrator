@@ -32,6 +32,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scales where a full-mesh iperf sweep is impractical. Includes matrix
   generation, admissibility checking, and report summarization; see
   `matrix_agent/README.md`.
+- matrix_agent works with bare-IP host lists: a plain address (optionally
+  `ip:port`) is a complete host token, and a directly-invoked agent
+  identifies its own matrix row by matching addresses against local
+  interfaces, so `--hostname` is unnecessary for IP matrices (ambiguity
+  still demands it explicitly).
+- `matrix_agent.py run --bind SPEC` (and `fleet.sh --bind`, forwarded to
+  every agent) pins matrix traffic to one NIC with the exact semantics of
+  `iperf-orchestrator --bind`: substring match against
+  `ip -o -4 addr show` (interface name or address), `IPERF_BIND`
+  environment variable honored. Binds sender source addresses and both
+  listeners.
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files

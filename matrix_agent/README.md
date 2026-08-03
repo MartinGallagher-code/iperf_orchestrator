@@ -31,7 +31,9 @@ counters only show what TCP queued, not what the fabric delivered.
 ## Quick start (any two hosts, or one)
 
 ```bash
-# 1. Host list, one token per line: name[=addr[:port]]
+# 1. Host list, one token per line: name[=addr[:port]] -- bare IPs are
+#    fine ('10.0.0.7', or '10.0.0.7:5299' with a port); the address then
+#    doubles as the name throughout.
 cat > hosts.txt <<EOF
 hostA
 hostB
@@ -69,7 +71,24 @@ the `fq` qdisc fleet-wide). Agent flags pass through after `--`:
 Each agent is started with `--hostname` pinned to its matrix name, so
 identity never depends on what `gethostname()` returns on the box.
 Direct single-host invocation (`./matrix_agent.py run ...`) still works
-for systemd deployments — see below.
+for systemd deployments — see below. When the matrix is built from IP
+addresses, a directly-invoked agent doesn't need `--hostname` at all: it
+finds its own row by matching the matrix addresses against its local
+interface addresses (and refuses to guess if more than one matches).
+
+### Pinning traffic to a NIC
+
+`--bind SPEC` uses the same semantics as `iperf-orchestrator --bind`:
+the spec is substring-matched against `ip -o -4 addr show`, so it
+accepts an interface name (`eth1`) or an address (`192.168.50.`), and
+the same `IPERF_BIND` environment variable is honored. It binds the
+sender source addresses and both listeners, so all matrix traffic rides
+that NIC:
+
+```bash
+./fleet.sh --matrix matrix.csv --bind eth1 up   # forwarded to every agent
+./matrix_agent.py run --matrix matrix.csv --bind 192.168.50.   # direct
+```
 
 The matrix is a plain grid CSV — rows are sources, columns are
 destinations, cells are Mbit/s. Hand-edit it for non-uniform patterns;

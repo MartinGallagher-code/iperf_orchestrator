@@ -28,6 +28,8 @@
 #   --reports DIR      local dir for collected CSVs [MXA_REPORTS, ./reports]
 #   --python BIN       remote python                [MXA_PYTHON, python3]
 #   --nic DEV          NIC for `prep`               [MXA_NIC]
+#   --bind SPEC        pin agent traffic to a NIC (iperf-orchestrator
+#                      semantics; forwarded to every agent) [IPERF_BIND]
 #   --window SECONDS   summarize window             [60]
 #
 # Anything after `--` is passed to `matrix_agent.py run` verbatim, e.g.:
@@ -45,6 +47,7 @@ REPORTS="${MXA_REPORTS:-reports}"
 SSH_USER="${SSH_USER:-}"
 REMOTE_PY="${MXA_PYTHON:-python3}"
 NIC="${MXA_NIC:-}"
+BIND="${IPERF_BIND:-}"
 WINDOW=60
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 
@@ -52,7 +55,7 @@ log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,37p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,36p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -65,6 +68,7 @@ while [ $# -gt 0 ]; do
         --reports)    REPORTS="$2"; shift 2 ;;
         --python)     REMOTE_PY="$2"; shift 2 ;;
         --nic)        NIC="$2"; shift 2 ;;
+        --bind)       BIND="$2"; shift 2 ;;
         --window)     WINDOW="$2"; shift 2 ;;
         -h|--help)    usage 0 ;;
         --)           shift; AGENT_FLAGS=("$@"); break ;;
@@ -123,8 +127,12 @@ _h_deploy() { local name="$1" addr="$2"
 _h_start() { local name="$1" addr="$2"
     # --hostname is passed explicitly so the agent's identity always
     # matches the matrix, whatever gethostname() returns on the box.
-    local flags=""
-    [ "${#AGENT_FLAGS[@]}" -gt 0 ] && printf -v flags ' %q' "${AGENT_FLAGS[@]}"
+    local flags="" extra=""
+    [ -n "$BIND" ] && printf -v flags ' --bind %q' "$BIND"
+    if [ "${#AGENT_FLAGS[@]}" -gt 0 ]; then
+        printf -v extra ' %q' "${AGENT_FLAGS[@]}"
+        flags="$flags$extra"
+    fi
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
         "cd '$REMOTE_DIR' && if pgrep -f 'matrix_agent.py run' >/dev/null; then \
              echo 'already running'; \
