@@ -12,6 +12,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The no-args quick-start banner now points at `--help` and `--version`.
 
 ### Changed
+- `merge.sh` / `split.sh` replaced with the hardened v2 bundle format shared
+  with the meridian_commander project: per-file sha256 verified on expansion,
+  preserved permissions, symlinks, empty directories and missing trailing
+  newlines, a header entry count that detects truncated bundles, and a
+  `split.sh` that rejects absolute/`..` paths and never passes
+  bundle-controlled strings to a shell.
+- `bundle.txt` is no longer committed. It is a generated snapshot of the tree,
+  now gitignored and rebuilt on demand with `./merge.sh`.
 - Minimum supported Python is now 3.9 (`requires-python = ">=3.9"`); 3.8 is
   no longer supported.
 - CI runs the test suite against every supported Python (3.9 through 3.13)
