@@ -152,8 +152,8 @@ test_matrix_dispatch_reports_missing_tooling_clearly() {
     out=$(bash "$tree/iperf_orchestrator/iperf_orchestrator.sh" matrix up 2>&1); rc=$?
     [ "$rc" -ne 0 ] || { echo "missing tooling should exit nonzero"; return 1; }
     assert_contains "$out" "matrix_agent/fleet.sh" "names what is missing" || return 1
-    assert_contains "$out" "pip install ships only the orchestrator" || return 1
-    assert_contains "$out" "copy the matrix_agent/ directory" "gives the remedy" || return 1
+    assert_contains "$out" "broken or partial install" || return 1
+    assert_contains "$out" "force-reinstall" "gives the remedy" || return 1
 }
 
 run_test test_hosts_subcommand_lists_matrix_hosts

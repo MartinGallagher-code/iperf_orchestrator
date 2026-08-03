@@ -159,7 +159,8 @@ _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
 # --jobs, ...) that must not be filtered through this script's global
 # flag parser. Dispatch it before the parsing loop, and only when it is
 # the first argument so flag handling for every other command is
-# untouched. Source checkouts only: the pip wheel ships just this script.
+# untouched. Works from a source checkout, an expanded bundle, or a pip
+# install (the wheel ships matrix_agent/ alongside this package).
 if [ "${1:-}" = "matrix" ]; then
     shift
     # Candidate locations: a source checkout / expanded bundle (sibling
@@ -174,9 +175,9 @@ if [ "${1:-}" = "matrix" ]; then
         echo "$PROG: matrix tooling (matrix_agent/fleet.sh) not found; looked in:" >&2
         echo "    $SCRIPT_DIR/../matrix_agent/" >&2
         echo "    $SCRIPT_DIR/matrix_agent/" >&2
-        echo "  A pip install ships only the orchestrator. Run from a source checkout" >&2
-        echo "  or an expanded bundle, or copy the matrix_agent/ directory next to" >&2
-        echo "  this script. See matrix_agent/README.md." >&2
+        echo "  This suggests a broken or partial install. Reinstall with" >&2
+        echo "  'pip install --force-reinstall iperf-orchestrator', or run from a" >&2
+        echo "  source checkout / expanded bundle. See matrix_agent/README.md." >&2
         exit 1
     fi
     # Exec via bash, not directly: some transports and bundle splitters
@@ -869,7 +870,7 @@ CONVENIENCE:
     help-advanced              Show this message.
     version                    Print the version and exit (same as --version).
 
-SUSTAINED LOAD (source checkout only):
+SUSTAINED LOAD:
     matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
                                prescribed traffic matrix across the whole fleet
                                indefinitely (paced flows, receiver-side

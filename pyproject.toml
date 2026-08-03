@@ -62,11 +62,16 @@ Changelog = "https://github.com/MartinGallagher-code/iperf_orchestrator/blob/mai
 
 [project.scripts]
 iperf-orchestrator = "iperf_orchestrator.cli:main"
+matrix-agent = "matrix_agent.matrix_agent:main"
 
 [tool.setuptools]
-packages = ["iperf_orchestrator"]
+packages = ["iperf_orchestrator", "matrix_agent"]
 
-# Ship the bash script (the actual orchestrator) inside the wheel so the
-# console-script wrapper can locate and exec it.
+# Ship the bash scripts inside the wheel: the orchestrator so the
+# console-script wrapper can exec it, and fleet.sh so the `matrix`
+# subcommand works out of the box from a pip install (the orchestrator
+# finds it at site-packages/matrix_agent/fleet.sh via its ../matrix_agent
+# search path).
 [tool.setuptools.package-data]
 iperf_orchestrator = ["iperf_orchestrator.sh"]
+matrix_agent = ["fleet.sh"]

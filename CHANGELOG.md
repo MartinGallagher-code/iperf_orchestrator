@@ -66,6 +66,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now gitignored and rebuilt on demand with `./merge.sh`.
 
 ### Fixed
+- **pip installs now ship the matrix tooling.** The wheel includes the
+  `matrix_agent` package (agent + `fleet.sh`), so `iperf-orchestrator
+  matrix <cmd>` works out of the box, and a `matrix-agent` console command
+  is installed alongside `iperf-orchestrator`. Previously `matrix` was
+  source-checkout-only and a pip user hit "matrix tooling not found".
 - `iperf-orchestrator matrix` no longer requires the executable bit on
   `matrix_agent/fleet.sh` (some transports and bundle splitters drop file
   modes); the pass-through execs via `bash`. Its "not found" error now
