@@ -45,13 +45,31 @@ EOF
 # 3. Sanity-check the matrix against NIC capacity BEFORE blaming the network
 ./matrix_agent.py check --matrix matrix.csv --egress-gbps 25 --ingress-gbps 25
 
-# 4. Run one agent per host (copy matrix.csv + this script everywhere)
-./matrix_agent.py run --matrix matrix.csv --report-dir /var/tmp/mxa
-# each agent auto-identifies via gethostname(); override with --hostname
+# 4. Deploy + start everywhere. fleet.sh reads the host list from the
+#    matrix header -- there is no separate inventory to keep in sync.
+./fleet.sh --matrix matrix.csv up
 
-# 5. Aggregate the reports (pull the CSVs back however you like)
-./matrix_agent.py summarize reports/*_agent.csv --window 60
+# 5. Watch and aggregate
+./fleet.sh --matrix matrix.csv status | sort
+./fleet.sh --matrix matrix.csv summarize        # collects CSVs, prints deficits
+
+# 6. Change rates live, or tear down
+vi matrix.csv && ./fleet.sh --matrix matrix.csv reload
+./fleet.sh --matrix matrix.csv down
 ```
+
+`fleet.sh` hides all the SSH fan-out (bounded concurrency, per-host
+failure reporting, `--user`/`--remote-dir`/`--jobs` knobs, `prep` to set
+the `fq` qdisc fleet-wide). Agent flags pass through after `--`:
+
+```bash
+./fleet.sh --matrix matrix.csv up -- --protocol udp --interval 30 --mss 600
+```
+
+Each agent is started with `--hostname` pinned to its matrix name, so
+identity never depends on what `gethostname()` returns on the box.
+Direct single-host invocation (`./matrix_agent.py run ...`) still works
+for systemd deployments — see below.
 
 The matrix is a plain grid CSV — rows are sources, columns are
 destinations, cells are Mbit/s. Hand-edit it for non-uniform patterns;

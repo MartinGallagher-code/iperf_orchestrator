@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `matrix_agent/fleet.sh`: one-command fleet operations for matrix_agent
+  (`up`, `status`, `reload`, `summarize`, `down`, `prep`). All SSH/SCP
+  fan-out is internal, with bounded concurrency and per-host failure
+  reporting; the host list comes from the matrix header via the new
+  `matrix_agent.py hosts` subcommand, so the matrix file is the single
+  source of truth.
 - `--version` flag (and `version` subcommand) that prints the program name
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
