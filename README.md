@@ -142,6 +142,11 @@ CONVENIENCE:
   doctor                     Check local prerequisites
   help                       Common commands and flags
   help-advanced              Every command, every flag, every env var
+
+SUSTAINED LOAD (source checkout only):
+  matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
+                             traffic matrix across the fleet indefinitely
+                             (up / status / reload / summarize / down)
 ```
 
 The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.

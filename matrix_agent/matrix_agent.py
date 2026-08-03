@@ -615,6 +615,16 @@ def cmd_check(args):
     return 0
 
 
+def cmd_hosts(args):
+    # Machine-readable host list for fleet tooling (fleet.sh): one line
+    # per host, "name addr port", in matrix order.
+    hosts, endpoints, _rates = load_matrix(args.matrix, None)
+    for name in hosts:
+        addr, port = endpoints[name]
+        print("%s %s %d" % (name, addr, port))
+    return 0
+
+
 def cmd_summarize(args):
     rows = []
     for path in args.reports:
@@ -696,6 +706,9 @@ def main(argv=None):
     r.add_argument("--nodelay", action="store_true",
                    help="set TCP_NODELAY (with --chunk-bytes, emulates small-message senders)")
 
+    hl = sub.add_parser("hosts", help="list matrix hosts (name addr port)")
+    hl.add_argument("--matrix", required=True)
+
     s = sub.add_parser("summarize", help="aggregate report CSVs")
     s.add_argument("reports", nargs="+", help="report CSV files")
     s.add_argument("--window", type=int, default=30, help="seconds of history to use")
@@ -705,8 +718,8 @@ def main(argv=None):
     if args.cmd is None:
         ap.print_help()
         return 2
-    return {"gen": cmd_gen, "check": cmd_check,
-            "run": cmd_run, "summarize": cmd_summarize}[args.cmd](args)
+    return {"gen": cmd_gen, "check": cmd_check, "run": cmd_run,
+            "hosts": cmd_hosts, "summarize": cmd_summarize}[args.cmd](args)
 
 
 if __name__ == "__main__":

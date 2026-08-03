@@ -154,6 +154,23 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 _flag_die() { echo "iperf-orchestrator: $*" >&2; exit 2; }
 _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
 
+# `matrix` is a pass-through to the sustained-load fleet driver
+# (matrix_agent/fleet.sh), which has its own flag namespace (--matrix,
+# --jobs, ...) that must not be filtered through this script's global
+# flag parser. Dispatch it before the parsing loop, and only when it is
+# the first argument so flag handling for every other command is
+# untouched. Source checkouts only: the pip wheel ships just this script.
+if [ "${1:-}" = "matrix" ]; then
+    shift
+    _fleet="$SCRIPT_DIR/../matrix_agent/fleet.sh"
+    if [ ! -x "$_fleet" ]; then
+        echo "$PROG: matrix tooling not found at $_fleet" >&2
+        echo "  (the 'matrix' command needs a source checkout; see matrix_agent/README.md)" >&2
+        exit 1
+    fi
+    exec "$_fleet" "$@"
+fi
+
 _PARSED=()
 _saw_subcommand=0
 while [ $# -gt 0 ]; do
@@ -675,6 +692,9 @@ an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 Other useful commands:
     $PROG doctor             Check that local prerequisites are installed
     $PROG status             Probe hosts and list available result runs
+    $PROG matrix <cmd>       Sustained traffic-matrix emulation across the
+                             fleet (up/status/reload/summarize/down); see
+                             matrix_agent/README.md
     $PROG --help             Common commands and flags (also: help, -h)
     $PROG help-advanced      Every command, every flag, every env var
     $PROG --version          Print the version and exit
@@ -835,6 +855,15 @@ CONVENIENCE:
     help                       Show the simple help (this command's short form).
     help-advanced              Show this message.
     version                    Print the version and exit (same as --version).
+
+SUSTAINED LOAD (source checkout only):
+    matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
+                               prescribed traffic matrix across the whole fleet
+                               indefinitely (paced flows, receiver-side
+                               reporting). Commands: up, status, reload,
+                               collect, summarize, down, prep. All flags after
+                               'matrix' belong to fleet.sh -- see
+                               $PROG matrix --help and matrix_agent/README.md.
 
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
