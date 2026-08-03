@@ -108,7 +108,30 @@ EOF
     assert_contains "$(cat "$TEST_TMPDIR/out")" "beta" "failing host named" || return 1
 }
 
+test_orchestrator_matrix_subcommand_forwards_to_fleet() {
+    _fleet_env
+    # `matrix --help` through the orchestrator must reach fleet.sh's
+    # usage text, proving the pre-parse dispatch fires before the
+    # orchestrator's own flag validation could reject --help's friends.
+    run_orch matrix --help
+    assert_status 0 "$RUN_RC" "matrix --help should exit 0" || return 1
+    assert_contains "$RUN_OUT" "fleet.sh" "fleet usage reached" || return 1
+    assert_contains "$RUN_OUT" "summarize" || return 1
+}
+
+test_orchestrator_matrix_forwards_fleet_flags_untouched() {
+    _fleet_env
+    # --matrix is a fleet.sh flag the orchestrator's global parser would
+    # reject; through the matrix pass-through it must work end-to-end.
+    PATH="$FAKE_BIN:$PATH" run_orch matrix \
+        --matrix "$TEST_TMPDIR/matrix.csv" --jobs 2 stop
+    assert_status 0 "$RUN_RC" "matrix stop via orchestrator" || return 1
+    assert_contains "$(cat "$FLEET_LOG")" "pkill -TERM -f 'matrix_agent.py run'" || return 1
+}
+
 run_test test_hosts_subcommand_lists_matrix_hosts
+run_test test_orchestrator_matrix_subcommand_forwards_to_fleet
+run_test test_orchestrator_matrix_forwards_fleet_flags_untouched
 run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
 run_test test_stop_and_reload_signal_agents
