@@ -162,13 +162,26 @@ _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
 # untouched. Source checkouts only: the pip wheel ships just this script.
 if [ "${1:-}" = "matrix" ]; then
     shift
-    _fleet="$SCRIPT_DIR/../matrix_agent/fleet.sh"
-    if [ ! -x "$_fleet" ]; then
-        echo "$PROG: matrix tooling not found at $_fleet" >&2
-        echo "  (the 'matrix' command needs a source checkout; see matrix_agent/README.md)" >&2
+    # Candidate locations: a source checkout / expanded bundle (sibling
+    # matrix_agent/ dir), or matrix_agent/ dropped next to this script --
+    # the latter lets a pip install opt in by copying one directory.
+    _fleet=""
+    for _cand in "$SCRIPT_DIR/../matrix_agent/fleet.sh" \
+                 "$SCRIPT_DIR/matrix_agent/fleet.sh"; do
+        if [ -f "$_cand" ]; then _fleet="$_cand"; break; fi
+    done
+    if [ -z "$_fleet" ]; then
+        echo "$PROG: matrix tooling (matrix_agent/fleet.sh) not found; looked in:" >&2
+        echo "    $SCRIPT_DIR/../matrix_agent/" >&2
+        echo "    $SCRIPT_DIR/matrix_agent/" >&2
+        echo "  A pip install ships only the orchestrator. Run from a source checkout" >&2
+        echo "  or an expanded bundle, or copy the matrix_agent/ directory next to" >&2
+        echo "  this script. See matrix_agent/README.md." >&2
         exit 1
     fi
-    exec "$_fleet" "$@"
+    # Exec via bash, not directly: some transports and bundle splitters
+    # drop file modes, and a lost executable bit must not break this.
+    exec bash "$_fleet" "$@"
 fi
 
 _PARSED=()

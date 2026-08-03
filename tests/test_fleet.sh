@@ -129,9 +129,38 @@ test_orchestrator_matrix_forwards_fleet_flags_untouched() {
     assert_contains "$(cat "$FLEET_LOG")" "pkill -TERM -f 'matrix_agent.py run'" || return 1
 }
 
+test_matrix_dispatch_survives_lost_executable_bit() {
+    # Some transports and bundle splitters drop file modes; the
+    # pass-through must exec via bash rather than relying on +x.
+    _fleet_env
+    local tree="$TEST_TMPDIR/tree"
+    mkdir -p "$tree"
+    cp -r "$REPO_ROOT/iperf_orchestrator" "$REPO_ROOT/matrix_agent" "$tree/"
+    chmod 644 "$tree/matrix_agent/fleet.sh"
+    local out rc
+    out=$(bash "$tree/iperf_orchestrator/iperf_orchestrator.sh" matrix --help 2>&1); rc=$?
+    assert_status 0 "$rc" "matrix must work without exec bit on fleet.sh" || return 1
+    assert_contains "$out" "fleet.sh" "fleet usage reached" || return 1
+}
+
+test_matrix_dispatch_reports_missing_tooling_clearly() {
+    _fleet_env
+    local tree="$TEST_TMPDIR/lonely"
+    mkdir -p "$tree"
+    cp -r "$REPO_ROOT/iperf_orchestrator" "$tree/"   # no matrix_agent/ at all
+    local out rc
+    out=$(bash "$tree/iperf_orchestrator/iperf_orchestrator.sh" matrix up 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || { echo "missing tooling should exit nonzero"; return 1; }
+    assert_contains "$out" "matrix_agent/fleet.sh" "names what is missing" || return 1
+    assert_contains "$out" "pip install ships only the orchestrator" || return 1
+    assert_contains "$out" "copy the matrix_agent/ directory" "gives the remedy" || return 1
+}
+
 run_test test_hosts_subcommand_lists_matrix_hosts
 run_test test_orchestrator_matrix_subcommand_forwards_to_fleet
 run_test test_orchestrator_matrix_forwards_fleet_flags_untouched
+run_test test_matrix_dispatch_survives_lost_executable_bit
+run_test test_matrix_dispatch_reports_missing_tooling_clearly
 run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
 run_test test_stop_and_reload_signal_agents

@@ -65,6 +65,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `bundle.txt` is no longer committed. It is a generated snapshot of the tree,
   now gitignored and rebuilt on demand with `./merge.sh`.
 
+### Fixed
+- `iperf-orchestrator matrix` no longer requires the executable bit on
+  `matrix_agent/fleet.sh` (some transports and bundle splitters drop file
+  modes); the pass-through execs via `bash`. Its "not found" error now
+  distinguishes genuinely missing tooling, lists the paths searched, and
+  explains the pip-install case with a remedy. A `matrix_agent/` directory
+  placed next to the installed script is now also honored.
+
 ### Removed
 - `pandas` as a declared dependency, and from the `doctor` probes. Nothing in
   the project has ever imported it; only `make-heatmap` needs third-party
