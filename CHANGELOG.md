@@ -16,6 +16,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI job that scans for post-3.6 syntax and stdlib APIs (`vermin`) and runs
   the suite under a real Python 3.6 container.
 
+### Added
+- `merge.sh -n PARTS` splits the bundle over several files
+  (`bundle.part1of2.txt`, …) for transports that cap the size of a single
+  file. Parts are cut on entry boundaries and balanced by byte size, so each
+  one is a complete, independently valid bundle that `split.sh` expands in
+  any order into the same destination.
+
 ### Changed
 - **Lowered the supported Python floor to 3.6** (`requires-python = ">=3.6"`),
   so the orchestrator host can be a stock RHEL/CentOS 8 or Ubuntu 18.04 box
@@ -32,6 +39,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (3.9 through 3.13) instead of only 3.12, and additionally exercises the 3.6
   floor in a container, so the declared minimum is verified rather than
   assumed.
+- `merge.sh` / `split.sh` replaced with the hardened v2 bundle format shared
+  with the meridian_commander project: per-file sha256 verified on expansion,
+  preserved permissions, symlinks, empty directories and missing trailing
+  newlines, a header entry count that detects truncated bundles, and a
+  `split.sh` that rejects absolute/`..` paths and never passes
+  bundle-controlled strings to a shell.
+- `bundle.txt` is no longer committed. It is a generated snapshot of the tree,
+  now gitignored and rebuilt on demand with `./merge.sh`.
 
 ### Removed
 - `pandas` as a declared dependency, and from the `doctor` probes. Nothing in

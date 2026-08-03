@@ -465,6 +465,43 @@ The repository ships an extensive bash-based test suite under `tests/` covering 
 
 ---
 
+## Utility scripts
+
+`merge.sh` bundles a directory tree into a single text file and `split.sh`
+expands it again — handy for moving the tree through a channel that only
+carries plain text.
+
+```bash
+./merge.sh bundle.txt some/dir     # bundle a tree (default: current dir)
+./split.sh bundle.txt restored/    # expand it (default: current dir)
+```
+
+When a transport caps the size of a single file, `-n` spreads the tree over
+several bundles:
+
+```bash
+./merge.sh -n 2                      # bundle.part1of2.txt, bundle.part2of2.txt
+./split.sh bundle.part1of2.txt out/  # expand the parts in any order
+./split.sh bundle.part2of2.txt out/  # ...into the same directory
+```
+
+Parts are cut on entry boundaries and balanced by byte size, so no file is
+ever chopped in half and each part is a complete, independently valid bundle
+with its own header and checksums. The `.txt` extension stays last in the
+name for transports that judge a file by its suffix.
+
+The bundle format inlines text files verbatim and base64-encodes binaries
+(and any text file whose content would collide with the section markers).
+Permissions, symlinks, empty directories and missing trailing newlines are
+preserved; every file carries a sha256 that `split.sh` verifies on expansion,
+and the header entry count catches a bundle truncated mid-transfer.
+`split.sh` refuses bundles containing absolute or `..` paths and never passes
+bundle-controlled strings to a shell.
+
+`bundle.txt` is generated, not committed — rebuild it whenever you need one.
+
+---
+
 ## License and contribution
 
 This project is licensed under the **GNU General Public License v3.0** (GPL-3.0). See the [LICENSE](LICENSE) file for the full text.
