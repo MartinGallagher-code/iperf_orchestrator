@@ -11,6 +11,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and version.
 - The no-args quick-start banner now points at `--help` and `--version`.
 
+### Added
+- `merge.sh -n PARTS` splits the bundle over several files
+  (`bundle.part1of2.txt`, …) for transports that cap the size of a single
+  file. Parts are cut on entry boundaries and balanced by byte size, so each
+  one is a complete, independently valid bundle that `split.sh` expands in
+  any order into the same destination.
+
 ### Changed
 - `merge.sh` / `split.sh` replaced with the hardened v2 bundle format shared
   with the meridian_commander project: per-file sha256 verified on expansion,

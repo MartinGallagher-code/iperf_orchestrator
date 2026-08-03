@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 # merge.sh -- bundle a directory tree into a single text file.
 #
-# Usage: merge.sh [OUTPUT] [SOURCE_DIR]
+# Usage: merge.sh [-n PARTS] [OUTPUT] [SOURCE_DIR]
+#   -n, --parts PARTS  split into PARTS bundles (default: 1)
 #   OUTPUT      bundle file to write   (default: bundle.txt)
 #   SOURCE_DIR  directory to bundle    (default: current directory)
 #
 # Companion of split.sh, which expands the bundle again.
+#
+# With -n, the tree is spread over PARTS files named after OUTPUT --
+# bundle.part1of2.txt, bundle.part2of2.txt -- for transports that cap the
+# size of a single file.  Each part is a complete, independently valid
+# bundle with its own header and checksums, so split.sh expands them one
+# at a time (in any order) into the same destination:
+#
+#   ./merge.sh -n 2                      # write the two parts
+#   ./split.sh bundle.part1of2.txt out/  # expand either part first
+#   ./split.sh bundle.part2of2.txt out/  # ...then the other
+#
+# Entries are never cut in half; parts are balanced by byte size, so a
+# single file larger than the target share still lands whole in one part.
 #
 # Format (v2) -- one section per entry:
 #   ===FILE: rel/path===          text file, inlined verbatim
@@ -36,10 +50,28 @@ set -euo pipefail
 export LC_ALL=C
 
 usage() {
-    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
-[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && usage 0
+
+parts=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)   usage 0 ;;
+        -n|--parts)  [ $# -ge 2 ] || { echo "merge.sh: $1 needs a value" >&2; exit 1; }
+                     parts="$2"; shift 2 ;;
+        --parts=*)   parts="${1#*=}"; shift ;;
+        -n*)         parts="${1#-n}"; shift ;;
+        --)          shift; break ;;
+        -*)          echo "merge.sh: unknown option: $1" >&2; usage 1 ;;
+        *)           break ;;
+    esac
+done
+
+case "$parts" in
+    ''|*[!0-9]*) echo "merge.sh: --parts wants a positive integer, got: $parts" >&2; exit 1 ;;
+esac
+[ "$parts" -ge 1 ] || { echo "merge.sh: --parts must be >= 1" >&2; exit 1; }
 
 out="${1:-bundle.txt}"
 src="${2:-.}"
@@ -63,6 +95,45 @@ tmp_abs="$out_abs.tmp.$$"
 script_abs=$(abspath "$0")
 split_abs="$(dirname "$script_abs")/split.sh"
 src_abs=$(cd "$src" && pwd)
+
+# "bundle.txt" + part 1 of 2 -> "bundle.part1of2.txt".  The extension is
+# kept last on purpose: transports that judge a file by its suffix should
+# still see .txt.
+case "$out" in
+    */.*|.*)  out_base="$out"; out_ext="" ;;      # dotfile, no extension
+    *.*)      out_base="${out%.*}"; out_ext=".${out##*.}" ;;
+    *)        out_base="$out"; out_ext="" ;;
+esac
+part_name() {  # $1=index
+    printf '%s.part%dof%d%s\n' "$out_base" "$1" "$parts" "$out_ext"
+}
+part_prefix_abs=$(abspath "$out_base")
+
+# Everything the bundle must never contain: the output(s), the tempfiles,
+# and the two scripts.  Part files are listed too, so re-running merge.sh
+# in a directory that already holds a previous run's parts does not bundle
+# them into the new one.
+excludes=("$out_abs" "$tmp_abs" "$script_abs" "$split_abs")
+if [ "$parts" -gt 1 ]; then
+    i=1
+    while [ "$i" -le "$parts" ]; do
+        excludes+=("$(abspath "$(part_name "$i")")")
+        i=$((i + 1))
+    done
+fi
+is_excluded() {
+    local e
+    for e in "${excludes[@]}"; do
+        [ "$1" = "$e" ] && return 0
+    done
+    # Also catch parts left over from an earlier run with a different -n:
+    # those names are not in the list above, but bundling one bundle into
+    # the next is never what anyone wants.
+    case "$1" in
+        "$part_prefix_abs".part*of*"$out_ext") return 0 ;;
+    esac
+    return 1
+}
 
 # Checksum tool (optional -- bundles still work without one).
 if command -v sha256sum >/dev/null 2>&1; then
@@ -118,6 +189,7 @@ sort_z() {
 }
 
 body_abs="$tmp_abs.body"
+excludes+=("$body_abs")
 trap 'rm -f "$tmp_abs" "$body_abs"' EXIT
 
 # The body is written first so the entry count is known, then the final
@@ -129,13 +201,11 @@ trap 'rm -f "$tmp_abs" "$body_abs"' EXIT
         rel="${f#"$src"/}"
         [ "$rel" = "$f" ] && continue          # the source dir itself
         f_abs="$src_abs/$rel"
-        case "$f_abs" in
-            # The body tempfile belongs here too: find runs concurrently with
-            # the loop that writes it, so bundling into the tree being scanned
-            # would otherwise inline the growing file into itself and never
-            # terminate.
-            "$out_abs"|"$tmp_abs"|"$body_abs"|"$script_abs"|"$split_abs") continue ;;
-        esac
+        # The body tempfile is in the exclude list too: find runs concurrently
+        # with the loop that writes it, so bundling into the tree being scanned
+        # would otherwise inline the growing file into itself and never
+        # terminate.
+        is_excluded "$f_abs" && continue
 
         case "$rel" in
             *[$'\x01'-$'\x1f']*)
@@ -178,16 +248,96 @@ trap 'rm -f "$tmp_abs" "$body_abs"' EXIT
     )
 } > "$body_abs"
 
+entries=$((files + dirs + links))
+
+if [ "$parts" -le 1 ]; then
+    {
+        printf '# bundle format v2 (merge.sh) -- expand with split.sh\n'
+        printf '# bundle entries: %s\n' "$entries"
+        cat "$body_abs"
+    } > "$tmp_abs"
+    rm -f "$body_abs"
+
+    mv "$tmp_abs" "$out_abs"
+    trap - EXIT
+
+    total_lines=$(($(wc -l < "$out_abs")))
+    echo "Wrote $out: $files file(s) ($b64s base64), $dirs empty dir(s), \
+$links symlink(s), $skipped skipped, $total_lines lines"
+    exit 0
+fi
+
+# --- multi-part output ---------------------------------------------------
+# Cut the body on ===END=== boundaries so no entry is ever split across two
+# files, balancing parts by byte size.  Each part then gets its own header,
+# which is what makes it independently expandable.
+split_dir="$tmp_abs.parts"
+mkdir -p "$split_dir"
+trap 'rm -f "$tmp_abs" "$body_abs"; rm -rf "$split_dir"' EXIT
+
+body_bytes=$(wc -c < "$body_abs")
+awk -v parts="$parts" -v total="$body_bytes" -v dir="$split_dir" '
+BEGIN { part = 1; target = total / parts; cur = 0; n = 0; buf = "" }
 {
-    printf '# bundle format v2 (merge.sh) -- expand with split.sh\n'
-    printf '# bundle entries: %s\n' $((files + dirs + links))
-    cat "$body_abs"
-} > "$tmp_abs"
+    buf = buf $0 "\n"
+    len += length($0) + 1
+}
+/^===END===$/ {
+    printf "%s", buf > (dir "/body" part)
+    cur += len; n++
+    buf = ""; len = 0
+    # Move on once this part has taken its share, keeping at least one
+    # entry for every remaining part.
+    if (part < parts && cur >= target * part) {
+        close(dir "/body" part)
+        print n > (dir "/count" part)
+        close(dir "/count" part)
+        part++; n = 0
+    }
+}
+END {
+    if (buf != "") printf "%s", buf > (dir "/body" part)
+    close(dir "/body" part)
+    print n > (dir "/count" part)
+    close(dir "/count" part)
+    # Parts that never received an entry still need to exist as empty
+    # bundles rather than silently vanishing from the numbering.
+    for (i = part + 1; i <= parts; i++) {
+        printf "" > (dir "/body" i)
+        close(dir "/body" i)
+        print 0 > (dir "/count" i)
+        close(dir "/count" i)
+    }
+}
+' "$body_abs"
 rm -f "$body_abs"
 
-mv "$tmp_abs" "$out_abs"
+written=0
+i=1
+while [ "$i" -le "$parts" ]; do
+    pname=$(part_name "$i")
+    pabs=$(abspath "$pname")
+    pcount=$(cat "$split_dir/count$i")
+    {
+        printf '# bundle format v2 (merge.sh) -- expand with split.sh\n'
+        printf '# bundle part %d of %d\n' "$i" "$parts"
+        printf '# bundle entries: %s\n' "$pcount"
+        cat "$split_dir/body$i"
+    } > "$pabs.tmp.$$"
+    mv "$pabs.tmp.$$" "$pabs"
+    written=$((written + pcount))
+    echo "  $pname: $pcount entr(y/ies), $(wc -c < "$pabs") bytes, \
+$(wc -l < "$pabs") lines"
+    i=$((i + 1))
+done
+
+rm -rf "$split_dir"
 trap - EXIT
 
-total_lines=$(($(wc -l < "$out_abs")))
-echo "Wrote $out: $files file(s) ($b64s base64), $dirs empty dir(s), \
-$links symlink(s), $skipped skipped, $total_lines lines"
+if [ "$written" -ne "$entries" ]; then
+    echo "merge.sh: internal error: split $written of $entries entries" >&2
+    exit 1
+fi
+
+echo "Wrote $parts part(s) of $out: $files file(s) ($b64s base64), \
+$dirs empty dir(s), $links symlink(s), $skipped skipped, $entries entries total"

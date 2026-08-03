@@ -475,6 +475,20 @@ carries plain text.
 ./split.sh bundle.txt restored/    # expand it (default: current dir)
 ```
 
+When a transport caps the size of a single file, `-n` spreads the tree over
+several bundles:
+
+```bash
+./merge.sh -n 2                      # bundle.part1of2.txt, bundle.part2of2.txt
+./split.sh bundle.part1of2.txt out/  # expand the parts in any order
+./split.sh bundle.part2of2.txt out/  # ...into the same directory
+```
+
+Parts are cut on entry boundaries and balanced by byte size, so no file is
+ever chopped in half and each part is a complete, independently valid bundle
+with its own header and checksums. The `.txt` extension stays last in the
+name for transports that judge a file by its suffix.
+
 The bundle format inlines text files verbatim and base64-encodes binaries
 (and any text file whose content would collide with the section markers).
 Permissions, symlinks, empty directories and missing trailing newlines are
