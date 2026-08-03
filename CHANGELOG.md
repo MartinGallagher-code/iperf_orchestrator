@@ -17,12 +17,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the suite under a real Python 3.6 container.
 
 ### Changed
-- **Lowered the supported Python floor from 3.8 to 3.6**
-  (`requires-python = ">=3.6"`), so the orchestrator host can be a stock
-  RHEL/CentOS 8 or Ubuntu 18.04 box using its system interpreter. Required
-  two changes: the pip wrapper no longer uses `from __future__ import
-  annotations` (3.7+) or PEP 585/604 annotations, and `results-summary` uses
-  `statistics.mean` instead of `statistics.fmean` (3.8+).
+- **Lowered the supported Python floor to 3.6** (`requires-python = ">=3.6"`),
+  so the orchestrator host can be a stock RHEL/CentOS 8 or Ubuntu 18.04 box
+  using its system interpreter. Required two changes: the pip wrapper no
+  longer uses `from __future__ import annotations` (3.7+) or PEP 585/604
+  annotations, and `results-summary` uses `statistics.mean` instead of
+  `statistics.fmean` (3.8+).
+
+  This supersedes the unreleased 3.9 floor, which briefly raised the minimum
+  on the way to this release. The motivation there — that a declared floor CI
+  never runs is not a real floor — is kept and extended: the version matrix
+  below still runs, and the floor itself is now exercised too.
+- CI runs the bash test suite against every Python the hosted runners provide
+  (3.9 through 3.13) instead of only 3.12, and additionally exercises the 3.6
+  floor in a container, so the declared minimum is verified rather than
+  assumed.
 
 ### Removed
 - `pandas` as a declared dependency, and from the `doctor` probes. Nothing in
