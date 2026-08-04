@@ -776,6 +776,33 @@ def cmd_summarize(args):
           % (args.window, len(recent), len(agg)))
     print("aggregate rx: %.1f / %.1f Mbps (%.1f%% of target)"
           % (ta, tt, (ta / tt * 100) if tt else 0.0))
+    # Per-host totals, receiver-side truth for both directions: a host's
+    # "in" sums its own rx rows, its "out" sums every peer's rx rows for
+    # flows it sent. Worst-first separates one sick host from congested
+    # fabric at a glance.
+    per_host = {}   # h -> [in_target, in_achieved, out_target, out_achieved]
+    for (host, peer), a in agg.items():
+        t, ach = a[0] / a[2], a[1] / a[2]
+        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0])
+        hs[0] += t
+        hs[1] += ach
+        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0])
+        ps[2] += t
+        ps[3] += ach
+
+    def _frac(ach, t):
+        return ach / t if t else 1.0
+
+    ranked = sorted(per_host.items(),
+                    key=lambda kv: min(_frac(kv[1][1], kv[1][0]),
+                                       _frac(kv[1][3], kv[1][2])))
+    print("per host (rx in / tx out, achieved/target Mbps, worst first):")
+    for h, (it, ia, ot, oa) in ranked[:args.top_hosts]:
+        print("  %-24s in %8.1f/%-8.1f (%3.0f%%)   out %8.1f/%-8.1f (%3.0f%%)"
+              % (h, ia, it, _frac(ia, it) * 100, oa, ot, _frac(oa, ot) * 100))
+    if len(ranked) > args.top_hosts:
+        print("  ... %d more hosts (raise --top-hosts)"
+              % (len(ranked) - args.top_hosts))
     deficits = []
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
@@ -849,6 +876,8 @@ def main(argv=None):
     s.add_argument("reports", nargs="+", help="report CSV files")
     s.add_argument("--window", type=int, default=30, help="seconds of history to use")
     s.add_argument("--top", type=int, default=10, help="worst flows to list")
+    s.add_argument("--top-hosts", type=int, default=10,
+                   help="hosts to list in the per-host table (worst first)")
     s.add_argument("--grid", metavar="DIR",
                    help="also write achieved/deficit N x N grid CSVs and an "
                         "orchestrator-compatible iperf_results.csv into DIR, "

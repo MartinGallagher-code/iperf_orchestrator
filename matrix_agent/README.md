@@ -109,8 +109,10 @@ ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra
 prints a one-line aggregate per interval to stdout — under systemd,
 `journalctl -u matrix-agent -f` is a live fleet-health ticker.
 
-`summarize` turns collected reports into the deficit view: aggregate
-achieved vs. target and the worst flows. A dark *row* in the deficit
+`summarize` turns collected reports into the deficit view: the fleet
+aggregate, a per-host table (rx in / tx out, worst hosts first — both
+directions from receiver-side counters, so a host's "out" is what its
+peers actually got), and the worst flows. A dark *row* in the deficit
 matrix is a sick sender, a dark *column* a sick receiver, a dark *block*
 a congested leaf pair.
 

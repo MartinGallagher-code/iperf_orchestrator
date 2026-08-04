@@ -188,6 +188,14 @@ EOF
     local out rc
     out=$(python3 "$AGENT" summarize "$rep" --window 30 --grid "$gdir" 2>&1); rc=$?
     assert_status 0 "$rc" "summarize --grid should succeed" || { echo "$out"; return 1; }
+    # Per-host table: receiver-side truth in both directions. 10.0.0.8
+    # receives 80/100 (in 80%) and its traffic to 10.0.0.7 arrives in
+    # full (out 100%); 10.0.0.7 is the mirror image.
+    assert_contains "$out" "per host (rx in / tx out" "per-host table present" || return 1
+    assert_contains "$out" "80.0/100.0" "deficit visible in host totals" || return 1
+    host8=$(echo "$out" | grep "^  10.0.0.8 ")
+    assert_contains "$host8" "( 80%)" "10.0.0.8 rx deficit" || return 1
+    assert_contains "$host8" "(100%)" "10.0.0.8 tx delivered" || return 1
     assert_contains "$(cat "$gdir/achieved_grid.csv")" "10.0.0.7,,80.000" \
         "achieved grid row: src 10.0.0.7 -> dst 10.0.0.8" || return 1
     assert_contains "$(cat "$gdir/deficit_grid.csv")" "10.0.0.7,,20.000" \

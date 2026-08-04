@@ -47,6 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the window aggregate as achieved/deficit N×N grid CSVs plus an
   orchestrator-format `iperf_results.csv`, so `make-pivot` and
   `make-heatmap` render matrix runs exactly like a sweep.
+- `summarize` prints a per-host table between the fleet aggregate and the
+  worst flows: rx in / tx out totals (achieved/target), worst hosts
+  first, both directions from receiver-side counters (`--top-hosts`).
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files
