@@ -208,8 +208,12 @@ class Flow(object):
     def _apply_kernel_pacing(self, sock, bps):
         # Best-effort: absent on non-Linux, and harmless to skip because
         # the token bucket below still bounds the average rate.
+        # The kernel takes a u32 of bytes/sec; pack it explicitly. A bare
+        # int above 2**31-1 (rates over ~17 Gbps) makes CPython retry the
+        # argument as a buffer and raise TypeError, killing the flow.
         try:
-            sock.setsockopt(socket.SOL_SOCKET, _SO_MAX_PACING_RATE, int(bps))
+            val = struct.pack("=I", min(int(bps), 0xFFFFFFFF))
+            sock.setsockopt(socket.SOL_SOCKET, _SO_MAX_PACING_RATE, val)
         except OSError:
             pass
 
@@ -237,10 +241,19 @@ class Flow(object):
         state["tokens"] -= nbytes
 
     def _run(self):
-        if self.proto == "udp":
-            self._run_udp()
-        else:
-            self._run_tcp()
+        # A sender thread must never die silently: without this, a bug in
+        # the loop leaves the flow listed at 0 Mbps with the only evidence
+        # buried in a thread traceback.
+        try:
+            if self.proto == "udp":
+                self._run_udp()
+            else:
+                self._run_tcp()
+        except Exception as exc:
+            print("FLOW DIED %s -> %s: %r" % (self.me, self.dst, exc),
+                  file=sys.stderr)
+            sys.stderr.flush()
+            raise
 
     def _open_tcp(self):
         # Manual socket instead of create_connection: TCP_MAXSEG must be

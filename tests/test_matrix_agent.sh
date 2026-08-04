@@ -210,6 +210,31 @@ EOF
     assert_contains "$(cat "$gdir/iperf_pivot.txt")" "80.0" "achieved rate in pivot" || return 1
 }
 
+test_rates_above_17gbps_do_not_kill_flows() {
+    # Regression: rates over ~17.2 Gbps overflowed the C int in the
+    # SO_MAX_PACING_RATE setsockopt; CPython retried the argument as a
+    # buffer and raised TypeError, killing every sender thread right
+    # after connect -- tx dead, peers=0 fleet-wide. The value is now
+    # packed as an explicit clamped u32.
+    _write_hosts
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 20000 \
+        -o "$TEST_TMPDIR/matrix.csv" >/dev/null
+    local rep="$TEST_TMPDIR/hirate"
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
+        --interval 1 --duration 3 --report-dir "$rep" \
+        > "$TEST_TMPDIR/hib.out" 2>&1 &
+    local bpid=$!
+    local out rc
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
+        --interval 1 --duration 3 --report-dir "$rep" 2>&1); rc=$?
+    wait "$bpid" 2>/dev/null
+    assert_status 0 "$rc" "high-rate run should exit cleanly" || { echo "$out"; return 1; }
+    case "$out$(cat "$TEST_TMPDIR/hib.out")" in
+        *"FLOW DIED"*|*Traceback*) echo "sender thread crashed:"; echo "$out"; return 1 ;;
+    esac
+    assert_contains "$out" "peers=1" "traffic must actually arrive" || return 1
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -229,6 +254,7 @@ run_test test_run_auto_identifies_by_local_address
 run_test test_run_rejects_ambiguous_local_addresses
 run_test test_bind_pins_traffic_iperf_orchestrator_style
 run_test test_summarize_grid_feeds_sweep_tooling
+run_test test_rates_above_17gbps_do_not_kill_flows
 run_test test_agent_rejects_unknown_hostname
 
 report_tests
