@@ -114,6 +114,46 @@ achieved vs. target and the worst flows. A dark *row* in the deficit
 matrix is a sick sender, a dark *column* a sick receiver, a dark *block*
 a congested leaf pair.
 
+### Sweep-style views (pivot table, heatmap)
+
+`summarize --grid DIR` additionally writes the window aggregate as
+files the sweep tooling reads:
+
+- `achieved_grid.csv` / `deficit_grid.csv` — N×N grids in the traffic
+  matrix's own shape (rows sources, columns destinations, Mbit/s).
+- `iperf_results.csv` — the orchestrator's own results format, so
+  `make-pivot` and `make-heatmap` render a matrix run exactly like a
+  sweep:
+
+```bash
+iperf-orchestrator matrix --matrix matrix.csv --grid gridout summarize
+iperf-orchestrator -o . --run-id gridout make-pivot
+iperf-orchestrator -o . --run-id gridout make-heatmap
+```
+
+### Finding the mesh's sustainable capacity
+
+The sweep answers "what is each pair's maximum, one pair at a time".
+The matrix can answer the question the sweep can't: **how much can all
+pairs carry simultaneously**. Ramp the rates until delivery stops
+keeping up — no restart needed, `reload` applies rates live:
+
+```bash
+./matrix_agent.py gen --hosts hosts.txt --rate-mbps 100 -o matrix.csv
+iperf-orchestrator matrix --matrix matrix.csv up
+# let it settle, then check delivery:
+iperf-orchestrator matrix --matrix matrix.csv summarize     # ~100%? raise it
+./matrix_agent.py gen --hosts hosts.txt --rate-mbps 200 -o matrix.csv
+iperf-orchestrator matrix --matrix matrix.csv reload
+# repeat (or binary-search); the knee where achieved stops tracking
+# target is the fabric's sustainable all-to-all capacity, and the
+# deficit grid shows exactly which rows/columns/blocks gave out first.
+```
+
+Use `--protocol udp` for a hard offered-load ramp (loss shows directly
+as `loss_pct`); TCP mode shares politely under overload, so the knee
+shows up as widening deficit rather than loss.
+
 ## Packet and buffer tuning
 
 The rate matrix says *how much*; these knobs say *what the traffic looks

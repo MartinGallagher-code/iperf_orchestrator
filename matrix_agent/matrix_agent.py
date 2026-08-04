@@ -698,6 +698,58 @@ def cmd_hosts(args):
     return 0
 
 
+def _write_grid_outputs(gdir, agg, protos, latest, window):
+    """Materialize the window aggregate as files the sweep tooling reads.
+
+    - achieved_grid.csv / deficit_grid.csv: N x N grids in the traffic
+      matrix's shape (rows sources, columns destinations, Mbit/s).
+    - iperf_results.csv: the orchestrator's parse-csv column layout, one
+      row per flow, so make-pivot and make-heatmap render matrix runs
+      exactly like a sweep. All rows share one timestamp and carry the
+      window as duration, which makes the pivot/heatmap time-averaging
+      come out to the plain window average.
+    """
+    os.makedirs(gdir, exist_ok=True)
+    hosts = sorted({h for (h, _p) in agg} | {p for (_h, p) in agg})
+    ach, tgt = {}, {}
+    for (host, peer), a in agg.items():           # rx rows: peer -> host
+        tgt[(peer, host)] = a[0] / a[2]
+        ach[(peer, host)] = a[1] / a[2]
+    deficit = {k: max(0.0, tgt[k] - v) for k, v in ach.items()}
+    for name, cells in (("achieved_grid.csv", ach), ("deficit_grid.csv", deficit)):
+        with open(os.path.join(gdir, name), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["src\\dst"] + hosts)
+            for s in hosts:
+                w.writerow([s] + ["%.3f" % cells[(s, d)] if (s, d) in cells else ""
+                                  for d in hosts])
+    cols = ["timestamp", "source", "target", "status", "protocol", "duration_s",
+            "parallel_streams", "bind_iface", "bind_ip",
+            "bytes_transferred", "bps", "mbps",
+            "src_port", "dst_port", "pair_a", "pair_b", "filename", "error"]
+    stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(latest))
+    results = os.path.join(gdir, "iperf_results.csv")
+    with open(results, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for (src, dst), mbps in sorted(ach.items()):
+            byts = int(mbps * 1e6 / 8 * window)
+            w.writerow({"timestamp": stamp, "source": src, "target": dst,
+                        "status": "OK", "protocol": protos.get((src, dst), "tcp").upper(),
+                        "duration_s": window, "parallel_streams": 1,
+                        "bind_iface": "", "bind_ip": "",
+                        "bytes_transferred": byts, "bps": int(mbps * 1e6),
+                        "mbps": "%.3f" % mbps,
+                        "src_port": "", "dst_port": "", "pair_a": src, "pair_b": dst,
+                        "filename": "matrix_agent", "error": ""})
+    base = os.path.basename(os.path.abspath(gdir))
+    parent = os.path.dirname(os.path.abspath(gdir)) or "."
+    print("wrote %s/{achieved_grid.csv,deficit_grid.csv,iperf_results.csv}" % gdir)
+    print("render the sweep-style views with:")
+    print("  iperf-orchestrator -o '%s' --run-id '%s' make-pivot" % (parent, base))
+    print("  iperf-orchestrator -o '%s' --run-id '%s' make-heatmap" % (parent, base))
+
+
 def cmd_summarize(args):
     rows = []
     for path in args.reports:
@@ -709,13 +761,15 @@ def cmd_summarize(args):
     latest = max(int(r["ts"]) for r in rows)
     cutoff = latest - args.window
     recent = [r for r in rows if int(r["ts"]) >= cutoff and r["dir"] == "rx"]
-    agg = {}   # (host, peer) -> [sum_target, sum_achieved, n]
+    agg = {}     # (host, peer) -> [sum_target, sum_achieved, n]
+    protos = {}  # (src, dst) -> proto
     for r in recent:
         key = (r["host"], r["peer"])
         a = agg.setdefault(key, [0.0, 0.0, 0])
         a[0] += float(r["target_mbps"])
         a[1] += float(r["achieved_mbps"])
         a[2] += 1
+        protos[(r["peer"], r["host"])] = r.get("proto", "tcp")
     tt = sum(a[0] / a[2] for a in agg.values())
     ta = sum(a[1] / a[2] for a in agg.values())
     print("window: last %ds (%d samples, %d flows)"
@@ -733,6 +787,10 @@ def cmd_summarize(args):
         for frac, host, peer, t, ach in deficits[:args.top]:
             print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)"
                   % (peer, host, ach, t, frac * 100))
+    if args.grid:
+        if not agg:
+            raise SystemExit("--grid: no rx rows inside the window")
+        _write_grid_outputs(args.grid, agg, protos, latest, args.window)
     return 0
 
 
@@ -791,6 +849,10 @@ def main(argv=None):
     s.add_argument("reports", nargs="+", help="report CSV files")
     s.add_argument("--window", type=int, default=30, help="seconds of history to use")
     s.add_argument("--top", type=int, default=10, help="worst flows to list")
+    s.add_argument("--grid", metavar="DIR",
+                   help="also write achieved/deficit N x N grid CSVs and an "
+                        "orchestrator-compatible iperf_results.csv into DIR, "
+                        "so make-pivot/make-heatmap render matrix runs")
 
     args = ap.parse_args(argv)
     if args.cmd is None:

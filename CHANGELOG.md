@@ -43,6 +43,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ip -o -4 addr show` (interface name or address), `IPERF_BIND`
   environment variable honored. Binds sender source addresses and both
   listeners.
+- `matrix_agent.py summarize --grid DIR` (and `fleet.sh --grid`) writes
+  the window aggregate as achieved/deficit N×N grid CSVs plus an
+  orchestrator-format `iperf_results.csv`, so `make-pivot` and
+  `make-heatmap` render matrix runs exactly like a sweep.
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files

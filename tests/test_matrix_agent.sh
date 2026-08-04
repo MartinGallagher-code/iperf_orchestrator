@@ -174,6 +174,34 @@ test_bind_pins_traffic_iperf_orchestrator_style() {
     assert_contains "$out" "no interface matched" || return 1
 }
 
+test_summarize_grid_feeds_sweep_tooling() {
+    # --grid materializes the window aggregate as N x N grid CSVs plus an
+    # orchestrator-format iperf_results.csv; prove the real make-pivot
+    # consumes it, so matrix runs get the sweep's pivot/heatmap views.
+    local rep="$TEST_TMPDIR/gridrep.csv" gdir="$TEST_TMPDIR/gridout"
+    cat > "$rep" <<EOF
+ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra
+1000,10.0.0.8,rx,10.0.0.7,tcp,100.000,80.000,100000000,
+1000,10.0.0.7,rx,10.0.0.8,tcp,100.000,100.000,125000000,
+1000,10.0.0.7,tx,10.0.0.8,tcp,100.000,99.000,124000000,
+EOF
+    local out rc
+    out=$(python3 "$AGENT" summarize "$rep" --window 30 --grid "$gdir" 2>&1); rc=$?
+    assert_status 0 "$rc" "summarize --grid should succeed" || { echo "$out"; return 1; }
+    assert_contains "$(cat "$gdir/achieved_grid.csv")" "10.0.0.7,,80.000" \
+        "achieved grid row: src 10.0.0.7 -> dst 10.0.0.8" || return 1
+    assert_contains "$(cat "$gdir/deficit_grid.csv")" "10.0.0.7,,20.000" \
+        "deficit = target - achieved" || return 1
+    local res; res=$(cat "$gdir/iperf_results.csv")
+    assert_contains "$res" "timestamp,source,target,status" "orchestrator column layout" || return 1
+    assert_contains "$res" "10.0.0.7,10.0.0.8,OK,TCP,30,1" "rx row became a sweep row" || return 1
+    # The advertised commands must actually work: real make-pivot over it.
+    run_orch -o "$TEST_TMPDIR" --run-id gridout make-pivot
+    assert_status 0 "$RUN_RC" "make-pivot over grid output" || { echo "$RUN_OUT"; return 1; }
+    [ -f "$gdir/iperf_pivot.txt" ] || { echo "no pivot written"; return 1; }
+    assert_contains "$(cat "$gdir/iperf_pivot.txt")" "80.0" "achieved rate in pivot" || return 1
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -192,6 +220,7 @@ run_test test_hosts_accepts_bare_ip_tokens
 run_test test_run_auto_identifies_by_local_address
 run_test test_run_rejects_ambiguous_local_addresses
 run_test test_bind_pins_traffic_iperf_orchestrator_style
+run_test test_summarize_grid_feeds_sweep_tooling
 run_test test_agent_rejects_unknown_hostname
 
 report_tests
