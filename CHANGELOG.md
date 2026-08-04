@@ -32,6 +32,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scales where a full-mesh iperf sweep is impractical. Includes matrix
   generation, admissibility checking, and report summarization; see
   `matrix_agent/README.md`.
+- matrix_agent works with bare-IP host lists: a plain address (optionally
+  `ip:port`) is a complete host token, and a directly-invoked agent
+  identifies its own matrix row by matching addresses against local
+  interfaces, so `--hostname` is unnecessary for IP matrices (ambiguity
+  still demands it explicitly).
+- `matrix_agent.py run --bind SPEC` (and `fleet.sh --bind`, forwarded to
+  every agent) pins matrix traffic to one NIC with the exact semantics of
+  `iperf-orchestrator --bind`: substring match against
+  `ip -o -4 addr show` (interface name or address), `IPERF_BIND`
+  environment variable honored. Binds sender source addresses and both
+  listeners.
+- `matrix_agent.py summarize --grid DIR` (and `fleet.sh --grid`) writes
+  the window aggregate as achieved/deficit N×N grid CSVs plus an
+  orchestrator-format `iperf_results.csv`, so `make-pivot` and
+  `make-heatmap` render matrix runs exactly like a sweep.
+- `summarize` prints a per-host table between the fleet aggregate and the
+  worst flows: rx in / tx out totals (achieved/target), worst hosts
+  first, both directions from receiver-side counters (`--top-hosts`).
 
 ### Added
 - `merge.sh -n PARTS` splits the bundle over several files
@@ -64,6 +82,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bundle-controlled strings to a shell.
 - `bundle.txt` is no longer committed. It is a generated snapshot of the tree,
   now gitignored and rebuilt on demand with `./merge.sh`.
+
+### Fixed
+- **pip installs now ship the matrix tooling.** The wheel includes the
+  `matrix_agent` package (agent + `fleet.sh`), so `iperf-orchestrator
+  matrix <cmd>` works out of the box, and a `matrix-agent` console command
+  is installed alongside `iperf-orchestrator`. Previously `matrix` was
+  source-checkout-only and a pip user hit "matrix tooling not found".
+- `iperf-orchestrator matrix` no longer requires the executable bit on
+  `matrix_agent/fleet.sh` (some transports and bundle splitters drop file
+  modes); the pass-through execs via `bash`. Its "not found" error now
+  distinguishes genuinely missing tooling, lists the paths searched, and
+  explains the pip-install case with a remedy. A `matrix_agent/` directory
+  placed next to the installed script is now also honored.
 
 ### Removed
 - `pandas` as a declared dependency, and from the `doctor` probes. Nothing in

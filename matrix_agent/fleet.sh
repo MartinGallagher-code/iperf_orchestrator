@@ -28,7 +28,11 @@
 #   --reports DIR      local dir for collected CSVs [MXA_REPORTS, ./reports]
 #   --python BIN       remote python                [MXA_PYTHON, python3]
 #   --nic DEV          NIC for `prep`               [MXA_NIC]
+#   --bind SPEC        pin agent traffic to a NIC (iperf-orchestrator
+#                      semantics; forwarded to every agent) [IPERF_BIND]
 #   --window SECONDS   summarize window             [60]
+#   --grid DIR         summarize also writes achieved/deficit grids and
+#                      an iperf_results.csv for make-pivot/make-heatmap
 #
 # Anything after `--` is passed to `matrix_agent.py run` verbatim, e.g.:
 #   fleet.sh --matrix m.csv up -- --protocol udp --interval 30 --mss 600
@@ -45,14 +49,16 @@ REPORTS="${MXA_REPORTS:-reports}"
 SSH_USER="${SSH_USER:-}"
 REMOTE_PY="${MXA_PYTHON:-python3}"
 NIC="${MXA_NIC:-}"
+BIND="${IPERF_BIND:-}"
 WINDOW=60
+GRID=""
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 
 log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,37p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,38p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -65,7 +71,9 @@ while [ $# -gt 0 ]; do
         --reports)    REPORTS="$2"; shift 2 ;;
         --python)     REMOTE_PY="$2"; shift 2 ;;
         --nic)        NIC="$2"; shift 2 ;;
+        --bind)       BIND="$2"; shift 2 ;;
         --window)     WINDOW="$2"; shift 2 ;;
+        --grid)       GRID="$2"; shift 2 ;;
         -h|--help)    usage 0 ;;
         --)           shift; AGENT_FLAGS=("$@"); break ;;
         -*)           die "unknown option: $1 (see --help)" ;;
@@ -123,8 +131,12 @@ _h_deploy() { local name="$1" addr="$2"
 _h_start() { local name="$1" addr="$2"
     # --hostname is passed explicitly so the agent's identity always
     # matches the matrix, whatever gethostname() returns on the box.
-    local flags=""
-    [ "${#AGENT_FLAGS[@]}" -gt 0 ] && printf -v flags ' %q' "${AGENT_FLAGS[@]}"
+    local flags="" extra=""
+    [ -n "$BIND" ] && printf -v flags ' --bind %q' "$BIND"
+    if [ "${#AGENT_FLAGS[@]}" -gt 0 ]; then
+        printf -v extra ' %q' "${AGENT_FLAGS[@]}"
+        flags="$flags$extra"
+    fi
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
         "cd '$REMOTE_DIR' && if pgrep -f 'matrix_agent.py run' >/dev/null; then \
              echo 'already running'; \
@@ -182,7 +194,8 @@ case "$CMD" in
     summarize) mkdir -p "$REPORTS"
                log "collecting reports from ${#HOST_LINES[@]} hosts into $REPORTS/"
                _fanout _h_collect || warn "summarizing what was collected anyway"
-               python3 "$AGENT" summarize "$REPORTS"/*_agent.csv --window "$WINDOW" ;;
+               python3 "$AGENT" summarize "$REPORTS"/*_agent.csv --window "$WINDOW" \
+                   ${GRID:+--grid "$GRID"} ;;
     stop|down) log "stopping agents on ${#HOST_LINES[@]} hosts"
                _fanout _h_stop ;;
     prep)      [ -n "$NIC" ] || die "prep needs --nic <device>"

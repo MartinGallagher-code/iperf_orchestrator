@@ -143,7 +143,7 @@ CONVENIENCE:
   help                       Common commands and flags
   help-advanced              Every command, every flag, every env var
 
-SUSTAINED LOAD (source checkout only):
+SUSTAINED LOAD:
   matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
                              traffic matrix across the fleet indefinitely
                              (up / status / reload / summarize / down)

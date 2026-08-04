@@ -19,12 +19,22 @@ Subcommands:
   gen        build a uniform matrix from a server list
   check      admissibility: row/column sums vs NIC capacity
   run        the agent itself (sender + receiver + reporter)
+  hosts      list the hosts a matrix names (name addr port per line)
   summarize  aggregate report CSVs into a deficit summary
 
 Matrix format: a grid CSV. Header row and first column carry host
 tokens of the form  name[=addr[:port]]  (addr defaults to the name,
-port to 5220). Cells are target rates in Mbit/s; empty or 0 means no
-flow; the diagonal is ignored.
+port to 5220). Bare IPs are fine as tokens ('10.0.0.7', or
+'10.0.0.7:5299' with a port) -- the address doubles as the name, and
+`run` then identifies its own row by matching the matrix addresses
+against local interface addresses, no --hostname needed. Cells are
+target rates in Mbit/s; empty or 0 means no flow; the diagonal is
+ignored.
+
+Traffic can be pinned to one NIC with --bind SPEC (or $IPERF_BIND),
+using the same semantics as iperf-orchestrator's --bind: the spec is
+substring-matched against `ip -o -4 addr show`, so it accepts an
+interface name or an address.
 
 Python 3.6+, stdlib only.
 """
@@ -35,6 +45,7 @@ import os
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -53,15 +64,23 @@ _SO_MAX_PACING_RATE = getattr(socket, "SO_MAX_PACING_RATE", 47)  # Linux value
 # ---------------------------------------------------------------------------
 
 def parse_token(tok):
-    """'name[=addr[:port]]' -> (name, addr, port)."""
+    """'name[=addr[:port]]' -> (name, addr, port).
+
+    Bare IPs work as host tokens ('10.0.0.7' or '10.0.0.7:5299'); for a
+    bare token with a port, the name is the address without the port.
+    """
     tok = tok.strip()
-    name, addr, port = tok, tok, DEFAULT_PORT
-    if "=" in tok:
-        name, rest = tok.split("=", 1)
-        addr = rest
+    bare = "=" not in tok
+    if bare:
+        name = addr = tok
+    else:
+        name, addr = tok.split("=", 1)
+    port = DEFAULT_PORT
     if ":" in addr:
         addr, p = addr.rsplit(":", 1)
         port = int(p)
+        if bare:
+            name = addr
     return name, addr, port
 
 
@@ -106,7 +125,24 @@ def load_matrix(path, overrides=None):
     return hosts, endpoints, rates
 
 
-def resolve_self(hosts, override):
+def _is_local_ipv4(addr):
+    # True iff addr is an IPv4 literal assigned to a local interface --
+    # probed by binding, which needs no privileges and no `ip` binary.
+    try:
+        socket.inet_aton(addr)
+    except OSError:
+        return False
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((addr, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def resolve_self(hosts, endpoints, override):
     if override:
         if override in hosts:
             return override
@@ -115,8 +151,36 @@ def resolve_self(hosts, override):
     for cand in (full, full.split(".")[0]):
         if cand in hosts:
             return cand
+    # IP-based matrices: this host is the row whose address is one of
+    # our own interface addresses.
+    local = [h for h in hosts if _is_local_ipv4(endpoints[h][0])]
+    if len(local) == 1:
+        return local[0]
+    if len(local) > 1:
+        raise SystemExit(
+            "multiple matrix hosts are local addresses (%s); pass --hostname"
+            % ", ".join(local))
     raise SystemExit(
-        "hostname %r not found in matrix; pass --hostname. Hosts: %s" % (full, ", ".join(hosts)))
+        "hostname %r not found in matrix and no matrix address is local; "
+        "pass --hostname. Hosts: %s" % (full, ", ".join(hosts)))
+
+
+def resolve_bind(spec):
+    """Resolve --bind exactly like iperf-orchestrator: the spec is a
+    substring matched against `ip -o -4 addr show` output (so it matches
+    an interface name OR an address); the first matching line's IPv4
+    wins. Returns (iface, ip)."""
+    try:
+        out = subprocess.check_output(["ip", "-o", "-4", "addr", "show"],
+                                      stderr=subprocess.DEVNULL).decode()
+    except (OSError, subprocess.CalledProcessError):
+        raise SystemExit("--bind %r: `ip -o -4 addr show` failed; is iproute2 installed?" % spec)
+    for line in out.splitlines():
+        if spec in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                return parts[1], parts[3].split("/")[0]
+    raise SystemExit("--bind %r: no interface matched" % spec)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +257,8 @@ class Flow(object):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError:
             pass
+        if t["bind_ip"]:
+            sock.bind((t["bind_ip"], 0))
         sock.connect((self.addr, self.port))
         return sock
 
@@ -250,6 +316,8 @@ class Flow(object):
                                     self.tuning["sndbuf"])
                 except OSError:
                     pass
+            if self.tuning["bind_ip"]:
+                sock.bind((self.tuning["bind_ip"], 0))
             sock.connect((self.addr, self.port))
             state = {"tokens": 0.0, "last": time.monotonic()}
             cur_mbps = self.mbps
@@ -334,7 +402,7 @@ def _tcp_conn_reader(conn, peer_addr, book, stop):
             pass
 
 
-def tcp_listener(port, book, stop, rcvbuf=0):
+def tcp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if rcvbuf:
@@ -343,7 +411,7 @@ def tcp_listener(port, book, stop, rcvbuf=0):
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         except OSError:
             pass
-    srv.bind(("", port))
+    srv.bind((bind_ip, port))
     srv.listen(1024)
     srv.settimeout(1)
     while not stop.is_set():
@@ -359,7 +427,7 @@ def tcp_listener(port, book, stop, rcvbuf=0):
     srv.close()
 
 
-def udp_listener(port, book, stop, rcvbuf=0):
+def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -367,7 +435,7 @@ def udp_listener(port, book, stop, rcvbuf=0):
                         rcvbuf or 4 * 1024 * 1024)
     except OSError:
         pass
-    sock.bind(("", port))
+    sock.bind((bind_ip, port))
     sock.settimeout(1)
     hlen = len(MAGIC) + 1
     while not stop.is_set():
@@ -467,8 +535,13 @@ def cmd_run(args):
         pass
 
     hosts, endpoints, rates = load_matrix(args.matrix, args.map)
-    me = resolve_self(hosts, args.hostname)
+    me = resolve_self(hosts, endpoints, args.hostname)
     port = endpoints[me][1]
+
+    bind_ip = ""
+    if args.bind:
+        bind_iface, bind_ip = resolve_bind(args.bind)
+        print("[bind] %s: %r -> iface=%s ip=%s" % (me, args.bind, bind_iface, bind_ip))
 
     stop = threading.Event()
     reload_flag = {"v": False}
@@ -483,14 +556,14 @@ def cmd_run(args):
 
     tuning = {"chunk": args.chunk_bytes, "udp_payload": args.udp_payload,
               "sndbuf": args.sndbuf, "rcvbuf": args.rcvbuf,
-              "mss": args.mss, "nodelay": args.nodelay}
+              "mss": args.mss, "nodelay": args.nodelay, "bind_ip": bind_ip}
 
     book = RxBook()
     if not args.no_recv:
         threading.Thread(target=tcp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
         threading.Thread(target=udp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
 
     flows = []
     if not args.no_send:
@@ -625,6 +698,58 @@ def cmd_hosts(args):
     return 0
 
 
+def _write_grid_outputs(gdir, agg, protos, latest, window):
+    """Materialize the window aggregate as files the sweep tooling reads.
+
+    - achieved_grid.csv / deficit_grid.csv: N x N grids in the traffic
+      matrix's shape (rows sources, columns destinations, Mbit/s).
+    - iperf_results.csv: the orchestrator's parse-csv column layout, one
+      row per flow, so make-pivot and make-heatmap render matrix runs
+      exactly like a sweep. All rows share one timestamp and carry the
+      window as duration, which makes the pivot/heatmap time-averaging
+      come out to the plain window average.
+    """
+    os.makedirs(gdir, exist_ok=True)
+    hosts = sorted({h for (h, _p) in agg} | {p for (_h, p) in agg})
+    ach, tgt = {}, {}
+    for (host, peer), a in agg.items():           # rx rows: peer -> host
+        tgt[(peer, host)] = a[0] / a[2]
+        ach[(peer, host)] = a[1] / a[2]
+    deficit = {k: max(0.0, tgt[k] - v) for k, v in ach.items()}
+    for name, cells in (("achieved_grid.csv", ach), ("deficit_grid.csv", deficit)):
+        with open(os.path.join(gdir, name), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["src\\dst"] + hosts)
+            for s in hosts:
+                w.writerow([s] + ["%.3f" % cells[(s, d)] if (s, d) in cells else ""
+                                  for d in hosts])
+    cols = ["timestamp", "source", "target", "status", "protocol", "duration_s",
+            "parallel_streams", "bind_iface", "bind_ip",
+            "bytes_transferred", "bps", "mbps",
+            "src_port", "dst_port", "pair_a", "pair_b", "filename", "error"]
+    stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(latest))
+    results = os.path.join(gdir, "iperf_results.csv")
+    with open(results, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for (src, dst), mbps in sorted(ach.items()):
+            byts = int(mbps * 1e6 / 8 * window)
+            w.writerow({"timestamp": stamp, "source": src, "target": dst,
+                        "status": "OK", "protocol": protos.get((src, dst), "tcp").upper(),
+                        "duration_s": window, "parallel_streams": 1,
+                        "bind_iface": "", "bind_ip": "",
+                        "bytes_transferred": byts, "bps": int(mbps * 1e6),
+                        "mbps": "%.3f" % mbps,
+                        "src_port": "", "dst_port": "", "pair_a": src, "pair_b": dst,
+                        "filename": "matrix_agent", "error": ""})
+    base = os.path.basename(os.path.abspath(gdir))
+    parent = os.path.dirname(os.path.abspath(gdir)) or "."
+    print("wrote %s/{achieved_grid.csv,deficit_grid.csv,iperf_results.csv}" % gdir)
+    print("render the sweep-style views with:")
+    print("  iperf-orchestrator -o '%s' --run-id '%s' make-pivot" % (parent, base))
+    print("  iperf-orchestrator -o '%s' --run-id '%s' make-heatmap" % (parent, base))
+
+
 def cmd_summarize(args):
     rows = []
     for path in args.reports:
@@ -636,19 +761,48 @@ def cmd_summarize(args):
     latest = max(int(r["ts"]) for r in rows)
     cutoff = latest - args.window
     recent = [r for r in rows if int(r["ts"]) >= cutoff and r["dir"] == "rx"]
-    agg = {}   # (host, peer) -> [sum_target, sum_achieved, n]
+    agg = {}     # (host, peer) -> [sum_target, sum_achieved, n]
+    protos = {}  # (src, dst) -> proto
     for r in recent:
         key = (r["host"], r["peer"])
         a = agg.setdefault(key, [0.0, 0.0, 0])
         a[0] += float(r["target_mbps"])
         a[1] += float(r["achieved_mbps"])
         a[2] += 1
+        protos[(r["peer"], r["host"])] = r.get("proto", "tcp")
     tt = sum(a[0] / a[2] for a in agg.values())
     ta = sum(a[1] / a[2] for a in agg.values())
     print("window: last %ds (%d samples, %d flows)"
           % (args.window, len(recent), len(agg)))
     print("aggregate rx: %.1f / %.1f Mbps (%.1f%% of target)"
           % (ta, tt, (ta / tt * 100) if tt else 0.0))
+    # Per-host totals, receiver-side truth for both directions: a host's
+    # "in" sums its own rx rows, its "out" sums every peer's rx rows for
+    # flows it sent. Worst-first separates one sick host from congested
+    # fabric at a glance.
+    per_host = {}   # h -> [in_target, in_achieved, out_target, out_achieved]
+    for (host, peer), a in agg.items():
+        t, ach = a[0] / a[2], a[1] / a[2]
+        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0])
+        hs[0] += t
+        hs[1] += ach
+        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0])
+        ps[2] += t
+        ps[3] += ach
+
+    def _frac(ach, t):
+        return ach / t if t else 1.0
+
+    ranked = sorted(per_host.items(),
+                    key=lambda kv: min(_frac(kv[1][1], kv[1][0]),
+                                       _frac(kv[1][3], kv[1][2])))
+    print("per host (rx in / tx out, achieved/target Mbps, worst first):")
+    for h, (it, ia, ot, oa) in ranked[:args.top_hosts]:
+        print("  %-24s in %8.1f/%-8.1f (%3.0f%%)   out %8.1f/%-8.1f (%3.0f%%)"
+              % (h, ia, it, _frac(ia, it) * 100, oa, ot, _frac(oa, ot) * 100))
+    if len(ranked) > args.top_hosts:
+        print("  ... %d more hosts (raise --top-hosts)"
+              % (len(ranked) - args.top_hosts))
     deficits = []
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
@@ -660,6 +814,10 @@ def cmd_summarize(args):
         for frac, host, peer, t, ach in deficits[:args.top]:
             print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)"
                   % (peer, host, ach, t, frac * 100))
+    if args.grid:
+        if not agg:
+            raise SystemExit("--grid: no rx rows inside the window")
+        _write_grid_outputs(args.grid, agg, protos, latest, args.window)
     return 0
 
 
@@ -703,6 +861,11 @@ def main(argv=None):
                    help="SO_RCVBUF on listeners (default: kernel autotuning; UDP 4MB)")
     r.add_argument("--mss", type=int, default=0, metavar="BYTES",
                    help="TCP_MAXSEG: cap TCP segment size (approximates packet-size control)")
+    r.add_argument("--bind", default=os.environ.get("IPERF_BIND", ""), metavar="SPEC",
+                   help="pin traffic to a NIC, iperf-orchestrator style: substring "
+                        "matched against `ip -o -4 addr show` (iface name or address); "
+                        "binds sender source addresses and both listeners "
+                        "(default: $IPERF_BIND, same env var as the orchestrator)")
     r.add_argument("--nodelay", action="store_true",
                    help="set TCP_NODELAY (with --chunk-bytes, emulates small-message senders)")
 
@@ -713,6 +876,12 @@ def main(argv=None):
     s.add_argument("reports", nargs="+", help="report CSV files")
     s.add_argument("--window", type=int, default=30, help="seconds of history to use")
     s.add_argument("--top", type=int, default=10, help="worst flows to list")
+    s.add_argument("--top-hosts", type=int, default=10,
+                   help="hosts to list in the per-host table (worst first)")
+    s.add_argument("--grid", metavar="DIR",
+                   help="also write achieved/deficit N x N grid CSVs and an "
+                        "orchestrator-compatible iperf_results.csv into DIR, "
+                        "so make-pivot/make-heatmap render matrix runs")
 
     args = ap.parse_args(argv)
     if args.cmd is None:

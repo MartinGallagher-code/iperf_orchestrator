@@ -87,6 +87,129 @@ test_two_agents_sustain_target_rate() {
     }
 }
 
+test_hosts_accepts_bare_ip_tokens() {
+    # IP-only workflows: a plain address (optionally with :port) is a
+    # complete host token -- the address doubles as the name.
+    cat > "$TEST_TMPDIR/ips.txt" <<EOF
+10.0.0.7
+10.0.0.8:5299
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/ips.txt" --rate-mbps 10 \
+        -o "$TEST_TMPDIR/ipmatrix.csv" >/dev/null
+    assert_status 0 $? "gen from bare IPs should succeed" || return 1
+    local out; out=$(python3 "$AGENT" hosts --matrix "$TEST_TMPDIR/ipmatrix.csv")
+    assert_contains "$out" "10.0.0.7 10.0.0.7 5220" "bare IP: name=addr, default port" || return 1
+    assert_contains "$out" "10.0.0.8 10.0.0.8 5299" "bare IP:port keeps port out of name" || return 1
+}
+
+test_run_auto_identifies_by_local_address() {
+    # No --hostname: with an IP matrix the agent must find its own row by
+    # matching addresses against local interfaces. 203.0.113.5 is
+    # TEST-NET-3, never assigned locally, so 127.0.0.1 is the only match.
+    cat > "$TEST_TMPDIR/ips.txt" <<EOF
+127.0.0.1:$PORT_A
+203.0.113.5
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/ips.txt" --rate-mbps 5 \
+        -o "$TEST_TMPDIR/ipmatrix.csv" >/dev/null
+    local rep="$TEST_TMPDIR/iprep" out rc
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/ipmatrix.csv" \
+        --interval 1 --duration 2 --report-dir "$rep" 2>&1); rc=$?
+    assert_status 0 "$rc" "auto-identified run should exit cleanly" || { echo "$out"; return 1; }
+    assert_contains "$out" "host=127.0.0.1" "identified as the local row" || return 1
+    [ -f "$rep/127.0.0.1_agent.csv" ] || { echo "no report for auto-identified host"; return 1; }
+}
+
+test_run_rejects_ambiguous_local_addresses() {
+    # Both 127.0.0.1 and 127.0.0.2 bind locally on Linux, so the agent
+    # cannot pick a row on its own and must demand --hostname.
+    cat > "$TEST_TMPDIR/ips.txt" <<EOF
+127.0.0.1:$PORT_A
+127.0.0.2:$PORT_B
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/ips.txt" --rate-mbps 5 \
+        -o "$TEST_TMPDIR/ipmatrix.csv" >/dev/null
+    local out rc
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/ipmatrix.csv" \
+        --duration 1 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || { echo "ambiguous local addresses should fail"; return 1; }
+    assert_contains "$out" "multiple matrix hosts are local" || return 1
+    assert_contains "$out" "--hostname" "tells the operator the fix" || return 1
+}
+
+test_bind_pins_traffic_iperf_orchestrator_style() {
+    # --bind uses the orchestrator's semantics: substring against
+    # `ip -o -4 addr show`. Where iproute2 is missing (the slim 3.6
+    # container) a shim answers with the real output format, so the
+    # resolution path runs everywhere; hosted runners use the real ip.
+    if ! command -v ip >/dev/null 2>&1; then
+        mkdir -p "$FAKE_BIN"
+        printf '%s\n' '#!/usr/bin/env bash' \
+            "echo '1: lo    inet 127.0.0.1/8 scope host lo'" > "$FAKE_BIN/ip"
+        chmod +x "$FAKE_BIN/ip"
+    fi
+    _write_hosts
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 5 \
+        -o "$TEST_TMPDIR/matrix.csv" >/dev/null
+    local out rc
+    out=$(PATH="$FAKE_BIN:$PATH" python3 "$AGENT" run \
+        --matrix "$TEST_TMPDIR/matrix.csv" \
+        --hostname alpha --bind lo --interval 1 --duration 2 \
+        --report-dir "$TEST_TMPDIR/bindrep" 2>&1); rc=$?
+    assert_status 0 "$rc" "bound run should exit cleanly" || { echo "$out"; return 1; }
+    assert_contains "$out" "iface=lo" "spec resolved to the interface" || return 1
+    assert_contains "$out" "ip=127.0.0.1" "and to its address" || return 1
+    # Same resolution via the orchestrator's env var, no flag.
+    out=$(PATH="$FAKE_BIN:$PATH" IPERF_BIND=lo python3 "$AGENT" run \
+        --matrix "$TEST_TMPDIR/matrix.csv" \
+        --hostname alpha --interval 1 --duration 1 \
+        --report-dir "$TEST_TMPDIR/bindrep" 2>&1); rc=$?
+    assert_status 0 "$rc" "IPERF_BIND run should exit cleanly" || { echo "$out"; return 1; }
+    assert_contains "$out" "iface=lo" "IPERF_BIND honored" || return 1
+    # A spec matching nothing must fail loudly, not silently unbind.
+    out=$(PATH="$FAKE_BIN:$PATH" python3 "$AGENT" run \
+        --matrix "$TEST_TMPDIR/matrix.csv" \
+        --hostname alpha --bind nosuchnic0 --duration 1 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || { echo "unmatched --bind spec should fail"; return 1; }
+    assert_contains "$out" "no interface matched" || return 1
+}
+
+test_summarize_grid_feeds_sweep_tooling() {
+    # --grid materializes the window aggregate as N x N grid CSVs plus an
+    # orchestrator-format iperf_results.csv; prove the real make-pivot
+    # consumes it, so matrix runs get the sweep's pivot/heatmap views.
+    local rep="$TEST_TMPDIR/gridrep.csv" gdir="$TEST_TMPDIR/gridout"
+    cat > "$rep" <<EOF
+ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra
+1000,10.0.0.8,rx,10.0.0.7,tcp,100.000,80.000,100000000,
+1000,10.0.0.7,rx,10.0.0.8,tcp,100.000,100.000,125000000,
+1000,10.0.0.7,tx,10.0.0.8,tcp,100.000,99.000,124000000,
+EOF
+    local out rc
+    out=$(python3 "$AGENT" summarize "$rep" --window 30 --grid "$gdir" 2>&1); rc=$?
+    assert_status 0 "$rc" "summarize --grid should succeed" || { echo "$out"; return 1; }
+    # Per-host table: receiver-side truth in both directions. 10.0.0.8
+    # receives 80/100 (in 80%) and its traffic to 10.0.0.7 arrives in
+    # full (out 100%); 10.0.0.7 is the mirror image.
+    assert_contains "$out" "per host (rx in / tx out" "per-host table present" || return 1
+    assert_contains "$out" "80.0/100.0" "deficit visible in host totals" || return 1
+    host8=$(echo "$out" | grep "^  10.0.0.8 ")
+    assert_contains "$host8" "( 80%)" "10.0.0.8 rx deficit" || return 1
+    assert_contains "$host8" "(100%)" "10.0.0.8 tx delivered" || return 1
+    assert_contains "$(cat "$gdir/achieved_grid.csv")" "10.0.0.7,,80.000" \
+        "achieved grid row: src 10.0.0.7 -> dst 10.0.0.8" || return 1
+    assert_contains "$(cat "$gdir/deficit_grid.csv")" "10.0.0.7,,20.000" \
+        "deficit = target - achieved" || return 1
+    local res; res=$(cat "$gdir/iperf_results.csv")
+    assert_contains "$res" "timestamp,source,target,status" "orchestrator column layout" || return 1
+    assert_contains "$res" "10.0.0.7,10.0.0.8,OK,TCP,30,1" "rx row became a sweep row" || return 1
+    # The advertised commands must actually work: real make-pivot over it.
+    run_orch -o "$TEST_TMPDIR" --run-id gridout make-pivot
+    assert_status 0 "$RUN_RC" "make-pivot over grid output" || { echo "$RUN_OUT"; return 1; }
+    [ -f "$gdir/iperf_pivot.txt" ] || { echo "no pivot written"; return 1; }
+    assert_contains "$(cat "$gdir/iperf_pivot.txt")" "80.0" "achieved rate in pivot" || return 1
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -101,6 +224,11 @@ test_agent_rejects_unknown_hostname() {
 run_test test_gen_writes_grid_matrix
 run_test test_check_flags_inadmissible_matrix
 run_test test_two_agents_sustain_target_rate
+run_test test_hosts_accepts_bare_ip_tokens
+run_test test_run_auto_identifies_by_local_address
+run_test test_run_rejects_ambiguous_local_addresses
+run_test test_bind_pins_traffic_iperf_orchestrator_style
+run_test test_summarize_grid_feeds_sweep_tooling
 run_test test_agent_rejects_unknown_hostname
 
 report_tests
