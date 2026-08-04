@@ -128,6 +128,13 @@ _h_deploy() { local name="$1" addr="$2"
         && scp "${SSH_OPTS[@]}" -q "$AGENT" "$MATRIX" "$(_target "$addr"):$REMOTE_DIR/"
 }
 
+# Liveness and signaling go through a pidfile ($REMOTE_DIR/agent.pid),
+# never pgrep/pkill -f: the ssh-spawned remote shell's own command line
+# contains the agent's launch string, so any pattern that matches the
+# agent also matches that shell. With pgrep, every start saw itself and
+# said "already running" without ever launching anything; with pkill,
+# stop would signal its own wrapper. PIDs have no such aliasing.
+
 _h_start() { local name="$1" addr="$2"
     # --hostname is passed explicitly so the agent's identity always
     # matches the matrix, whatever gethostname() returns on the box.
@@ -138,26 +145,28 @@ _h_start() { local name="$1" addr="$2"
         flags="$flags$extra"
     fi
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "cd '$REMOTE_DIR' && if pgrep -f 'matrix_agent.py run' >/dev/null; then \
+        "cd '$REMOTE_DIR' && if kill -0 \$(cat agent.pid 2>/dev/null) 2>/dev/null; then \
              echo 'already running'; \
          else \
              nohup $REMOTE_PY matrix_agent.py run --matrix '$(basename "$MATRIX")' \
                  --hostname '$name' --report-dir rep$flags \
-                 > agent.out 2>&1 & disown; echo started; \
+                 > agent.out 2>&1 & echo \$! > agent.pid; disown; echo started; \
          fi"
 }
 
 _h_status() { local name="$1" addr="$2"
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "if pgrep -f 'matrix_agent.py run' >/dev/null; then \
-             tail -n1 '$REMOTE_DIR/agent.out' 2>/dev/null || echo running; \
+        "if cd '$REMOTE_DIR' 2>/dev/null \
+             && kill -0 \$(cat agent.pid 2>/dev/null) 2>/dev/null; then \
+             tail -n1 agent.out 2>/dev/null || echo running; \
          else echo NOT-RUNNING; fi"
 }
 
 _h_reload() { local name="$1" addr="$2"
     scp "${SSH_OPTS[@]}" -q "$MATRIX" "$(_target "$addr"):$REMOTE_DIR/" \
         && ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-            "pkill -HUP -f 'matrix_agent.py run' && echo reloaded"
+            "cd '$REMOTE_DIR' && kill -HUP \$(cat agent.pid 2>/dev/null) 2>/dev/null \
+                 && echo reloaded || { echo not-running >&2; exit 1; }"
 }
 
 _h_collect() { local name="$1" addr="$2"
@@ -166,7 +175,9 @@ _h_collect() { local name="$1" addr="$2"
 
 _h_stop() { local name="$1" addr="$2"
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "pkill -TERM -f 'matrix_agent.py run' && echo stopped || echo was-not-running"
+        "cd '$REMOTE_DIR' 2>/dev/null \
+             && kill -TERM \$(cat agent.pid 2>/dev/null) 2>/dev/null \
+             && { rm -f agent.pid; echo stopped; } || echo was-not-running"
 }
 
 _h_prep() { local name="$1" addr="$2"

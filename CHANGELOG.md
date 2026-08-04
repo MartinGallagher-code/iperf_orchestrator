@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-08-04
+
+### Fixed
+- **`fleet.sh` never actually started any agents.** Remote liveness checks
+  used `pgrep -f 'matrix_agent.py run'`, but the ssh-spawned shell's own
+  command line contains that string (it includes the launch command), so
+  every `start`/`up` matched itself, reported "already running", and
+  launched nothing — `status` then showed a bare "running" and
+  `collect`/`summarize` failed with "No such file or directory" on every
+  host. Liveness and signaling now go through `$REMOTE_DIR/agent.pid`,
+  which cannot alias. A regression test executes the remote command
+  strings for real and requires an agent to launch and to die on `stop`.
+
 ## [1.1.0] - 2026-08-04
 
 ### Added
@@ -125,5 +138,6 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.1.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.0
 [1.0.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.0.0

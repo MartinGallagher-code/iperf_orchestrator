@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="1.1.0"
+ORCH_VERSION="1.1.1"
 
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)

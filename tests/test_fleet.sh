@@ -85,12 +85,70 @@ test_bind_option_forwarded_to_every_agent() {
 test_stop_and_reload_signal_agents() {
     _fleet_env
     _run_fleet stop || { cat "$TEST_TMPDIR/out"; return 1; }
-    assert_contains "$(cat "$FLEET_LOG")" "pkill -TERM -f 'matrix_agent.py run'" || return 1
+    local log; log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "kill -TERM" || return 1
+    assert_contains "$log" "agent.pid" "stop signals via the pidfile" || return 1
     : > "$FLEET_LOG"
     _run_fleet reload || { cat "$TEST_TMPDIR/out"; return 1; }
-    local log; log=$(cat "$FLEET_LOG")
-    assert_contains "$log" "pkill -HUP -f 'matrix_agent.py run'" || return 1
+    log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "kill -HUP" || return 1
+    assert_contains "$log" "agent.pid" "reload signals via the pidfile" || return 1
     assert_contains "$log" "matrix.csv" "reload re-ships the matrix" || return 1
+}
+
+test_start_really_launches_agents_no_pgrep_self_match() {
+    # Regression: liveness once used pgrep -f, but the ssh-spawned shell's
+    # own command line contains the agent's launch string, so every start
+    # matched itself, reported "already running", and launched nothing
+    # (status said "running" with no agent.out; collect found no reports).
+    # Execute the remote commands for real -- the ssh shim runs them
+    # locally -- and require an agent to actually launch, then die on stop.
+    _fleet_env
+    local remote="$TEST_TMPDIR/remote"
+    mkdir -p "$remote"
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+# Drop ssh options and the target, execute the remote command locally.
+while [ $# -gt 0 ]; do
+    case "$1" in -o) shift 2 ;; -*) shift ;; *) break ;; esac
+done
+shift    # the target host
+exec bash -c "$*"
+EOF
+    cat > "$FAKE_BIN/scp" <<'EOF'
+#!/usr/bin/env bash
+# Copy sources to the dir behind "host:path".
+srcs=(); dst=""
+for a in "$@"; do
+    case "$a" in -o) skip=1 ;; *) [ "${skip:-}" ] && skip= && continue
+        case "$a" in -*) ;; *:*) dst="${a#*:}" ;; *) srcs+=("$a") ;; esac ;;
+    esac
+done
+cp "${srcs[@]}" "$dst"
+EOF
+    chmod +x "$FAKE_BIN/ssh" "$FAKE_BIN/scp"
+    # Matrix of two localhost "hosts"; only one agent must start (the
+    # second start legitimately sees the first via pgrep).
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --jobs 1 up >"$TEST_TMPDIR/out" 2>&1 \
+        || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "started" \
+        "at least one agent must actually launch" || return 1
+    local i
+    for i in $(seq 1 50); do [ -s "$remote/agent.out" ] && break; sleep 0.2; done
+    [ -s "$remote/agent.out" ] || { echo "agent.out missing/empty: agent never ran"; return 1; }
+    # And stop must terminate it (a signal that self-matches would not).
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --jobs 1 stop >"$TEST_TMPDIR/out" 2>&1 || true
+    for i in $(seq 1 50); do
+        pgrep -f "matrix_agent.[p]y run" >/dev/null || break
+        sleep 0.2
+    done
+    if pgrep -f "matrix_agent.[p]y run" >/dev/null; then
+        pkill -TERM -f "matrix_agent.[p]y run" || true
+        echo "agents survived fleet stop"
+        return 1
+    fi
 }
 
 test_ssh_user_and_remote_dir_options() {
@@ -137,7 +195,8 @@ test_orchestrator_matrix_forwards_fleet_flags_untouched() {
     PATH="$FAKE_BIN:$PATH" run_orch matrix \
         --matrix "$TEST_TMPDIR/matrix.csv" --jobs 2 stop
     assert_status 0 "$RUN_RC" "matrix stop via orchestrator" || return 1
-    assert_contains "$(cat "$FLEET_LOG")" "pkill -TERM -f 'matrix_agent.py run'" || return 1
+    assert_contains "$(cat "$FLEET_LOG")" "kill -TERM" || return 1
+    assert_contains "$(cat "$FLEET_LOG")" "agent.pid" "stop via pidfile through orchestrator" || return 1
 }
 
 test_matrix_dispatch_survives_lost_executable_bit() {
@@ -174,6 +233,7 @@ run_test test_matrix_dispatch_survives_lost_executable_bit
 run_test test_matrix_dispatch_reports_missing_tooling_clearly
 run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
+run_test test_start_really_launches_agents_no_pgrep_self_match
 run_test test_bind_option_forwarded_to_every_agent
 run_test test_stop_and_reload_signal_agents
 run_test test_ssh_user_and_remote_dir_options
