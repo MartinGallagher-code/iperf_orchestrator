@@ -189,14 +189,25 @@ the minimum buffer that sustains a packet rate.
 
 `--respond-bytes N` turns the mesh transactional: every request datagram
 is answered with an N-byte reply to its sender, and the requester's tx
-rows gain `resp_pct=` (fraction answered) and `rtt_ms=` (sampled
-request→reply round trip). Small requests, bigger replies — an
-RPC/query-shaped workload:
+rows gain `rpps=`/`resp_pct=`/`resp_mbps=` (replies received back:
+packets, fraction, bytes) and `rtt_ms=` (sampled request→reply round
+trip). The one-command front door is `rr` — give it the three numbers
+that define the workload and it does the rest (pps→rate math, matrix
+generation, fleet restart in UDP request/response mode):
 
 ```bash
-# ~4,000 requests/sec per flow of minimum-size packets, 500 B replies
-./matrix_agent.py gen --hosts ips.txt --rate-mbps 2 -o matrix.csv
-fleet.sh --matrix matrix.csv up -- --protocol udp --udp-payload 30 --respond-bytes 500
+# 10,000 requests/sec per flow, minimum-size requests, 500 B replies
+fleet.sh --hosts ips.txt --pps 10000 --send 30 --reply 500 rr
+fleet.sh summarize
+```
+
+`summarize`'s packets line then carries the whole story — requests and
+replies each count as packets, and both directions count in the bytes:
+
+```
+packets: requests 80000/s offered, 79800/s delivered; replies 79600/s /
+319.4 Mbps returned (99.7% answered, rtt ~0.412 ms); total delivered
+159400 pkts/s, 338.5 Mbps
 ```
 
 Note on tiny packets: our framing needs ~26 bytes (name + sequence), but

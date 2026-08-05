@@ -553,9 +553,10 @@ class Reporter(object):
             with fl.lock:
                 total, rec = fl.bytes_sent, fl.reconnects
                 pkts, rpk = fl.pkts_sent, fl.resp_pkts
+                rbytes = fl.resp_bytes
                 rtt_s, rtt_n = fl.rtt_sum, fl.rtt_n
-            prev = self.prev_tx.get(fl.dst, (0, 0, 0, 0.0, 0))
-            self.prev_tx[fl.dst] = (total, pkts, rpk, rtt_s, rtt_n)
+            prev = self.prev_tx.get(fl.dst, (0, 0, 0, 0.0, 0, 0))
+            self.prev_tx[fl.dst] = (total, pkts, rpk, rtt_s, rtt_n, rbytes)
             mbps = (total - prev[0]) * 8.0 / elapsed / 1e6
             tx_sum += mbps
             tx_target += fl.mbps
@@ -564,8 +565,10 @@ class Reporter(object):
                 extra = "pps=%d" % (dpkts / elapsed)
                 drpk = rpk - prev[2]
                 if drpk or self.respond:
-                    extra += " resp_pct=%.1f" % (
-                        min(100.0, drpk / dpkts * 100) if dpkts else 0.0)
+                    extra += " rpps=%d resp_pct=%.1f resp_mbps=%.3f" % (
+                        drpk / elapsed,
+                        min(100.0, drpk / dpkts * 100) if dpkts else 0.0,
+                        (rbytes - prev[5]) * 8.0 / elapsed / 1e6)
                     drtt_n = rtt_n - prev[4]
                     if drtt_n:
                         extra += " rtt_ms=%.3f" % (
@@ -710,6 +713,10 @@ def cmd_gen(args):
     n = len(hosts)
     if args.rate_mbps is not None:
         rate = args.rate_mbps
+    elif args.pps is not None:
+        rate = args.pps * args.payload * 8.0 / 1e6
+        print("pps target: %d pkts/s x %dB per flow = %.3f Mbps per cell"
+              % (args.pps, args.payload, rate))
     else:
         rate = args.egress_gbps * 1000.0 / (n - 1)
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
@@ -839,9 +846,22 @@ def cmd_summarize(args):
         raise SystemExit("no report rows found")
     latest = max(int(r["ts"]) for r in rows)
     cutoff = latest - args.window
+
+    def _kv(extra):
+        d = {}
+        for part in (extra or "").split():
+            if "=" in part:
+                k, _, v = part.partition("=")
+                try:
+                    d[k] = float(v)
+                except ValueError:
+                    pass
+        return d
+
     recent = [r for r in rows if int(r["ts"]) >= cutoff and r["dir"] == "rx"]
     agg = {}     # (host, peer) -> [sum_target, sum_achieved, n]
     protos = {}  # (src, dst) -> proto
+    rx_pps = {}  # (host, peer) -> [sum_pps, n]
     for r in recent:
         key = (r["host"], r["peer"])
         a = agg.setdefault(key, [0.0, 0.0, 0])
@@ -849,12 +869,61 @@ def cmd_summarize(args):
         a[1] += float(r["achieved_mbps"])
         a[2] += 1
         protos[(r["peer"], r["host"])] = r.get("proto", "tcp")
+        kv = _kv(r.get("extra"))
+        if "pps" in kv:
+            p = rx_pps.setdefault(key, [0.0, 0])
+            p[0] += kv["pps"]
+            p[1] += 1
+    # Sender-side transactional stats (request/response mode) live on tx
+    # rows: offered pps, fraction answered, sampled RTT.
+    txagg = {}   # (src, dst) -> {"pps": [s,n], "resp_pct": [s,n], "rtt_ms": [s,n]}
+    for r in rows:
+        if int(r["ts"]) < cutoff or r["dir"] != "tx":
+            continue
+        kv = _kv(r.get("extra"))
+        if not kv:
+            continue
+        slot = txagg.setdefault((r["host"], r["peer"]), {})
+        for k in ("pps", "rpps", "resp_pct", "resp_mbps", "rtt_ms"):
+            if k in kv:
+                s = slot.setdefault(k, [0.0, 0])
+                s[0] += kv[k]
+                s[1] += 1
+
+    def _txmean(src, dst, key):
+        s = txagg.get((src, dst), {}).get(key)
+        return s[0] / s[1] if s else None
     tt = sum(a[0] / a[2] for a in agg.values())
     ta = sum(a[1] / a[2] for a in agg.values())
     print("window: last %ds (%d samples, %d flows)"
           % (args.window, len(recent), len(agg)))
     print("aggregate rx: %.1f / %.1f Mbps (%.1f%% of target)"
           % (ta, tt, (ta / tt * 100) if tt else 0.0))
+    # Packet accounting (UDP): requests and replies each count as packets.
+    req_offered = sum(s["pps"][0] / s["pps"][1]
+                      for s in txagg.values() if "pps" in s)
+    req_delivered = sum(p[0] / p[1] for p in rx_pps.values())
+    replies = sum(s["rpps"][0] / s["rpps"][1]
+                  for s in txagg.values() if "rpps" in s)
+    if req_offered or req_delivered:
+        line = ("packets: requests %d/s offered, %d/s delivered"
+                % (req_offered, req_delivered))
+        resp_slots = [s for s in txagg.values() if "resp_pct" in s]
+        if resp_slots or replies:
+            resp_avg = (sum(s["resp_pct"][0] / s["resp_pct"][1]
+                            for s in resp_slots) / len(resp_slots)
+                        if resp_slots else 0.0)
+            rtt_slots = [s for s in txagg.values() if "rtt_ms" in s]
+            rtt_txt = (", rtt ~%.3f ms" % (sum(s["rtt_ms"][0] / s["rtt_ms"][1]
+                                               for s in rtt_slots) / len(rtt_slots))
+                       if rtt_slots else "")
+            reply_mbps = sum(s["resp_mbps"][0] / s["resp_mbps"][1]
+                             for s in txagg.values() if "resp_mbps" in s)
+            line += ("; replies %d/s / %.1f Mbps returned (%.1f%% answered%s)"
+                     % (replies, reply_mbps, resp_avg, rtt_txt))
+            line += ("; total delivered %d pkts/s, %.1f Mbps"
+                     % (req_delivered + replies, ta + reply_mbps))
+        print(line)
     # Per-host totals, receiver-side truth for both directions: a host's
     # "in" sums its own rx rows, its "out" sums every peer's rx rows for
     # flows it sent. Worst-first separates one sick host from congested
@@ -891,8 +960,15 @@ def cmd_summarize(args):
     if deficits:
         print("worst flows (achieved/target):")
         for frac, host, peer, t, ach in deficits[:args.top]:
-            print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)"
-                  % (peer, host, ach, t, frac * 100))
+            note = ""
+            resp = _txmean(peer, host, "resp_pct")
+            if resp is not None:
+                note += "  resp=%.1f%%" % resp
+            rtt = _txmean(peer, host, "rtt_ms")
+            if rtt is not None:
+                note += " rtt=%.3fms" % rtt
+            print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)%s"
+                  % (peer, host, ach, t, frac * 100, note))
     if args.grid:
         if not agg:
             raise SystemExit("--grid: no rx rows inside the window")
@@ -911,6 +987,12 @@ def main(argv=None):
     rate.add_argument("--rate-mbps", type=float, help="Mbps for every pair")
     rate.add_argument("--egress-gbps", type=float,
                       help="per-host total egress, split evenly across peers")
+    rate.add_argument("--pps", type=float,
+                      help="packets/sec for every pair; rate is computed from "
+                           "--payload (run the agents with the same "
+                           "--udp-payload to hit this packet rate)")
+    g.add_argument("--payload", type=int, default=UDP_PAYLOAD, metavar="BYTES",
+                   help="datagram size the --pps math assumes (default %d)" % UDP_PAYLOAD)
     g.add_argument("--output", "-o", default="-", help="output file (default stdout)")
 
     c = sub.add_parser("check", help="admissibility check")

@@ -234,6 +234,14 @@ test_udp_request_response_mode() {
         || { echo "resp_pct too low on loopback: $pct"; return 1; }
     assert_contains "$(grep ",rx," "$rep/alpha_agent.csv" | tail -n 1)" "pps=" \
         "rx rows carry packet rate" || return 1
+    # summarize surfaces the transactional numbers: request+reply packet
+    # totals (both directions count), reply bytes, answered %, and RTT.
+    local sum; sum=$(python3 "$AGENT" summarize "$rep"/*.csv --window 10)
+    assert_contains "$sum" "packets: requests" "packets line present" || return 1
+    assert_contains "$sum" "replies" || return 1
+    assert_contains "$sum" "answered" || return 1
+    assert_contains "$sum" "total delivered" "req+reply totals" || return 1
+    assert_contains "$sum" "resp=" "worst flows annotated" || return 1
 }
 
 test_rates_above_17gbps_do_not_kill_flows() {

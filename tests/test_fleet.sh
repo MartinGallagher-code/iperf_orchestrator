@@ -71,6 +71,24 @@ test_start_passes_hostname_and_agent_flags() {
     assert_contains "$log" "nohup python3 matrix_agent.py run" || return 1
 }
 
+test_rr_command_builds_matrix_and_restarts_in_rr_mode() {
+    # One-shot request/response: --hosts/--pps/--send/--reply builds the
+    # matrix (pps -> Mbps math) and restarts the fleet with the right
+    # agent flags -- no manual gen or flag plumbing.
+    _fleet_env
+    local m="$TEST_TMPDIR/rrmatrix.csv"
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$m" \
+        --hosts "$TEST_TMPDIR/hosts.txt" --pps 4000 --send 30 --reply 500 \
+        --jobs 4 rr >"$TEST_TMPDIR/out" 2>&1 || { cat "$TEST_TMPDIR/out"; return 1; }
+    [ -f "$m" ] || { echo "rr did not generate the matrix"; return 1; }
+    assert_contains "$(cat "$m")" "0.960" "pps math: 4000 x 30B = 0.96 Mbps" || return 1
+    local log; log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "kill -TERM" "stops old agents first" || return 1
+    assert_contains "$log" "--protocol udp" || return 1
+    assert_contains "$log" "--udp-payload 30" || return 1
+    assert_contains "$log" "--respond-bytes 500" || return 1
+}
+
 test_bind_option_forwarded_to_every_agent() {
     _fleet_env
     _run_fleet --bind eth1 start || { cat "$TEST_TMPDIR/out"; return 1; }
@@ -234,6 +252,7 @@ run_test test_matrix_dispatch_reports_missing_tooling_clearly
 run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
 run_test test_start_really_launches_agents_no_pgrep_self_match
+run_test test_rr_command_builds_matrix_and_restarts_in_rr_mode
 run_test test_bind_option_forwarded_to_every_agent
 run_test test_stop_and_reload_signal_agents
 run_test test_ssh_user_and_remote_dir_options

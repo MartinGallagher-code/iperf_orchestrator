@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-05
+
+### Added
+- **`fleet.sh rr` — one-command request/response runs**: give it
+  `--hosts`, `--pps`, `--send`, `--reply` and it computes the rate from
+  the pps math, generates the matrix, stops any running agents, and
+  restarts the fleet in UDP request/response mode.
+- `gen --pps N --payload B` sizes matrix cells by packet rate instead of
+  bandwidth.
+- `summarize` reports the transactional picture directly: a packets line
+  with requests offered/delivered, replies returned (packets **and**
+  bytes — both directions count in both totals), answered %, sampled
+  RTT, and combined totals; worst flows are annotated with `resp=` and
+  `rtt=`. Reply bandwidth is now measured (`resp_mbps=` on tx rows), not
+  inferred.
+
 ## [1.2.0] - 2026-08-05
 
 ### Added
@@ -163,6 +179,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.3.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.1

@@ -12,6 +12,9 @@
 #   deploy      push matrix_agent.py + the matrix to every host
 #   start       launch one agent per host (nohup; survives this session)
 #   up          deploy + start
+#   rr          request/response run in one shot: builds the matrix from
+#               --hosts/--pps/--send, restarts the fleet in UDP mode with
+#               --send-sized requests answered by --reply-sized replies
 #   status      one line per host: latest ticker line, or NOT-RUNNING
 #   reload      push the (edited) matrix and SIGHUP every agent
 #   collect     pull every host's report CSV into --reports
@@ -33,6 +36,10 @@
 #   --window SECONDS   summarize window             [60]
 #   --grid DIR         summarize also writes achieved/deficit grids and
 #                      an iperf_results.csv for make-pivot/make-heatmap
+#   --hosts FILE       (rr) server list, one IP/name per line
+#   --pps N            (rr) request packets/sec per flow
+#   --send BYTES       (rr) request datagram size    [30]
+#   --reply BYTES      (rr) reply datagram size      [0 = no replies]
 #
 # Anything after `--` is passed to `matrix_agent.py run` verbatim, e.g.:
 #   fleet.sh --matrix m.csv up -- --protocol udp --interval 30 --mss 600
@@ -52,13 +59,17 @@ NIC="${MXA_NIC:-}"
 BIND="${IPERF_BIND:-}"
 WINDOW=60
 GRID=""
+HOSTS_FILE=""
+PPS=""
+SEND=30
+REPLY=0
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 
 log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,38p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -74,6 +85,10 @@ while [ $# -gt 0 ]; do
         --bind)       BIND="$2"; shift 2 ;;
         --window)     WINDOW="$2"; shift 2 ;;
         --grid)       GRID="$2"; shift 2 ;;
+        --hosts)      HOSTS_FILE="$2"; shift 2 ;;
+        --pps)        PPS="$2"; shift 2 ;;
+        --send)       SEND="$2"; shift 2 ;;
+        --reply)      REPLY="$2"; shift 2 ;;
         -h|--help)    usage 0 ;;
         --)           shift; AGENT_FLAGS=("$@"); break ;;
         -*)           die "unknown option: $1 (see --help)" ;;
@@ -81,6 +96,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$CMD" ] || usage 1
+
+# rr builds its own matrix before the host list is read from it.
+if [ "$CMD" = "rr" ]; then
+    [ -n "$HOSTS_FILE" ] || die "rr needs --hosts <file> (one IP/name per line)"
+    [ -f "$HOSTS_FILE" ] || die "hosts file not found: $HOSTS_FILE"
+    [ -n "$PPS" ] || die "rr needs --pps <request packets/sec per flow>"
+    python3 "$AGENT" gen --hosts "$HOSTS_FILE" --pps "$PPS" --payload "$SEND" \
+        -o "$MATRIX" || die "matrix generation failed"
+    AGENT_FLAGS=(--protocol udp --udp-payload "$SEND" \
+                 ${REPLY:+--respond-bytes "$REPLY"} "${AGENT_FLAGS[@]}")
+fi
+
 [ -f "$MATRIX" ] || die "matrix not found: $MATRIX (--matrix)"
 
 # Host list straight from the matrix header: "name addr port" per line.
@@ -196,6 +223,14 @@ case "$CMD" in
                _fanout _h_deploy
                log "starting agents"
                _fanout _h_start ;;
+    rr)        log "request/response: ${PPS} req/s per flow, ${SEND}B requests, ${REPLY}B replies"
+               log "stopping any running agents"
+               _fanout _h_stop || true
+               log "deploying agent + $MATRIX to ${#HOST_LINES[@]} hosts (jobs=$JOBS)"
+               _fanout _h_deploy
+               log "starting agents in request/response mode"
+               _fanout _h_start
+               log "watch with: summarize (packets line shows req+reply pps, answered %, rtt)" ;;
     status)    _fanout _h_status ;;
     reload)    log "pushing $MATRIX and reloading rates on ${#HOST_LINES[@]} hosts"
                _fanout _h_reload ;;
