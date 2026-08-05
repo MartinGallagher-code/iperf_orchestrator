@@ -179,6 +179,33 @@ Note the interaction with rates: constrained buffers/MSS can make a flow
 *unable* to reach its target — that deficit showing up in the reports is
 signal, not error.
 
+## Packet-rate and request/response emulation
+
+In UDP mode each datagram is one packet, so pps = rate ÷ payload:
+`cell_mbps = pps × payload_bytes × 8 / 1e6`. Reports carry `pps=` on
+both tx and rx rows, and `loss_pct=` shows drops — with a deliberately
+small `--rcvbuf`, that's receiver overrun, which is exactly how you find
+the minimum buffer that sustains a packet rate.
+
+`--respond-bytes N` turns the mesh transactional: every request datagram
+is answered with an N-byte reply to its sender, and the requester's tx
+rows gain `resp_pct=` (fraction answered) and `rtt_ms=` (sampled
+request→reply round trip). Small requests, bigger replies — an
+RPC/query-shaped workload:
+
+```bash
+# ~4,000 requests/sec per flow of minimum-size packets, 500 B replies
+./matrix_agent.py gen --hosts ips.txt --rate-mbps 2 -o matrix.csv
+fleet.sh --matrix matrix.csv up -- --protocol udp --udp-payload 30 --respond-bytes 500
+```
+
+Note on tiny packets: our framing needs ~26 bytes (name + sequence), but
+anything under ~46 bytes rides the wire in Ethernet's minimum 64-byte
+frame anyway — a 30-byte payload produces the same frames and pps as a
+true 10-byte app packet. Matrix cells price the *request* direction;
+replies add `respond/request`-ratio times that in the reverse direction,
+so budget both when checking admissibility.
+
 ## TCP vs UDP is a semantic choice
 
 - `--protocol tcp` (default) emulates an **elastic** application: under

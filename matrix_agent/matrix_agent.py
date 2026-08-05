@@ -51,6 +51,7 @@ import threading
 import time
 
 MAGIC = b"MXA1"
+RMAGIC = b"MXR1"              # request/response mode: reply datagrams
 DEFAULT_PORT = 5220
 MAX_CHUNK = 256 * 1024        # TCP write size for high-rate flows
 UDP_PAYLOAD = 1400            # keep under typical 1500 MTU
@@ -196,6 +197,11 @@ class Flow(object):
         self.tuning = tuning
         self.mbps = mbps          # mutable: reload updates it in place
         self.bytes_sent = 0       # cumulative, guarded by lock
+        self.pkts_sent = 0        # UDP: datagrams sent
+        self.resp_pkts = 0        # UDP: reply datagrams received back
+        self.resp_bytes = 0
+        self.rtt_sum = 0.0        # sampled request->reply round trips
+        self.rtt_n = 0
         self.reconnects = 0
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -315,12 +321,35 @@ class Flow(object):
                 self.stop.wait(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
 
+    def _udp_reply_reader(self, sock, pending):
+        # Drains reply datagrams (request/response mode) off the sender's
+        # connected socket: counts them and matches sampled seqs for RTT.
+        while not self.stop.is_set():
+            try:
+                data = sock.recv(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if len(data) < len(RMAGIC) + 8 or not data.startswith(RMAGIC):
+                continue
+            rseq = struct.unpack("!Q", data[4:12])[0]
+            t_now = time.monotonic()
+            with self.lock:
+                self.resp_pkts += 1
+                self.resp_bytes += len(data)
+                t_sent = pending.pop(rseq, None)
+                if t_sent is not None:
+                    self.rtt_sum += t_now - t_sent
+                    self.rtt_n += 1
+
     def _run_udp(self):
         header = MAGIC + struct.pack("!B", len(self.me)) + self.me.encode()
         # Honor --udp-payload, but never below what the header needs.
         want = self.tuning["udp_payload"] or UDP_PAYLOAD
         pad = b"\x00" * max(0, want - len(header) - 8)
         seq = 0
+        pending = {}   # sampled seq -> send time, shared with reply reader
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             if self.tuning["sndbuf"]:
@@ -332,6 +361,9 @@ class Flow(object):
             if self.tuning["bind_ip"]:
                 sock.bind((self.tuning["bind_ip"], 0))
             sock.connect((self.addr, self.port))
+            sock.settimeout(1)
+            threading.Thread(target=self._udp_reply_reader, daemon=True,
+                             args=(sock, pending)).start()
             state = {"tokens": 0.0, "last": time.monotonic()}
             cur_mbps = self.mbps
             bps = cur_mbps * 125000.0
@@ -349,9 +381,15 @@ class Flow(object):
                 except OSError:
                     self.stop.wait(0.5)
                     continue
-                seq += 1
                 with self.lock:
                     self.bytes_sent += size
+                    self.pkts_sent += 1
+                    # RTT sampling: every 64th request, bounded memory.
+                    if seq % 64 == 0:
+                        if len(pending) > 256:
+                            pending.clear()
+                        pending[seq] = time.monotonic()
+                seq += 1
         finally:
             sock.close()
 
@@ -440,7 +478,7 @@ def tcp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     srv.close()
 
 
-def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
+def udp_listener(port, book, stop, rcvbuf=0, bind_ip="", respond=0):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -451,9 +489,12 @@ def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     sock.bind((bind_ip, port))
     sock.settimeout(1)
     hlen = len(MAGIC) + 1
+    # Request/response mode: every request gets a reply of `respond`
+    # bytes carrying the request's seq, straight back to the source.
+    reply_pad = b"\x00" * max(0, respond - len(RMAGIC) - 8)
     while not stop.is_set():
         try:
-            data, _ = sock.recvfrom(65535)
+            data, addr = sock.recvfrom(65535)
         except socket.timeout:
             continue
         except OSError:
@@ -464,8 +505,14 @@ def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
         if len(data) < hlen + nlen + 8:
             continue
         name = data[hlen:hlen + nlen].decode(errors="replace")
-        seq = struct.unpack("!Q", data[hlen + nlen:hlen + nlen + 8])[0]
+        seq_raw = data[hlen + nlen:hlen + nlen + 8]
+        seq = struct.unpack("!Q", seq_raw)[0]
         book.account(name, len(data), seq)
+        if respond:
+            try:
+                sock.sendto(RMAGIC + seq_raw + reply_pad, addr)
+            except OSError:
+                pass
     sock.close()
 
 
@@ -480,8 +527,10 @@ class Reporter(object):
     FIELDS = ["ts", "host", "dir", "peer", "proto",
               "target_mbps", "achieved_mbps", "bytes", "extra"]
 
-    def __init__(self, me, path, interval, flows, book, rx_targets, proto):
+    def __init__(self, me, path, interval, flows, book, rx_targets, proto,
+                 respond=0):
         self.me, self.interval, self.proto = me, interval, proto
+        self.respond = respond
         self.flows, self.book, self.rx_targets = flows, book, rx_targets
         self.prev_tx = {}
         self.prev_rx = {}
@@ -503,14 +552,29 @@ class Reporter(object):
         for fl in self.flows:
             with fl.lock:
                 total, rec = fl.bytes_sent, fl.reconnects
-            prev = self.prev_tx.get(fl.dst, 0)
-            self.prev_tx[fl.dst] = total
-            mbps = (total - prev) * 8.0 / elapsed / 1e6
+                pkts, rpk = fl.pkts_sent, fl.resp_pkts
+                rtt_s, rtt_n = fl.rtt_sum, fl.rtt_n
+            prev = self.prev_tx.get(fl.dst, (0, 0, 0, 0.0, 0))
+            self.prev_tx[fl.dst] = (total, pkts, rpk, rtt_s, rtt_n)
+            mbps = (total - prev[0]) * 8.0 / elapsed / 1e6
             tx_sum += mbps
             tx_target += fl.mbps
+            if self.proto == "udp":
+                dpkts = pkts - prev[1]
+                extra = "pps=%d" % (dpkts / elapsed)
+                drpk = rpk - prev[2]
+                if drpk or self.respond:
+                    extra += " resp_pct=%.1f" % (
+                        min(100.0, drpk / dpkts * 100) if dpkts else 0.0)
+                    drtt_n = rtt_n - prev[4]
+                    if drtt_n:
+                        extra += " rtt_ms=%.3f" % (
+                            (rtt_s - prev[3]) / drtt_n * 1000)
+            else:
+                extra = "reconnects=%d" % rec
             self.csv.writerow([now, self.me, "tx", fl.dst, self.proto,
                                "%.3f" % fl.mbps, "%.3f" % mbps,
-                               total - prev, "reconnects=%d" % rec])
+                               total - prev[0], extra])
 
         rx_sum = rx_target = 0.0
         snap = self.book.snapshot()
@@ -525,9 +589,10 @@ class Reporter(object):
             extra = ""
             if self.proto == "udp" and cur["max_seq"] >= 0:
                 dpkts = cur["pkts"] - prev["pkts"]
+                extra = "pps=%d" % (dpkts / elapsed)
                 dseq = cur["max_seq"] - prev["max_seq"]
                 if dseq > 0:
-                    extra = "loss_pct=%.2f" % (max(0.0, 1.0 - dpkts / dseq) * 100)
+                    extra += " loss_pct=%.2f" % (max(0.0, 1.0 - dpkts / dseq) * 100)
             self.csv.writerow([now, self.me, "rx", peer, self.proto,
                                "%.3f" % target, "%.3f" % mbps, dbytes, extra])
         self.fh.flush()
@@ -576,7 +641,8 @@ def cmd_run(args):
         threading.Thread(target=tcp_listener, daemon=True,
                          args=(port, book, stop, args.rcvbuf, bind_ip)).start()
         threading.Thread(target=udp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip,
+                               args.respond_bytes)).start()
 
     flows = []
     if not args.no_send:
@@ -593,7 +659,7 @@ def cmd_run(args):
     os.makedirs(args.report_dir, exist_ok=True)
     report_path = os.path.join(args.report_dir, "%s_agent.csv" % me)
     rep = Reporter(me, report_path, args.interval, flows, book,
-                   rx_targets, args.protocol)
+                   rx_targets, args.protocol, args.respond_bytes)
 
     print("matrix_agent: host=%s port=%d proto=%s tx_flows=%d expected_rx_peers=%d report=%s"
           % (me, port, args.protocol, len(flows), len(rx_targets), report_path))
@@ -864,6 +930,11 @@ def main(argv=None):
     r.add_argument("--no-recv", action="store_true", help="sender only")
     r.add_argument("--map", action="append", default=[], metavar="NAME=ADDR[:PORT]",
                    help="override a host's address (repeatable; for testing)")
+    r.add_argument("--respond-bytes", type=int, default=0, metavar="BYTES",
+                   help="request/response mode (UDP): reply to every received "
+                        "request datagram with a BYTES-sized response; the "
+                        "requester side then reports resp_pct and sampled "
+                        "rtt_ms per flow (default: no replies)")
     r.add_argument("--udp-payload", type=int, default=UDP_PAYLOAD, metavar="BYTES",
                    help="UDP datagram size (default %d; >MTU exercises fragmentation)" % UDP_PAYLOAD)
     r.add_argument("--chunk-bytes", type=int, default=0, metavar="BYTES",

@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-05
+
+### Added
+- **UDP request/response mode**: `matrix_agent.py run --respond-bytes N`
+  answers every received request datagram with an N-byte reply to its
+  sender; the requester's tx rows gain `resp_pct=` (fraction of requests
+  answered) and `rtt_ms=` (sampled request→reply round trip). Small
+  requests with bigger replies emulate RPC/query-shaped workloads.
+- Packet-rate visibility: UDP tx and rx report rows now carry `pps=`.
+
 ## [1.1.2] - 2026-08-04
 
 ### Fixed
@@ -153,6 +163,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.2.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.0

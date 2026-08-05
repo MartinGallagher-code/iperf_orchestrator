@@ -210,6 +210,32 @@ EOF
     assert_contains "$(cat "$gdir/iperf_pivot.txt")" "80.0" "achieved rate in pivot" || return 1
 }
 
+test_udp_request_response_mode() {
+    # --respond-bytes: every request datagram gets a sized reply, and the
+    # requester reports pps, answered fraction, and sampled RTT per flow.
+    _write_hosts
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 2 \
+        -o "$TEST_TMPDIR/matrix.csv" >/dev/null
+    local rep="$TEST_TMPDIR/rrrep"
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
+        --protocol udp --udp-payload 60 --respond-bytes 500 \
+        --interval 1 --duration 4 --report-dir "$rep" >/dev/null 2>&1 &
+    local bpid=$!
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
+        --protocol udp --udp-payload 60 --respond-bytes 500 \
+        --interval 1 --duration 4 --report-dir "$rep" >/dev/null 2>&1
+    wait "$bpid" 2>/dev/null
+    local tx; tx=$(grep ",tx," "$rep/alpha_agent.csv" | tail -n 1)
+    assert_contains "$tx" "pps=" "tx rows carry packet rate" || return 1
+    assert_contains "$tx" "resp_pct=" "answered fraction reported" || return 1
+    assert_contains "$tx" "rtt_ms=" "sampled RTT reported" || return 1
+    local pct; pct=$(echo "$tx" | grep -o "resp_pct=[0-9.]*" | cut -d= -f2)
+    awk -v p="$pct" 'BEGIN { exit !(p >= 50) }' \
+        || { echo "resp_pct too low on loopback: $pct"; return 1; }
+    assert_contains "$(grep ",rx," "$rep/alpha_agent.csv" | tail -n 1)" "pps=" \
+        "rx rows carry packet rate" || return 1
+}
+
 test_rates_above_17gbps_do_not_kill_flows() {
     # Regression: rates over ~17.2 Gbps overflowed the C int in the
     # SO_MAX_PACING_RATE setsockopt; CPython retried the argument as a
@@ -254,6 +280,7 @@ run_test test_run_auto_identifies_by_local_address
 run_test test_run_rejects_ambiguous_local_addresses
 run_test test_bind_pins_traffic_iperf_orchestrator_style
 run_test test_summarize_grid_feeds_sweep_tooling
+run_test test_udp_request_response_mode
 run_test test_rates_above_17gbps_do_not_kill_flows
 run_test test_agent_rejects_unknown_hostname
 
