@@ -266,6 +266,13 @@ signal, not error.
 
 ## Packet-rate and request/response emulation
 
+`summarize`'s per-host table ends in a `pkt/s in|out` column in UDP
+mode, so per-server packet rates need no CSV digging. Both sides are
+receiver-side, like the Mbps columns: a host's "out" is what its peers
+actually received from it. A low `in` beside a healthy `out` on the same
+host is a receive-side problem — buffer overrun, a starved reader, or a
+congested ingress — not a sender that stopped.
+
 In UDP mode each datagram is one packet, so pps = rate ÷ payload:
 `cell_mbps = pps × payload_bytes × 8 / 1e6`. Reports carry `pps=` on
 both tx and rx rows, and `loss_pct=` shows drops — with a deliberately

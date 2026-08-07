@@ -386,6 +386,49 @@ PY
     assert_contains "$out" "n/a" "zero target reads n/a" || return 1
 }
 
+test_summarize_reports_per_host_packet_rates() {
+    # "How many packets is each server receiving?" -- the rx rows carry
+    # pps in UDP mode, but summarize only ever totalled them fleet-wide.
+    # Both directions come from receiver-side counters, so a host's "out"
+    # packet rate is what its peers actually received from it.
+    local d="$TEST_TMPDIR/pph"
+    mkdir -p "$d"
+    python3 - "$d" <<'PY'
+import os, sys
+d = sys.argv[1]
+hosts = ["h1", "h2", "h3"]
+ts = 1750000000
+for h in hosts:
+    with open(os.path.join(d, "%s_agent.csv" % h), "w") as f:
+        f.write("ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra\n")
+        for i in range(6):
+            for p in hosts:
+                if p == h:
+                    continue
+                # h3 receives far fewer packets than the others.
+                pps = 40000 if h != "h3" else 12000
+                f.write("%d,%s,rx,%s,udp,500.000,480.000,600000,pps=%d\n"
+                        % (ts + i * 10, h, p, pps))
+PY
+    local out; out=$(python3 "$AGENT" summarize "$d"/*_agent.csv --window 60 2>&1)
+    assert_contains "$out" "pkt/s in|out" "packet columns announced" || return 1
+    # h1 receives 2 x 40000 in; its peers received 40000 + 12000 = 52000 out.
+    assert_contains "$out" "80000|52000" "h1/h2 in and out packet rates" || return 1
+    # h3 is the starved receiver: 2 x 12000 in, but sends fine (2 x 40000).
+    assert_contains "$out" "24000|80000" "h3's inbound deficit is visible" || return 1
+
+    # TCP has no datagram to count, so the columns must be absent rather
+    # than printing zeros that would read as "no packets arriving".
+    local t="$TEST_TMPDIR/pph_tcp"
+    mkdir -p "$t"
+    {
+        echo "ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra"
+        echo "1750000010,h1,rx,h2,tcp,500.000,480.000,600000,"
+    } > "$t/h1_agent.csv"
+    out=$(python3 "$AGENT" summarize "$t"/*_agent.csv --window 60 2>&1)
+    case "$out" in *"pkt/s"*) echo "packet columns shown for TCP"; return 1 ;; esac
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -410,6 +453,7 @@ run_test test_rates_above_17gbps_do_not_kill_flows
 run_test test_stalled_reporter_does_not_burst_impossible_rates
 run_test test_summarize_tail_bytes_matches_full_parse
 run_test test_summarize_explains_mismatched_in_out_targets
+run_test test_summarize_reports_per_host_packet_rates
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

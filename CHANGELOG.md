@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-08-07
+
+### Added
+- **Per-host packet rates in `summarize`.** The rx rows have carried
+  `pps=` since 1.2.0, but the summary only ever totalled them across the
+  fleet, so "how many packets is each server receiving?" meant reading
+  the CSVs by hand. The per-host table now ends in a `pkt/s in|out`
+  column. Both directions are receiver-side, matching the Mbps columns
+  either side of them: a host's "out" packet rate is what its peers
+  actually received from it, not what it claims to have sent. The column
+  appears only in UDP mode -- TCP has no datagram to count, and printing
+  zeros there would read as "no packets arriving".
+
 ## [1.4.0] - 2026-08-07
 
 ### Added
@@ -309,6 +322,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.4.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.1
 [1.4.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.0
 [1.3.4]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.4
 [1.3.3]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.3
