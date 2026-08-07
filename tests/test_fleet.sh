@@ -170,6 +170,76 @@ test_no_bind_leaves_endpoints_alone() {
     assert_contains "$log" "nohup" "agents still start" || return 1
 }
 
+test_heal_only_touches_hosts_without_a_live_agent() {
+    # `up` is already safe to repeat, but it re-deploys to every host --
+    # the slow part, and the part that competes with running traffic.
+    # After an `up` that failed on some hosts, `heal` must repair only
+    # those and leave live agents completely alone.
+    _fleet_env
+    # alpha has a live agent (pidfile check succeeds); beta does not.
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$FLEET_LOG"
+# The liveness probe is a bare `kill -0`; start's own pidfile guard
+# contains one too, so match on the absence of the launch command.
+case "$*" in
+    *nohup*)     exit 0 ;;
+    *"kill -0"*) case "$*" in *10.0.0.1*) exit 0 ;; *) exit 1 ;; esac ;;
+esac
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+    _run_fleet heal || { cat "$TEST_TMPDIR/out"; return 1; }
+    local out; out=$(cat "$TEST_TMPDIR/out")
+    assert_contains "$out" "1 of 2 hosts need starting" "only the dead one selected" || return 1
+    assert_contains "$out" "beta" "and it is named" || return 1
+    # beta gets deployed and started; alpha is not touched after the probe.
+    local log; log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "--hostname 'beta'" "beta started" || return 1
+    case "$log" in
+        *"--hostname 'alpha'"*) echo "alpha was started despite running"; return 1 ;;
+    esac
+    # No scp to the live host -- that is the expense heal exists to avoid.
+    assert_eq "1" "$(grep -c '^scp ' "$FLEET_LOG")" "only the dead host is redeployed to" || return 1
+}
+
+test_heal_is_a_noop_when_everything_runs() {
+    _fleet_env
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$FLEET_LOG"
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+    _run_fleet heal || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "all 2 hosts already running" || return 1
+    assert_eq "0" "$(grep -c '^scp ' "$FLEET_LOG")" "nothing deployed" || return 1
+    case "$(cat "$FLEET_LOG")" in
+        *"nohup"*) echo "heal started an agent when none was needed"; return 1 ;;
+    esac
+}
+
+test_heal_treats_an_unreachable_host_as_needing_work() {
+    # An unreachable host cannot be probed. It must be selected for
+    # repair rather than silently counted as healthy -- and if the repair
+    # then fails, that failure is reported normally.
+    _fleet_env
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$FLEET_LOG"
+case "$*" in *10.0.0.2*) exit 255 ;; esac
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+    local rc=0
+    _run_fleet --retries 0 heal || rc=$?
+    local out; out=$(cat "$TEST_TMPDIR/out")
+    assert_contains "$out" "1 of 2 hosts need starting" "unreachable host selected" || return 1
+    assert_contains "$out" "beta" || return 1
+    [ "$rc" -ne 0 ] || { echo "a failed repair should exit nonzero"; echo "$out"; return 1; }
+    assert_contains "$out" "hosts failed" "and the failure is reported" || return 1
+}
+
 test_stop_and_reload_signal_agents() {
     _fleet_env
     _run_fleet stop || { cat "$TEST_TMPDIR/out"; return 1; }
@@ -460,6 +530,9 @@ run_test test_rr_command_builds_matrix_and_restarts_in_rr_mode
 run_test test_bind_puts_traffic_on_the_bound_nic_not_the_login_address
 run_test test_bind_that_matches_no_interface_fails_loudly
 run_test test_no_bind_leaves_endpoints_alone
+run_test test_heal_only_touches_hosts_without_a_live_agent
+run_test test_heal_is_a_noop_when_everything_runs
+run_test test_heal_treats_an_unreachable_host_as_needing_work
 run_test test_stop_and_reload_signal_agents
 run_test test_summarize_pulls_only_the_report_tail
 run_test test_ssh_user_and_remote_dir_options

@@ -12,6 +12,10 @@
 #   deploy      push matrix_agent.py + the matrix to every host
 #   start       launch one agent per host (nohup; survives this session)
 #   up          deploy + start
+#   heal        repair a partial up: probe every host and deploy+start
+#               ONLY the ones without a live agent. Live agents are never
+#               touched or re-deployed to, so it is cheap to repeat and
+#               safe to run against a fleet already carrying traffic.
 #   rr          request/response run in one shot: builds the matrix from
 #               --hosts/--pps/--send, restarts the fleet in UDP mode with
 #               --send-sized requests answered by --reply-sized replies
@@ -90,7 +94,7 @@ log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,62p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,66p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -363,10 +367,49 @@ fix the spec or pass explicit --map flags after --"
 # ---- commands --------------------------------------------------------------
 
 # Only the commands that launch agents need the map; status/collect/stop
-# talk over the control path and are unaffected.
+# talk over the control path and are unaffected. Resolution runs over the
+# FULL host list, before `heal` narrows it: every agent needs an endpoint
+# for every peer, not just for the hosts being repaired.
 case "$CMD" in
-    start|up|rr) [ -n "$BIND" ] && _resolve_bind_map ;;
+    start|up|rr|heal) [ -n "$BIND" ] && _resolve_bind_map ;;
 esac
+
+# Narrow HOST_LINES to the hosts that do NOT have a live agent.
+#
+# `up` is already safe to repeat -- start is pidfile-guarded, so a live
+# agent is left alone -- but it still re-deploys to every host, which is
+# the slow part and the part that competes with running traffic. When an
+# `up` fails on a few hosts, this repairs just those.
+#
+# A host that cannot be reached at all counts as needing work, not as an
+# error: the probe never fails the fan-out. Healing it may still fail
+# later, and that failure is reported then.
+_select_not_running() {
+    local probe_dir line name kept=()
+    probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/mxa-probe-XXXXXX")"
+    PROBE_DIR="$probe_dir"
+    log "checking which of ${#HOST_LINES[@]} hosts need starting"
+    _fanout _h_probe || true
+    for line in "${HOST_LINES[@]}"; do
+        name="${line%% *}"
+        [ -f "$probe_dir/$name" ] || kept+=("$line")
+    done
+    rm -rf "$probe_dir"
+    if [ "${#kept[@]}" -eq 0 ]; then
+        log "all ${#HOST_LINES[@]} hosts already running; nothing to do"
+        exit 0
+    fi
+    log "${#kept[@]} of ${#HOST_LINES[@]} hosts need starting: $(printf '%s ' "${kept[@]%% *}")"
+    HOST_LINES=("${kept[@]}")
+}
+
+PROBE_DIR=""
+_h_probe() { local name="$1" addr="$2"
+    ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
+        "kill -0 \$(cat '$REMOTE_DIR/agent.pid' 2>/dev/null) 2>/dev/null" \
+        && touch "$PROBE_DIR/$name"
+    return 0
+}
 
 case "$CMD" in
     deploy)    log "deploying agent + $MATRIX to ${#HOST_LINES[@]} hosts (jobs=$JOBS)"
@@ -374,6 +417,11 @@ case "$CMD" in
     start)     log "starting agents on ${#HOST_LINES[@]} hosts"
                _fanout _h_start ;;
     up)        log "deploying agent + $MATRIX to ${#HOST_LINES[@]} hosts (jobs=$JOBS)"
+               _fanout _h_deploy
+               log "starting agents"
+               _fanout _h_start ;;
+    heal)      _select_not_running
+               log "deploying agent + $MATRIX to the ${#HOST_LINES[@]} that need it"
                _fanout _h_deploy
                log "starting agents"
                _fanout _h_start ;;

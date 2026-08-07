@@ -51,6 +51,11 @@ EOF
 #    matrix header -- there is no separate inventory to keep in sync.
 ./fleet.sh --matrix matrix.csv up
 
+# 4b. If `up` failed on a few hosts, repair just those -- live agents
+#     are never touched or re-deployed to. Repeat until it says there is
+#     nothing to do.
+./fleet.sh --matrix matrix.csv heal
+
 # 5. Watch and aggregate
 ./fleet.sh --matrix matrix.csv status | sort
 ./fleet.sh --matrix matrix.csv summarize        # collects CSVs, prints deficits

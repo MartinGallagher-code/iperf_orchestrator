@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-07
+
+### Added
+- **`fleet.sh heal` — repair a partial `up`.** It probes every host and
+  deploys + starts only the ones without a live agent. `up` was already
+  safe to repeat (`start` is pidfile-guarded, so a live agent is left
+  alone), but it still re-deployed to every host — the slow part, and
+  the part that competes with traffic the healthy agents are carrying.
+  `heal` touches nothing that is already running: no scp, no start, no
+  disturbance.
+
+  A host that cannot be reached at all counts as needing work rather
+  than as healthy, so a fleet where `up` failed on a few hosts is
+  repaired by re-running `heal` until it reports nothing to do. If the
+  repair itself then fails, that is reported and exits nonzero as
+  usual. With `--bind`, the address map is still resolved over the full
+  host list before narrowing — every agent needs an endpoint for every
+  peer, not just for the hosts being repaired.
+
 ## [1.3.4] - 2026-08-07
 
 ### Fixed
@@ -290,6 +309,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.4.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.0
 [1.3.4]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.4
 [1.3.3]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.3
 [1.3.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.2
