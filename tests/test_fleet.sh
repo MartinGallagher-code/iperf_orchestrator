@@ -169,6 +169,90 @@ EOF
     fi
 }
 
+test_summarize_pulls_only_the_report_tail() {
+    # summarize used to scp every report whole. Reports grow for the life
+    # of the run, so a fleet that had been up for hours spent minutes
+    # copying and parsing megabytes to read the last 60 seconds. It now
+    # pulls a bounded tail -- and must not overwrite the full report a
+    # previous `collect` archived in --reports.
+    _fleet_env
+    local remote="$TEST_TMPDIR/remote2"
+    mkdir -p "$remote/rep"
+    local h
+    for h in alpha beta; do
+        {
+            echo "ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra"
+            python3 -c "
+ts = 1750000000
+for i in range(20000):
+    ts += 10
+    print('%d,$h,rx,other,tcp,100.000,90.000,112500,' % ts)
+"
+        } > "$remote/rep/${h}_agent.csv"
+    done
+    local bytes_before; bytes_before=$(wc -c < "$remote/rep/alpha_agent.csv")
+    [ "$bytes_before" -gt 500000 ] || { echo "fixture too small to be a test"; return 1; }
+    # An archival full collect first; its output must survive summarize.
+    local reports="$TEST_TMPDIR/reports2"
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+    case "$1" in -o) shift 2 ;; -*) shift ;; *) break ;; esac
+done
+shift
+exec bash -c "$*"
+EOF
+    cat > "$FAKE_BIN/scp" <<'EOF'
+#!/usr/bin/env bash
+srcs=(); dst=""
+for a in "$@"; do
+    case "$a" in -o) skip=1 ;; *) [ "${skip:-}" ] && skip= && continue
+        case "$a" in -*) ;; *:*) [ -z "$dst" ] && srcs+=("${a#*:}") || dst="${a#*:}" ;; *) dst="$a" ;; esac ;;
+    esac
+done
+cp "${srcs[@]}" "$dst"
+EOF
+    chmod +x "$FAKE_BIN/ssh" "$FAKE_BIN/scp"
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --reports "$reports" --jobs 2 collect \
+        >"$TEST_TMPDIR/out" 2>&1 || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_eq "$bytes_before" "$(wc -c < "$reports/alpha_agent.csv")" \
+        "collect must still fetch the whole report" || return 1
+
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --reports "$reports" --jobs 2 --window 60 \
+        --tail-bytes 65536 summarize >"$TEST_TMPDIR/out" 2>&1 \
+        || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "window: last 60s" \
+        "summary still produced" || return 1
+    # The windowed copy is bounded and lives beside, not on top of, the
+    # archived one.
+    local windowed="$reports/.window/alpha_agent.csv"
+    [ -s "$windowed" ] || { echo "windowed copy missing"; return 1; }
+    [ "$(wc -c < "$windowed")" -lt "$bytes_before" ] \
+        || { echo "summarize copied the whole file again"; return 1; }
+    assert_eq "$bytes_before" "$(wc -c < "$reports/alpha_agent.csv")" \
+        "summarize must not clobber the archived full report" || return 1
+    # Header survived the tailing, exactly once.
+    assert_eq "1" "$(grep -c '^ts,host,dir' "$windowed")" \
+        "header kept, and not duplicated" || return 1
+    # With no --tail-bytes the size is derived from --window and the host
+    # count -- bounded, and never the whole file.
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --reports "$reports" --jobs 2 --window 60 \
+        summarize >"$TEST_TMPDIR/out" 2>&1 || { cat "$TEST_TMPDIR/out"; return 1; }
+    local defbytes
+    defbytes=$(sed -n 's/.*collecting last \([0-9]*\)B.*/\1/p' "$TEST_TMPDIR/out")
+    [ -n "$defbytes" ] && [ "$defbytes" -ge 1048576 ] && [ "$defbytes" -le 33554432 ] \
+        || { echo "default tail size not in the clamped range: '$defbytes'"; return 1; }
+    # --tail-bytes 0 restores whole-file behavior.
+    PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
+        --remote-dir "$remote" --reports "$reports" --jobs 2 --tail-bytes 0 \
+        summarize >"$TEST_TMPDIR/out" 2>&1 || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_eq "$bytes_before" "$(wc -c < "$reports/alpha_agent.csv")" \
+        "--tail-bytes 0 collects the full report" || return 1
+}
+
 test_ssh_user_and_remote_dir_options() {
     _fleet_env
     _run_fleet --user opsuser --remote-dir /opt/mxa deploy \
@@ -255,6 +339,7 @@ run_test test_start_really_launches_agents_no_pgrep_self_match
 run_test test_rr_command_builds_matrix_and_restarts_in_rr_mode
 run_test test_bind_option_forwarded_to_every_agent
 run_test test_stop_and_reload_signal_agents
+run_test test_summarize_pulls_only_the_report_tail
 run_test test_ssh_user_and_remote_dir_options
 run_test test_failed_host_is_reported_and_exit_nonzero
 

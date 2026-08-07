@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-07
+
+### Fixed
+- **A stalled reporter printed impossible rates.** The agent's tick
+  scheduler advanced `next_tick` by exactly one interval, so whenever
+  reporting fell behind — a starved thread at high flow counts, a
+  stalled disk, a suspended process — `next_tick` stayed in the past
+  and the loop fired every missed slot back to back. Each catch-up tick
+  divided a real byte delta (data already sitting in socket buffers) by
+  a millisecond-wide window, so the ticker reported rx far above the
+  offered load while tx read 0.0, and those rows went into the report
+  CSV, `summarize`, and the grids. Missed slots are now skipped rather
+  than replayed, and a tick arriving inside a tenth of an interval is
+  dropped instead of dividing by a sliver.
+
+### Changed
+- **`summarize` no longer gets slower the longer the run lasts.**
+  Reports append one row per flow per direction per interval for the
+  life of the run, but only the last `--window` seconds are ever used;
+  `fleet.sh summarize` was copying every report whole and parsing it
+  from byte zero, so a fleet that had been up for hours spent minutes
+  fetching megabytes to read the last minute. It now pulls a bounded
+  tail sized from `--window` and the host count (override with
+  `--tail-bytes`, `0` for the old whole-file behavior), into
+  `<reports>/.window/` so an archived `collect` is never overwritten.
+  `matrix_agent.py summarize --tail-bytes N` does the same by seeking,
+  for direct use on archived reports, and warns when the tail is too
+  small to cover the requested window rather than quietly reporting
+  less time than asked for.
+
 ## [1.3.1] - 2026-08-07
 
 ### Changed
@@ -209,6 +239,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.3.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.2
 [1.3.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.1
 [1.3.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.2.0

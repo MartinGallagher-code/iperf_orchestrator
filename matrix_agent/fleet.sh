@@ -34,6 +34,10 @@
 #   --bind SPEC        pin agent traffic to a NIC (iperf-orchestrator
 #                      semantics; forwarded to every agent) [IPERF_BIND]
 #   --window SECONDS   summarize window             [60]
+#   --tail-bytes N     bytes of each report summarize pulls (0 = whole
+#                      file). Default is sized from --window and the host
+#                      count, so summarize costs the same after eight
+#                      hours as after eight minutes.
 #   --grid DIR         summarize also writes achieved/deficit grids and
 #                      an iperf_results.csv for make-pivot/make-heatmap
 #   --hosts FILE       (rr) server list, one IP/name per line
@@ -58,6 +62,8 @@ REMOTE_PY="${MXA_PYTHON:-python3}"
 NIC="${MXA_NIC:-}"
 BIND="${IPERF_BIND:-}"
 WINDOW=60
+TAIL_BYTES="${MXA_TAIL_BYTES:-}"
+WORK_DIR=""
 GRID=""
 HOSTS_FILE=""
 PPS=""
@@ -69,7 +75,7 @@ log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,49p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -84,6 +90,7 @@ while [ $# -gt 0 ]; do
         --nic)        NIC="$2"; shift 2 ;;
         --bind)       BIND="$2"; shift 2 ;;
         --window)     WINDOW="$2"; shift 2 ;;
+        --tail-bytes) TAIL_BYTES="$2"; shift 2 ;;
         --grid)       GRID="$2"; shift 2 ;;
         --hosts)      HOSTS_FILE="$2"; shift 2 ;;
         --pps)        PPS="$2"; shift 2 ;;
@@ -116,6 +123,20 @@ while IFS= read -r line; do
     [ -n "$line" ] && HOST_LINES+=("$line")
 done < <(python3 "$AGENT" hosts --matrix "$MATRIX")
 [ "${#HOST_LINES[@]}" -ge 1 ] || die "no hosts in $MATRIX"
+
+# How much of each report summarize needs to see. Reports grow for the
+# life of the run (one row per flow per direction per interval), but only
+# the last --window seconds are ever used, so copying and parsing from
+# byte zero makes every summary slower than the one before it. Size the
+# tail from the window instead: rows arrive at peers x 2 / interval per
+# second at ~100 bytes each; assume a 5s interval floor, double it for
+# margin, and clamp. `--tail-bytes 0` restores whole-file collection.
+if [ -z "$TAIL_BYTES" ]; then
+    _peers=$(( ${#HOST_LINES[@]} - 1 )); [ "$_peers" -lt 1 ] && _peers=1
+    TAIL_BYTES=$(( WINDOW * _peers * 2 * 100 * 2 / 5 ))
+    [ "$TAIL_BYTES" -lt 1048576 ]  && TAIL_BYTES=1048576
+    [ "$TAIL_BYTES" -gt 33554432 ] && TAIL_BYTES=33554432
+fi
 
 _target() { # addr -> [user@]addr for ssh/scp
     if [ -n "$SSH_USER" ]; then echo "$SSH_USER@$1"; else echo "$1"; fi
@@ -200,6 +221,33 @@ _h_collect() { local name="$1" addr="$2"
     scp "${SSH_OPTS[@]}" -q "$(_target "$addr"):$REMOTE_DIR/rep/${name}_agent.csv" "$REPORTS/"
 }
 
+# summarize's collect: the header plus the last $TAIL_BYTES, so the cost
+# is flat in run length. `tail -c` can land mid-row, hence the `tail -n
+# +2` that drops the first line -- which is also why the header is sent
+# separately. When the file is shorter than the tail that same +2 drops
+# the file's own header, so there is never a duplicate.
+#
+# Writes into $WORK_DIR, not $REPORTS: a windowed copy must never
+# overwrite the full report a previous `collect` archived.
+#
+# A slack margin over $TAIL_BYTES is fetched so the local copy is a
+# strict superset of what summarize parses; that is what lets summarize
+# tell "the tail didn't reach back far enough" from "the run is young"
+# and warn instead of quietly reporting a short window.
+_h_collect_tail() { local name="$1" addr="$2" f
+    # Separate statement: `local` expands all its arguments before it
+    # assigns any of them, so ${name} would be unset on the same line.
+    f="$REMOTE_DIR/rep/${name}_agent.csv"
+    if ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
+           "f='$f'; [ -r \"\$f\" ] || exit 1; head -n1 \"\$f\"; \
+            tail -c $(( TAIL_BYTES + 65536 )) \"\$f\" | tail -n +2" > "$WORK_DIR/.$name.part"; then
+        mv "$WORK_DIR/.$name.part" "$WORK_DIR/${name}_agent.csv"
+    else
+        rm -f "$WORK_DIR/.$name.part"
+        return 1
+    fi
+}
+
 _h_stop() { local name="$1" addr="$2"
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
         "cd '$REMOTE_DIR' 2>/dev/null \
@@ -237,11 +285,19 @@ case "$CMD" in
     collect)   mkdir -p "$REPORTS"
                log "collecting reports from ${#HOST_LINES[@]} hosts into $REPORTS/"
                _fanout _h_collect ;;
-    summarize) mkdir -p "$REPORTS"
-               log "collecting reports from ${#HOST_LINES[@]} hosts into $REPORTS/"
-               _fanout _h_collect || warn "summarizing what was collected anyway"
-               python3 "$AGENT" summarize "$REPORTS"/*_agent.csv --window "$WINDOW" \
-                   ${GRID:+--grid "$GRID"} ;;
+    summarize) if [ "$TAIL_BYTES" -gt 0 ]; then
+                   WORK_DIR="$REPORTS/.window"
+                   mkdir -p "$WORK_DIR"
+                   log "collecting last ${TAIL_BYTES}B of each report from ${#HOST_LINES[@]} hosts"
+                   _fanout _h_collect_tail || warn "summarizing what was collected anyway"
+               else
+                   WORK_DIR="$REPORTS"
+                   mkdir -p "$WORK_DIR"
+                   log "collecting reports from ${#HOST_LINES[@]} hosts into $REPORTS/"
+                   _fanout _h_collect || warn "summarizing what was collected anyway"
+               fi
+               python3 "$AGENT" summarize "$WORK_DIR"/*_agent.csv --window "$WINDOW" \
+                   --tail-bytes "$TAIL_BYTES" ${GRID:+--grid "$GRID"} ;;
     stop|down) log "stopping agents on ${#HOST_LINES[@]} hosts"
                _fanout _h_stop ;;
     prep)      [ -n "$NIC" ] || die "prep needs --nic <device>"

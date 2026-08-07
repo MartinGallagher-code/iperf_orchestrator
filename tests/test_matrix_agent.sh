@@ -269,6 +269,75 @@ test_rates_above_17gbps_do_not_kill_flows() {
     assert_contains "$out" "peers=1" "traffic must actually arrive" || return 1
 }
 
+test_stalled_reporter_does_not_burst_impossible_rates() {
+    # Regression: when the reporter fell behind (starved thread at high
+    # flow counts, stalled disk, suspended process), next_tick advanced
+    # by one interval and stayed in the past, so the loop fired every
+    # missed slot back to back. Each catch-up tick divided a real byte
+    # delta -- data already sitting in socket buffers -- by a
+    # millisecond-wide window, printing rates far above the target and
+    # writing them into the report CSV, which then poisoned summarize
+    # and the grids. SIGSTOP reproduces the stall deterministically.
+    _write_hosts
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 200 \
+        -o "$TEST_TMPDIR/matrix.csv" >/dev/null
+    local rep="$TEST_TMPDIR/stallrep"
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
+        --interval 1 --duration 16 --report-dir "$rep" \
+        > "$TEST_TMPDIR/stall_b.out" 2>&1 &
+    local bpid=$!
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
+        --interval 1 --duration 16 --report-dir "$rep" \
+        > "$TEST_TMPDIR/stall_a.out" 2>&1 &
+    local apid=$!
+    sleep 4
+    kill -STOP "$apid"; sleep 6; kill -CONT "$apid"
+    wait "$apid" "$bpid" 2>/dev/null
+    local ticks; ticks=$(grep '^ts=' "$TEST_TMPDIR/stall_a.out" || true)
+    [ -n "$ticks" ] || { echo "no ticker output"; cat "$TEST_TMPDIR/stall_a.out"; return 1; }
+    # No tick may claim more than the 200 Mbps target (plus slack): a
+    # rate above the offered load can only come from a bad divisor.
+    local bad
+    bad=$(echo "$ticks" | awk -F'rx=' '{split($2,a,"/"); if (a[1]+0 > 400) print}')
+    [ -z "$bad" ] || { echo "impossible rx rate after stall:"; echo "$bad"; return 1; }
+    # And the stall must not produce a burst of same-second ticks.
+    local dupes
+    dupes=$(echo "$ticks" | awk '{print $1}' | sort | uniq -d)
+    [ -z "$dupes" ] || { echo "catch-up tick burst at: $dupes"; echo "$ticks"; return 1; }
+}
+
+test_summarize_tail_bytes_matches_full_parse() {
+    # Reports append for the life of the run but only --window seconds
+    # are ever used, so summarize can seek instead of parsing from byte
+    # zero. The windowed read must agree with the full read exactly, and
+    # must warn -- not silently under-report -- when the tail is too
+    # small to cover the requested window.
+    local big="$TEST_TMPDIR/bulk_agent.csv"
+    python3 - "$big" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, "w") as f:
+    f.write("ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra\n")
+    ts = 1750000000
+    for i in range(4000):            # ~4000 intervals of history
+        ts += 10
+        for peer in ("p1", "p2"):
+            f.write("%d,h1,rx,%s,tcp,1000.000,900.000,1125000,\n" % (ts, peer))
+            f.write("%d,h1,tx,%s,tcp,1000.000,950.000,1187500,reconnects=0\n" % (ts, peer))
+PY
+    local full tail
+    full=$(python3 "$AGENT" summarize "$big" --window 60 2>/dev/null)
+    tail=$(python3 "$AGENT" summarize "$big" --window 60 --tail-bytes 65536 2>/dev/null)
+    assert_eq "$full" "$tail" "tail read must match a full parse" || return 1
+    # A window wider than the tail covers must say so.
+    local warn
+    warn=$(python3 "$AGENT" summarize "$big" --window 40000 --tail-bytes 4096 2>&1 >/dev/null)
+    assert_contains "$warn" "tail-bytes" "short tail must warn, not under-report" || return 1
+    # ...and the full read of the same window must not warn.
+    warn=$(python3 "$AGENT" summarize "$big" --window 40000 2>&1 >/dev/null)
+    case "$warn" in *tail-bytes*) echo "full parse should not warn: $warn"; return 1 ;; esac
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -290,6 +359,8 @@ run_test test_bind_pins_traffic_iperf_orchestrator_style
 run_test test_summarize_grid_feeds_sweep_tooling
 run_test test_udp_request_response_mode
 run_test test_rates_above_17gbps_do_not_kill_flows
+run_test test_stalled_reporter_does_not_burst_impossible_rates
+run_test test_summarize_tail_bytes_matches_full_parse
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

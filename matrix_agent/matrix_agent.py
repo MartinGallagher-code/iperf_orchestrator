@@ -542,12 +542,19 @@ class Reporter(object):
             self.csv.writerow(self.FIELDS)
 
     def tick(self):
-        now = int(time.time())
         # Rate over the *actual* elapsed time, not the nominal interval,
         # so the final partial tick and any scheduling drift stay honest.
         mono = time.monotonic()
-        elapsed = max(mono - self.last_tick, 1e-3)
+        elapsed = mono - self.last_tick
+        # ...but refuse to divide by a sliver. A tick this close on the
+        # heels of the last one measures scheduling noise, not traffic:
+        # bytes already sitting in socket buffers get accounted in a
+        # millisecond-wide window and come out as hundreds of Gbps. Drop
+        # the sample and let the next one cover the whole span.
+        if elapsed < self.interval * 0.1:
+            return False
         self.last_tick = mono
+        now = int(time.time())
         tx_sum = tx_target = 0.0
         for fl in self.flows:
             with fl.lock:
@@ -603,6 +610,7 @@ class Reporter(object):
               % (now, tx_sum, tx_target, rx_sum, rx_target,
                  len(self.flows), len(snap)))
         sys.stdout.flush()
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +697,15 @@ def cmd_run(args):
         if time.monotonic() >= next_tick:
             rep.tick()
             next_tick += args.interval
+            # If the reporter fell behind -- a starved thread at high flow
+            # counts, a stalled disk, a suspended process -- advancing by
+            # one interval leaves next_tick in the past, and the loop then
+            # fires every missed slot back to back. Skip the missed slots
+            # instead: those catch-up ticks would each divide a real byte
+            # delta by a near-zero window and print impossible rates.
+            behind = time.monotonic()
+            if next_tick <= behind:
+                next_tick = behind + args.interval
         if deadline is not None and time.monotonic() >= deadline:
             stop.set()
 
@@ -836,16 +853,58 @@ def _write_grid_outputs(gdir, agg, protos, latest, window):
     print("  iperf-orchestrator -o '%s' --run-id '%s' make-heatmap" % (parent, base))
 
 
+def _read_report(path, tail_bytes):
+    """Rows from one report CSV, optionally only its tail.
+
+    Reports append forever, but a summary only ever uses the last
+    --window seconds, so parsing from byte zero makes each summary
+    slower than the one before it. With tail_bytes > 0 we seek instead.
+    Binary mode is deliberate: seeking a text stream to an arbitrary
+    offset is not supported. The read starts mid-row, so the first
+    (partial) line is discarded -- which is why the header is read
+    separately and supplied as field names.
+    """
+    with open(path, "rb") as f:
+        header = f.readline()
+        if not header.strip():
+            return [], False
+        truncated = False
+        if tail_bytes > 0:
+            f.seek(0, 2)
+            end = f.tell()
+            if end - len(header) > tail_bytes:
+                f.seek(end - tail_bytes)
+                f.readline()
+                truncated = True
+            else:
+                f.seek(len(header))
+        data = f.read()
+    names = header.decode("utf-8", "replace").rstrip("\r\n").split(",")
+    text = data.decode("utf-8", "replace").splitlines()
+    return list(csv.DictReader(text, fieldnames=names)), truncated
+
+
 def cmd_summarize(args):
     rows = []
+    truncated = []
+    tail_bytes = getattr(args, "tail_bytes", 0)
     for path in args.reports:
-        with open(path, newline="") as f:
-            for r in csv.DictReader(f):
-                rows.append(r)
+        got, cut = _read_report(path, tail_bytes)
+        rows.extend(got)
+        if cut and got:
+            truncated.append(min(int(r["ts"]) for r in got))
     if not rows:
         raise SystemExit("no report rows found")
     latest = max(int(r["ts"]) for r in rows)
     cutoff = latest - args.window
+    # A tail that starts after the cutoff means the window is wider than
+    # the bytes we read, so the summary would silently cover less time
+    # than asked for. Say so rather than under-report.
+    if truncated and max(truncated) > cutoff:
+        sys.stderr.write(
+            "warning: --tail-bytes %d covers only %ds of the requested %ds "
+            "window; raise it (or use 0) for the full window\n"
+            % (tail_bytes, max(1, latest - max(truncated)), args.window))
 
     def _kv(extra):
         d = {}
@@ -1044,6 +1103,11 @@ def main(argv=None):
     s.add_argument("--top", type=int, default=10, help="worst flows to list")
     s.add_argument("--top-hosts", type=int, default=10,
                    help="hosts to list in the per-host table (worst first)")
+    s.add_argument("--tail-bytes", type=int, default=0, metavar="N",
+                   help="read only the last N bytes of each report instead "
+                        "of the whole file; reports grow for the life of the "
+                        "run but only --window seconds are used (0 = whole "
+                        "file)")
     s.add_argument("--grid", metavar="DIR",
                    help="also write achieved/deficit N x N grid CSVs and an "
                         "orchestrator-compatible iperf_results.csv into DIR, "

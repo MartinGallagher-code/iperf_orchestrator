@@ -62,7 +62,18 @@ vi matrix.csv && ./fleet.sh --matrix matrix.csv reload
 
 `fleet.sh` hides all the SSH fan-out (bounded concurrency, per-host
 failure reporting, `--user`/`--remote-dir`/`--jobs` knobs, `prep` to set
-the `fq` qdisc fleet-wide). Agent flags pass through after `--`:
+the `fq` qdisc fleet-wide). `--jobs N` (env `MXA_JOBS`, default 64) is
+how many hosts are contacted at once — raise it for large fleets, lower
+it if the driver box or a bastion runs out of connections. It bounds
+SSH concurrency only; the traffic's own concurrency is the matrix shape.
+
+`summarize` only reads the last `--window` seconds, so it fetches a
+bounded tail of each report rather than the whole file — its cost is the
+same after eight hours as after eight minutes. `--tail-bytes N` overrides
+the size (`0` = whole file); the windowed copies land in
+`<reports>/.window/`, leaving anything `collect` archived intact.
+
+Agent flags pass through after `--`:
 
 ```bash
 ./fleet.sh --matrix matrix.csv up -- --protocol udp --interval 30 --mss 600
@@ -107,7 +118,27 @@ ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra
 `reconnects=` so flapping paths stand out. In UDP mode `extra` carries
 `loss_pct=` per peer, computed from sequence numbers. Each agent also
 prints a one-line aggregate per interval to stdout — under systemd,
-`journalctl -u matrix-agent -f` is a live fleet-health ticker.
+`journalctl -u matrix-agent -f` is a live fleet-health ticker (and it's
+what `fleet.sh status` shows, being the last line of `agent.out`):
+
+```
+ts=1786125102 tx=1999.6/2000.0Mbps rx=1987.0/2000.0Mbps flows=1 peers=1
+```
+
+Read it as **achieved/target, for this host only, over the last
+interval**:
+
+| Field | Meaning |
+|---|---|
+| `tx=A/T` | what this host *sent*, summed over its outbound flows, against the sum of its matrix row. Sender-side, so it's what got queued. |
+| `rx=A/T` | what this host *received*, summed over peers, against the sum of its matrix column. Receiver-side — this is the number that means something. |
+| `flows` | outbound flows this agent is running: one per non-zero cell in its row (`N-1` for a full mesh of N hosts). |
+| `peers` | distinct senders it has actually heard from. `peers` < `flows` means some hosts aren't reaching it. |
+
+`tx` and `rx` targets are equal only when the matrix is symmetric. `rx`
+running above target isn't a real reading — the offered load bounds it —
+so treat it as a bug report; the tick-scheduling bug that caused it was
+fixed in 1.3.2, so check `--version` on the agents first.
 
 `summarize` turns collected reports into the deficit view: the fleet
 aggregate, a per-host table (rx in / tx out, worst hosts first — both
