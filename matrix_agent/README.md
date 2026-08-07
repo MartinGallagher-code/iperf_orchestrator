@@ -147,6 +147,23 @@ peers actually got), and the worst flows. A dark *row* in the deficit
 matrix is a sick sender, a dark *column* a sick receiver, a dark *block*
 a congested leaf pair.
 
+The two halves of the per-host table are **not symmetric reads**, and
+this trips people up when the targets disagree:
+
+- **`in`** is the host's own rx rows — the sum of its matrix **column**.
+  Always complete, because the host reported it itself.
+- **`out`** is assembled from its *receivers'* rx rows — the sum of its
+  matrix **row**, but only over receivers whose reports were collected.
+
+So `in 46451/100000` next to `out .../25000` on a uniform matrix does
+not mean the matrix is lopsided; it means only 3 of that host's 12
+receivers reported. The `[n]` after each side is how many peers went
+into it (expect `N-1`), the header says how many hosts reported, and
+summarize names any host that never reported. An `out` count *above*
+`N-1` means extra reports are being counted — stale agents from an
+earlier run, or old `*_agent.csv` still sitting in the reports
+directory. A target of zero prints `n/a`, not `100%`.
+
 ### Sweep-style views (pivot table, heatmap)
 
 `summarize --grid DIR` additionally writes the window aggregate as

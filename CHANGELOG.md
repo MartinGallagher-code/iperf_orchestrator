@@ -20,6 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropped instead of dividing by a sliver.
 
 ### Changed
+- **`summarize`'s per-host table says why `in` and `out` disagree.** The
+  two sides are different reads: `in` is a host's own rx rows (its
+  matrix column, always complete), while `out` is assembled from its
+  *receivers'* rx rows (its matrix row, only as complete as the reports
+  collected). A downed agent therefore shrinks every one of its senders'
+  `out` targets, which looked like an asymmetric matrix. Each side now
+  carries the number of peers behind it, the header states how many
+  hosts reported, and a note names hosts that never reported or flags
+  targets that disagree with full coverage. A zero target prints `n/a`
+  instead of a healthy-looking `100%`.
 - **`summarize` no longer gets slower the longer the run lasts.**
   Reports append one row per flow per direction per interval for the
   life of the run, but only the last `--window` seconds are ever used;

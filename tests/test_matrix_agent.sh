@@ -217,9 +217,14 @@ test_udp_request_response_mode() {
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 2 \
         -o "$TEST_TMPDIR/matrix.csv" >/dev/null
     local rep="$TEST_TMPDIR/rrrep"
+    # The responder is given a longer duration than the requester on
+    # purpose: with equal durations beta exits first (it starts first),
+    # and alpha's final interval then honestly records zero replies --
+    # which the assertions below, reading the last tx row, would read as
+    # a broken reply path.
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
         --protocol udp --udp-payload 60 --respond-bytes 500 \
-        --interval 1 --duration 4 --report-dir "$rep" >/dev/null 2>&1 &
+        --interval 1 --duration 8 --report-dir "$rep" >/dev/null 2>&1 &
     local bpid=$!
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
         --protocol udp --udp-payload 60 --respond-bytes 500 \
@@ -282,16 +287,19 @@ test_stalled_reporter_does_not_burst_impossible_rates() {
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 200 \
         -o "$TEST_TMPDIR/matrix.csv" >/dev/null
     local rep="$TEST_TMPDIR/stallrep"
+    # --interval 2, not 1: report timestamps have one-second resolution,
+    # so at interval 1 two honest ticks can drift into the same second
+    # and look like a burst.
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
-        --interval 1 --duration 16 --report-dir "$rep" \
+        --interval 2 --duration 20 --report-dir "$rep" \
         > "$TEST_TMPDIR/stall_b.out" 2>&1 &
     local bpid=$!
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
-        --interval 1 --duration 16 --report-dir "$rep" \
+        --interval 2 --duration 20 --report-dir "$rep" \
         > "$TEST_TMPDIR/stall_a.out" 2>&1 &
     local apid=$!
     sleep 4
-    kill -STOP "$apid"; sleep 6; kill -CONT "$apid"
+    kill -STOP "$apid"; sleep 8; kill -CONT "$apid"
     wait "$apid" "$bpid" 2>/dev/null
     local ticks; ticks=$(grep '^ts=' "$TEST_TMPDIR/stall_a.out" || true)
     [ -n "$ticks" ] || { echo "no ticker output"; cat "$TEST_TMPDIR/stall_a.out"; return 1; }
@@ -300,10 +308,12 @@ test_stalled_reporter_does_not_burst_impossible_rates() {
     local bad
     bad=$(echo "$ticks" | awk -F'rx=' '{split($2,a,"/"); if (a[1]+0 > 400) print}')
     [ -z "$bad" ] || { echo "impossible rx rate after stall:"; echo "$bad"; return 1; }
-    # And the stall must not produce a burst of same-second ticks.
-    local dupes
-    dupes=$(echo "$ticks" | awk '{print $1}' | sort | uniq -d)
-    [ -z "$dupes" ] || { echo "catch-up tick burst at: $dupes"; echo "$ticks"; return 1; }
+    # And the stall must not produce a burst of same-second ticks. The
+    # bug replayed every missed slot, so a burst is many ticks deep;
+    # three in one second is unreachable by drift at this interval.
+    local burst
+    burst=$(echo "$ticks" | awk '{c[$1]++} END {for (t in c) if (c[t] >= 3) print t, c[t]}')
+    [ -z "$burst" ] || { echo "catch-up tick burst at: $burst"; echo "$ticks"; return 1; }
 }
 
 test_summarize_tail_bytes_matches_full_parse() {
@@ -338,6 +348,44 @@ PY
     case "$warn" in *tail-bytes*) echo "full parse should not warn: $warn"; return 1 ;; esac
 }
 
+test_summarize_explains_mismatched_in_out_targets() {
+    # A host's "in" target is its matrix column, read from its own rx
+    # rows. Its "out" target is its matrix row, assembled from its
+    # *receivers'* rx rows -- so it is only as complete as the set of
+    # reports collected. When an agent is down its senders' "out"
+    # targets silently shrink (in 285/300 but out 190/200 for the same
+    # uniform matrix), which reads as an asymmetric matrix unless the
+    # summary says which host is missing.
+    local d="$TEST_TMPDIR/mismatch"
+    mkdir -p "$d"
+    python3 - "$d" <<'PY'
+import os, sys
+d = sys.argv[1]
+hosts = ["a", "b", "c", "dead"]
+ts = 1750000000
+for h in hosts:
+    if h == "dead":            # agent down: no report collected
+        continue
+    with open(os.path.join(d, "%s_agent.csv" % h), "w") as f:
+        f.write("ts,host,dir,peer,proto,target_mbps,achieved_mbps,bytes,extra\n")
+        for i in range(6):
+            for p in hosts:
+                if p != h:
+                    f.write("%d,%s,rx,%s,tcp,100.000,95.000,118750,\n"
+                            % (ts + i * 10, h, p))
+PY
+    local out
+    out=$(python3 "$AGENT" summarize "$d"/*_agent.csv --window 60 2>&1)
+    assert_contains "$out" "3 of 4 hosts reporting" "coverage stated" || return 1
+    assert_contains "$out" "never reported (dead)" "the silent host is named" || return 1
+    # The peer counts that produce each side must be visible.
+    assert_contains "$out" "in    285.0/300.0" "in is the full column" || return 1
+    assert_contains "$out" "out    190.0/200.0" "out is short by the dead host" || return 1
+    # A zero target is missing data, not a healthy 100%.
+    case "$out" in *"0.0/0.0      (100%)"*) echo "zero target shown as 100%"; return 1 ;; esac
+    assert_contains "$out" "n/a" "zero target reads n/a" || return 1
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -361,6 +409,7 @@ run_test test_udp_request_response_mode
 run_test test_rates_above_17gbps_do_not_kill_flows
 run_test test_stalled_reporter_does_not_burst_impossible_rates
 run_test test_summarize_tail_bytes_matches_full_parse
+run_test test_summarize_explains_mismatched_in_out_targets
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

@@ -987,15 +987,18 @@ def cmd_summarize(args):
     # "in" sums its own rx rows, its "out" sums every peer's rx rows for
     # flows it sent. Worst-first separates one sick host from congested
     # fabric at a glance.
-    per_host = {}   # h -> [in_target, in_achieved, out_target, out_achieved]
+    # h -> [in_target, in_achieved, out_target, out_achieved, n_in, n_out]
+    per_host = {}
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
-        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0])
+        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0, 0, 0])
         hs[0] += t
         hs[1] += ach
-        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0])
+        hs[4] += 1
+        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0, 0, 0])
         ps[2] += t
         ps[3] += ach
+        ps[5] += 1
 
     def _frac(ach, t):
         return ach / t if t else 1.0
@@ -1003,13 +1006,41 @@ def cmd_summarize(args):
     ranked = sorted(per_host.items(),
                     key=lambda kv: min(_frac(kv[1][1], kv[1][0]),
                                        _frac(kv[1][3], kv[1][2])))
-    print("per host (rx in / tx out, achieved/target Mbps, worst first):")
-    for h, (it, ia, ot, oa) in ranked[:args.top_hosts]:
-        print("  %-24s in %8.1f/%-8.1f (%3.0f%%)   out %8.1f/%-8.1f (%3.0f%%)"
-              % (h, ia, it, _frac(ia, it) * 100, oa, ot, _frac(oa, ot) * 100))
+    reporting = set(r["host"] for r in recent)
+    print("per host (rx in / tx out, achieved/target Mbps, [peers counted], "
+          "worst first; %d of %d hosts reporting):"
+          % (len(reporting), len(per_host)))
+    def _pct(ach, t):
+        # A zero target means no rows, not a healthy 100%.
+        return "n/a" if not t else "%3.0f%%" % (_frac(ach, t) * 100)
+    for h, (it, ia, ot, oa, nin, nout) in ranked[:args.top_hosts]:
+        print("  %-24s in %8.1f/%-8.1f (%4s) [%d]   out %8.1f/%-8.1f (%4s) [%d]"
+              % (h, ia, it, _pct(ia, it), nin, oa, ot, _pct(oa, ot), nout))
     if len(ranked) > args.top_hosts:
         print("  ... %d more hosts (raise --top-hosts)"
               % (len(ranked) - args.top_hosts))
+    # "in" is a host's own rx rows -- its matrix column, always complete.
+    # "out" is assembled from its *receivers'* rx rows, so it is only as
+    # complete as the set of reports collected. Unequal in/out targets
+    # are therefore either an asymmetric matrix or a coverage problem,
+    # and the two look identical unless we say which hosts are missing.
+    silent = sorted(set(per_host) - reporting)
+    if silent:
+        print("  note: %d host(s) named as senders never reported (%s%s) -- "
+              "they have no 'in' row, and every host they send to has an "
+              "'out' target short by those flows."
+              % (len(silent), ", ".join(silent[:6]),
+                 ", ..." if len(silent) > 6 else ""))
+    elif [h for h, v in per_host.items()
+          if abs(v[0] - v[2]) > 0.01 * max(v[0], v[2], 1.0)]:
+        # Every report is present, so a target mismatch is about the
+        # matrix, not coverage -- worth naming, because the two causes
+        # look identical in the table.
+        print("  note: some hosts' in and out targets differ. 'in' is the "
+              "host's matrix column; 'out' is its matrix row as seen by its "
+              "receivers. Expected for an asymmetric matrix -- otherwise "
+              "agents are running different matrix versions, or stale "
+              "*_agent.csv are being globbed from the reports directory.")
     deficits = []
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
