@@ -627,6 +627,38 @@ def cmd_run(args):
     me = resolve_self(hosts, endpoints, args.hostname)
     port = endpoints[me][1]
 
+    # Sharding: one Python process is GIL-bound at roughly 100-250k
+    # packets/sec however many sender threads it runs, so high packet
+    # rates need several processes per host. Shard i runs the WHOLE mesh
+    # at 1/shards of every cell's rate, on its own port (base + i), and
+    # talks only to shard i of each peer. That scales both directions --
+    # sharding by peer instead would funnel all of a host's inbound into
+    # one process -- and keeps every shard a plain, complete agent.
+    if not 0 <= args.shard < args.shards:
+        raise SystemExit("--shard must be in [0, --shards)")
+    if args.shards > 1:
+        # Shards occupy ports base..base+shards-1, so two matrix hosts on
+        # the same address must be at least --shards apart or their
+        # ranges overlap. That failure is baffling in the wild -- a
+        # host's shard silently answers traffic meant for its neighbour,
+        # and reports show a host receiving from itself -- so refuse.
+        by_addr = {}
+        for n, (a, p) in endpoints.items():
+            by_addr.setdefault(a, []).append((p, n))
+        for a, lst in sorted(by_addr.items()):
+            lst.sort()
+            for (p1, n1), (p2, n2) in zip(lst, lst[1:]):
+                if p2 - p1 < args.shards:
+                    raise SystemExit(
+                        "--shards %d needs %d consecutive ports per host, but "
+                        "%s (%s:%d) and %s (%s:%d) are only %d apart; space "
+                        "the matrix ports out or use fewer shards"
+                        % (args.shards, args.shards, n1, a, p1, n2, a, p2,
+                           p2 - p1))
+        port += args.shard
+        rates = {k: v / float(args.shards) for k, v in rates.items()}
+        endpoints = {n: (a, p + args.shard) for n, (a, p) in endpoints.items()}
+
     bind_ip = ""
     if args.bind:
         bind_iface, bind_ip = resolve_bind(args.bind)
@@ -668,12 +700,19 @@ def cmd_run(args):
     rx_targets = {src: mbps for (src, dst), mbps in rates.items() if dst == me}
 
     os.makedirs(args.report_dir, exist_ok=True)
-    report_path = os.path.join(args.report_dir, "%s_agent.csv" % me)
+    # Each shard writes its own file so they cannot clobber each other,
+    # but the `host` column stays the real host name -- summarize keys on
+    # that column, not the filename, and sums same-timestamp rows across
+    # shards back into one host.
+    suffix = "" if args.shards == 1 else ".s%d" % args.shard
+    report_path = os.path.join(args.report_dir, "%s%s_agent.csv" % (me, suffix))
     rep = Reporter(me, report_path, args.interval, flows, book,
                    rx_targets, args.protocol, args.respond_bytes)
 
-    print("matrix_agent: host=%s port=%d proto=%s tx_flows=%d expected_rx_peers=%d report=%s"
-          % (me, port, args.protocol, len(flows), len(rx_targets), report_path))
+    print("matrix_agent: host=%s shard=%d/%d port=%d proto=%s tx_flows=%d "
+          "expected_rx_peers=%d report=%s"
+          % (me, args.shard, args.shards, port, args.protocol, len(flows),
+             len(rx_targets), report_path))
     sys.stdout.flush()
 
     deadline = time.monotonic() + args.duration if args.duration > 0 else None
@@ -687,6 +726,12 @@ def cmd_run(args):
             except SystemExit as exc:
                 print("reload failed: %s" % exc, file=sys.stderr)
             else:
+                # Reloaded cells are whole-host rates; this process only
+                # carries its 1/shards slice, so divide again or a reload
+                # would silently multiply the fleet's load by --shards.
+                if args.shards > 1:
+                    new_rates = {k: v / float(args.shards)
+                                 for k, v in new_rates.items()}
                 by_dst = {fl.dst: fl for fl in flows}
                 for (src, dst), mbps in new_rates.items():
                     if src == me and dst in by_dst:
@@ -884,12 +929,39 @@ def _read_report(path, tail_bytes):
     return list(csv.DictReader(text, fieldnames=names)), truncated
 
 
+_SUM_KEYS = ("pps", "rpps", "resp_mbps")        # rates: shards add up
+_AVG_KEYS = ("loss_pct", "resp_pct", "rtt_ms")   # ratios/latency: they don't
+
+
+def _combine_shards(per_src):
+    """Collapse {(host, peer, src): [sum, ..., n]} to {(host, peer): ...}.
+
+    Several agent processes on a host each carry a slice of every cell
+    and each write their own report. They tick on independent clocks, so
+    their rows almost never share a timestamp and cannot be matched up
+    pair-by-pair. What is well defined is each process's *mean over the
+    window*; those means are concurrent slices of one flow, so they sum.
+
+    Time-averaging first and summing second is the only order that is
+    right for both axes: repeated samples average, parallel shards add.
+    With one report per host this is exactly the old behaviour.
+    """
+    out = {}
+    for (host, peer, _src), v in per_src.items():
+        o = out.setdefault((host, peer), [0.0, 0.0, 1])
+        o[0] += v[0] / v[2]
+        o[1] += v[1] / v[2]
+    return out
+
+
 def cmd_summarize(args):
     rows = []
     truncated = []
     tail_bytes = getattr(args, "tail_bytes", 0)
     for path in args.reports:
         got, cut = _read_report(path, tail_bytes)
+        for r in got:
+            r["_src"] = path
         rows.extend(got)
         if cut and got:
             truncated.append(min(int(r["ts"]) for r in got))
@@ -918,11 +990,14 @@ def cmd_summarize(args):
         return d
 
     recent = [r for r in rows if int(r["ts"]) >= cutoff and r["dir"] == "rx"]
-    agg = {}     # (host, peer) -> [sum_target, sum_achieved, n]
+    # Keyed by report file as well as by pair: one file is one agent
+    # process, and shards must be time-averaged separately before their
+    # means are added together (see _combine_shards).
+    agg = {}     # (host, peer, src) -> [sum_target, sum_achieved, n]
     protos = {}  # (src, dst) -> proto
-    rx_pps = {}  # (host, peer) -> [sum_pps, n]
+    rx_pps = {}  # (host, peer, src) -> [sum_pps, n]
     for r in recent:
-        key = (r["host"], r["peer"])
+        key = (r["host"], r["peer"], r.get("_src", ""))
         a = agg.setdefault(key, [0.0, 0.0, 0])
         a[0] += float(r["target_mbps"])
         a[1] += float(r["achieved_mbps"])
@@ -933,6 +1008,12 @@ def cmd_summarize(args):
             p = rx_pps.setdefault(key, [0.0, 0])
             p[0] += kv["pps"]
             p[1] += 1
+    agg = _combine_shards(agg)
+    # Same treatment for packet rates: mean per process, then summed.
+    _pp = {}
+    for (h, pr, _src), v in rx_pps.items():
+        _pp[(h, pr)] = [_pp.get((h, pr), [0.0, 1])[0] + v[0] / v[1], 1]
+    rx_pps = _pp
     # Sender-side transactional stats (request/response mode) live on tx
     # rows: offered pps, fraction answered, sampled RTT.
     txagg = {}   # (src, dst) -> {"pps": [s,n], "resp_pct": [s,n], "rtt_ms": [s,n]}
@@ -942,12 +1023,27 @@ def cmd_summarize(args):
         kv = _kv(r.get("extra"))
         if not kv:
             continue
-        slot = txagg.setdefault((r["host"], r["peer"]), {})
+        slot = txagg.setdefault((r["host"], r["peer"], r.get("_src", "")), {})
         for k in ("pps", "rpps", "resp_pct", "resp_mbps", "rtt_ms"):
             if k in kv:
                 s = slot.setdefault(k, [0.0, 0])
                 s[0] += kv[k]
                 s[1] += 1
+
+    # Collapse shards: each process's mean over the window, then summed
+    # for rates and averaged for ratios and latencies.
+    _tx = {}
+    for (h, pr, _src), slot in txagg.items():
+        tgt = _tx.setdefault((h, pr), {})
+        for k, v in slot.items():
+            mean = v[0] / v[1]
+            if k in _AVG_KEYS:
+                cur = tgt.get(k, [0.0, 0])
+                tgt[k] = [cur[0] + mean, cur[1] + 1]
+            else:
+                cur = tgt.get(k, [0.0, 1])
+                tgt[k] = [cur[0] + mean, 1]
+    txagg = _tx
 
     def _txmean(src, dst, key):
         s = txagg.get((src, dst), {}).get(key)
@@ -1110,6 +1206,13 @@ def main(argv=None):
     r.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
     r.add_argument("--interval", type=float, default=10.0, help="report interval seconds")
     r.add_argument("--report-dir", default="reports")
+    r.add_argument("--shards", type=int, default=1, metavar="N",
+                   help="run as one of N processes on this host, to get "
+                        "past the GIL ceiling (~100-250k pkt/s per "
+                        "process). Each shard carries 1/N of every cell "
+                        "on port base+shard")
+    r.add_argument("--shard", type=int, default=0, metavar="I",
+                   help="which shard this process is, 0-based")
     r.add_argument("--duration", type=float, default=0.0,
                    help="exit after N seconds (0 = run until signalled)")
     r.add_argument("--no-send", action="store_true", help="receiver only")

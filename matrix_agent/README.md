@@ -241,6 +241,41 @@ Use `--protocol udp` for a hard offered-load ramp (loss shows directly
 as `loss_pct`); TCP mode shares politely under overload, so the knee
 shows up as widening deficit rather than loss.
 
+## Scaling packet rate past one process (`--shards`)
+
+A single agent is one Python process, and the GIL serialises its sends:
+measured, one sender thread reaches ~90k packets/sec and three reach
+~165k — sublinear, and it does not get much better with more threads.
+So high packet rates need more *processes*, not more threads.
+
+`--shards N` runs N agents per host. Shard *i* carries **1/N of every
+cell** on port `base+i` and talks only to shard *i* of each peer, so the
+whole mesh is replicated N times at 1/N the rate and both directions
+scale. Measured on loopback, 2 shards took a pair from ~91k to ~241k
+packets/sec.
+
+```bash
+./fleet.sh --matrix matrix.csv --shards 4 up      # 4 agents per host
+./fleet.sh --matrix matrix.csv --shards 4 status  # "shards 4/4" per host
+./fleet.sh --matrix matrix.csv --shards 4 summarize
+```
+
+Every command covers all shards: `status` reports how many are alive,
+`stop` and `reload` signal all of them, `heal` treats a host as needing
+repair unless *every* shard is up, and `collect` pulls each shard's
+report. Pass the same `--shards` to every command — it is how fleet.sh
+knows how many processes to expect.
+
+`summarize` sums shards back into one number per host. It averages each
+process over the window first and adds the means, because shards tick on
+independent clocks and their rows never line up by timestamp — repeated
+samples average, parallel shards add.
+
+**Ports:** shards occupy `base .. base+N-1`, so two hosts sharing an
+address need at least N between their matrix ports. The agent refuses to
+start rather than let one host's shard answer its neighbour's traffic.
+Distinct hosts on distinct addresses are unaffected.
+
 ## Packet and buffer tuning
 
 The rate matrix says *how much*; these knobs say *what the traffic looks

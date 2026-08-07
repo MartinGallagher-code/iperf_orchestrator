@@ -31,6 +31,14 @@
 #   --matrix FILE      traffic matrix               [MXA_MATRIX, matrix.csv]
 #   --jobs N           SSH fan-out concurrency      [MXA_JOBS, 64]
 #   --retries N        retries per host, backed off [MXA_RETRIES, 2]
+#   --shards N         agent processes per host      [MXA_SHARDS, 1]
+#                      One Python process is GIL-bound at roughly
+#                      100-250k packets/sec however many threads it
+#                      runs. N shards run the whole mesh N times over,
+#                      each carrying 1/N of every cell on port base+i,
+#                      so packet rate scales with processes. Every
+#                      command covers all shards; summarize sums them
+#                      back into one number per host.
 #   --connect-timeout SECONDS
 #                      ssh connect timeout. Raise both of these when
 #                      re-running against a fleet already under load:
@@ -88,6 +96,7 @@ SEND=30
 REPLY=0
 CONNECT_TIMEOUT="${MXA_CONNECT_TIMEOUT:-20}"
 RETRIES="${MXA_RETRIES:-2}"
+SHARDS="${MXA_SHARDS:-1}"
 SSH_OPTS=()   # built after option parsing, from CONNECT_TIMEOUT
 
 log()  { echo "[fleet] $*"; }
@@ -112,6 +121,7 @@ while [ $# -gt 0 ]; do
         --tail-bytes) TAIL_BYTES="$2"; shift 2 ;;
         --connect-timeout) CONNECT_TIMEOUT="$2"; shift 2 ;;
         --retries)    RETRIES="$2"; shift 2 ;;
+        --shards)     SHARDS="$2"; shift 2 ;;
         --grid)       GRID="$2"; shift 2 ;;
         --hosts)      HOSTS_FILE="$2"; shift 2 ;;
         --pps)        PPS="$2"; shift 2 ;;
@@ -244,33 +254,47 @@ _h_start() { local name="$1" addr="$2"
         printf -v extra ' %q' "${AGENT_FLAGS[@]}"
         flags="$flags$extra"
     fi
+    # One process per shard, each with its own pidfile and log, so a
+    # partially-started host is repairable and `stop` misses nothing.
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "cd '$REMOTE_DIR' && if kill -0 \$(cat agent.pid 2>/dev/null) 2>/dev/null; then \
-             echo 'already running'; \
-         else \
+        "cd '$REMOTE_DIR' || exit 1; n=0; \
+         for i in \$(seq 0 $(( SHARDS - 1 ))); do \
+             if kill -0 \$(cat agent.s\$i.pid 2>/dev/null) 2>/dev/null; then continue; fi; \
              nohup $REMOTE_PY matrix_agent.py run --matrix '$(basename "$MATRIX")' \
-                 --hostname '$name' --report-dir rep$flags \
-                 > agent.out 2>&1 & echo \$! > agent.pid; disown; echo started; \
-         fi"
+                 --hostname '$name' --report-dir rep --shards $SHARDS --shard \$i$flags \
+                 > agent.s\$i.out 2>&1 & echo \$! > agent.s\$i.pid; disown; n=\$((n+1)); \
+         done; \
+         if [ \$n -eq 0 ]; then echo 'already running'; else echo \"started \$n/$SHARDS\"; fi"
 }
 
 _h_status() { local name="$1" addr="$2"
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "if cd '$REMOTE_DIR' 2>/dev/null \
-             && kill -0 \$(cat agent.pid 2>/dev/null) 2>/dev/null; then \
-             tail -n1 agent.out 2>/dev/null || echo running; \
-         else echo NOT-RUNNING; fi"
+        "cd '$REMOTE_DIR' 2>/dev/null || { echo NOT-RUNNING; exit 0; }; \
+         a=0; for i in \$(seq 0 $(( SHARDS - 1 ))); do \
+             kill -0 \$(cat agent.s\$i.pid 2>/dev/null) 2>/dev/null && a=\$((a+1)); \
+         done; \
+         if [ \$a -eq 0 ]; then echo NOT-RUNNING; \
+         else \
+             [ $SHARDS -gt 1 ] && printf '%s ' \"shards \$a/$SHARDS\"; \
+             tail -n1 agent.s0.out 2>/dev/null || echo running; \
+         fi"
 }
 
 _h_reload() { local name="$1" addr="$2"
     scp "${SSH_OPTS[@]}" -q "$MATRIX" "$(_target "$addr"):$REMOTE_DIR/" \
         && ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-            "cd '$REMOTE_DIR' && kill -HUP \$(cat agent.pid 2>/dev/null) 2>/dev/null \
-                 && echo reloaded || { echo not-running >&2; exit 1; }"
+            "cd '$REMOTE_DIR' || exit 1; n=0; \
+             for f in agent.pid agent.s*.pid; do \
+                 [ -f \"\$f\" ] || continue; \
+                 kill -HUP \$(cat \"\$f\" 2>/dev/null) 2>/dev/null && n=\$((n+1)); \
+             done; \
+             if [ \$n -eq 0 ]; then echo not-running >&2; exit 1; fi; echo \"reloaded \$n\""
 }
 
+# The glob covers both layouts: <host>_agent.csv unsharded, and
+# <host>.s<i>_agent.csv per shard.
 _h_collect() { local name="$1" addr="$2"
-    scp "${SSH_OPTS[@]}" -q "$(_target "$addr"):$REMOTE_DIR/rep/${name}_agent.csv" "$REPORTS/"
+    scp "${SSH_OPTS[@]}" -q "$(_target "$addr"):$REMOTE_DIR/rep/${name}*_agent.csv" "$REPORTS/"
 }
 
 # summarize's collect: the header plus the last $TAIL_BYTES, so the cost
@@ -286,25 +310,34 @@ _h_collect() { local name="$1" addr="$2"
 # strict superset of what summarize parses; that is what lets summarize
 # tell "the tail didn't reach back far enough" from "the run is young"
 # and warn instead of quietly reporting a short window.
-_h_collect_tail() { local name="$1" addr="$2" f
-    # Separate statement: `local` expands all its arguments before it
-    # assigns any of them, so ${name} would be unset on the same line.
-    f="$REMOTE_DIR/rep/${name}_agent.csv"
-    if ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-           "f='$f'; [ -r \"\$f\" ] || exit 1; head -n1 \"\$f\"; \
-            tail -c $(( TAIL_BYTES + 65536 )) \"\$f\" | tail -n +2" > "$WORK_DIR/.$name.part"; then
-        mv "$WORK_DIR/.$name.part" "$WORK_DIR/${name}_agent.csv"
-    else
-        rm -f "$WORK_DIR/.$name.part"
-        return 1
-    fi
+_h_collect_tail() { local name="$1" addr="$2" i base ok=0
+    # One fetch per shard report. `local` expands all its arguments
+    # before assigning any, so ${name} is used only in the body.
+    for i in $(seq 0 $(( SHARDS - 1 ))); do
+        if [ "$SHARDS" -gt 1 ]; then base="${name}.s${i}_agent.csv"
+        else base="${name}_agent.csv"; fi
+        if ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
+               "f='$REMOTE_DIR/rep/$base'; [ -r \"\$f\" ] || exit 1; head -n1 \"\$f\"; \
+                tail -c $(( TAIL_BYTES + 65536 )) \"\$f\" | tail -n +2" \
+               > "$WORK_DIR/.$base.part"; then
+            mv "$WORK_DIR/.$base.part" "$WORK_DIR/$base"
+            ok=1
+        else
+            rm -f "$WORK_DIR/.$base.part"
+        fi
+    done
+    [ "$ok" -eq 1 ]
 }
 
 _h_stop() { local name="$1" addr="$2"
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "cd '$REMOTE_DIR' 2>/dev/null \
-             && kill -TERM \$(cat agent.pid 2>/dev/null) 2>/dev/null \
-             && { rm -f agent.pid; echo stopped; } || echo was-not-running"
+        "cd '$REMOTE_DIR' 2>/dev/null || { echo was-not-running; exit 0; }; \
+         n=0; for f in agent.pid agent.s*.pid; do \
+             [ -f \"\$f\" ] || continue; \
+             kill -TERM \$(cat \"\$f\" 2>/dev/null) 2>/dev/null && n=\$((n+1)); \
+             rm -f \"\$f\"; \
+         done; \
+         if [ \$n -eq 0 ]; then echo was-not-running; else echo \"stopped \$n\"; fi"
 }
 
 _h_prep() { local name="$1" addr="$2"
@@ -405,8 +438,13 @@ _select_not_running() {
 
 PROBE_DIR=""
 _h_probe() { local name="$1" addr="$2"
+    # Healthy means EVERY shard is alive: a host with some shards dead is
+    # carrying less than its share of the matrix and needs repairing.
     ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
-        "kill -0 \$(cat '$REMOTE_DIR/agent.pid' 2>/dev/null) 2>/dev/null" \
+        "cd '$REMOTE_DIR' 2>/dev/null || exit 1; \
+         for i in \$(seq 0 $(( SHARDS - 1 ))); do \
+             kill -0 \$(cat agent.s\$i.pid 2>/dev/null) 2>/dev/null || exit 1; \
+         done" \
         && touch "$PROBE_DIR/$name"
     return 0
 }

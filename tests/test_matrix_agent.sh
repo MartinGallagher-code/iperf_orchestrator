@@ -429,6 +429,72 @@ PY
     case "$out" in *"pkt/s"*) echo "packet columns shown for TCP"; return 1 ;; esac
 }
 
+test_shards_split_the_matrix_across_processes() {
+    # One Python process is GIL-bound at ~100-250k pkt/s however many
+    # threads it runs, so high packet rates need several processes per
+    # host. Shard i carries 1/N of every cell on port base+i and talks
+    # only to shard i of each peer -- so both directions scale, and each
+    # shard stays a plain complete agent.
+    cat > "$TEST_TMPDIR/sh.txt" <<EOF
+sa=127.0.0.1:$(( PORT_A + 100 ))
+sb=127.0.0.1:$(( PORT_A + 200 ))
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/sh.txt" --rate-mbps 40 \
+        -o "$TEST_TMPDIR/shm.csv" >/dev/null
+    local rep="$TEST_TMPDIR/shrep" i
+    for i in 0 1; do
+        python3 "$AGENT" run --matrix "$TEST_TMPDIR/shm.csv" --hostname sb \
+            --shards 2 --shard $i --interval 1 --duration 6 --report-dir "$rep" \
+            > "$TEST_TMPDIR/sb$i.out" 2>&1 &
+    done
+    sleep 0.3
+    for i in 0 1; do
+        python3 "$AGENT" run --matrix "$TEST_TMPDIR/shm.csv" --hostname sa \
+            --shards 2 --shard $i --interval 1 --duration 6 --report-dir "$rep" \
+            > "$TEST_TMPDIR/sa$i.out" 2>&1 &
+    done
+    wait 2>/dev/null
+    # Each shard gets its own report and its own port, and halves the rate.
+    [ -f "$rep/sa.s0_agent.csv" ] && [ -f "$rep/sa.s1_agent.csv" ] \
+        || { echo "shards did not write separate reports"; ls "$rep"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/sa0.out")" "shard=0/2" "shard identity logged" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/sa0.out")" "port=$(( PORT_A + 100 ))" "shard 0 on the base port" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/sa1.out")" "port=$(( PORT_A + 101 ))" "shard 1 on base+1" || return 1
+    assert_contains "$(cat "$rep/sa.s0_agent.csv")" "20.000" "each shard carries half of 40" || return 1
+    # Both shards must see exactly one peer -- if the port arithmetic were
+    # wrong a shard would talk to itself, which shows up as a host
+    # receiving from its own name.
+    local selfrx
+    selfrx=$(awk -F, '$3=="rx" && $2==$4' "$rep"/*_agent.csv | wc -l)
+    assert_eq "0" "$selfrx" "no shard may receive from its own host" || return 1
+    # summarize must SUM the shards back into one host, not average them:
+    # two halves of 40 Mbps is a 40 Mbps target, not 20.
+    local out; out=$(python3 "$AGENT" summarize "$rep"/*_agent.csv --window 10 2>&1)
+    assert_contains "$out" "2 flows" "shards collapse to one flow per pair" || return 1
+    local tgt
+    tgt=$(echo "$out" | sed -n 's#^aggregate rx: [0-9.]* / \([0-9.]*\) Mbps.*#\1#p')
+    awk -v t="$tgt" 'BEGIN { exit !(t > 79 && t < 81) }' \
+        || { echo "target should sum to 80 across 2 hosts x 2 shards, got $tgt"; echo "$out"; return 1; }
+}
+
+test_shards_reject_overlapping_port_ranges() {
+    # Shards occupy base..base+N-1. Two hosts on one address closer than
+    # that would have a shard silently answer its neighbour's traffic --
+    # refuse rather than produce baffling reports.
+    cat > "$TEST_TMPDIR/tight.txt" <<EOF
+t1=127.0.0.1:$(( PORT_A + 300 ))
+t2=127.0.0.1:$(( PORT_A + 301 ))
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/tight.txt" --rate-mbps 5 \
+        -o "$TEST_TMPDIR/tight.csv" >/dev/null
+    local out rc
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/tight.csv" --hostname t1 \
+        --shards 4 --shard 0 --duration 1 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || { echo "overlapping shard ports should fail"; return 1; }
+    assert_contains "$out" "consecutive ports" "explains the requirement" || return 1
+    assert_contains "$out" "only 1 apart" "names the actual gap" || return 1
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -454,6 +520,8 @@ run_test test_stalled_reporter_does_not_burst_impossible_rates
 run_test test_summarize_tail_bytes_matches_full_parse
 run_test test_summarize_explains_mismatched_in_out_targets
 run_test test_summarize_reports_per_host_packet_rates
+run_test test_shards_split_the_matrix_across_processes
+run_test test_shards_reject_overlapping_port_ranges
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

@@ -293,8 +293,8 @@ EOF
     assert_contains "$(cat "$TEST_TMPDIR/out")" "started" \
         "at least one agent must actually launch" || return 1
     local i
-    for i in $(seq 1 50); do [ -s "$remote/agent.out" ] && break; sleep 0.2; done
-    [ -s "$remote/agent.out" ] || { echo "agent.out missing/empty: agent never ran"; return 1; }
+    for i in $(seq 1 50); do [ -s "$remote/agent.s0.out" ] && break; sleep 0.2; done
+    [ -s "$remote/agent.s0.out" ] || { echo "agent.s0.out missing/empty: agent never ran"; return 1; }
     # And stop must terminate it (a signal that self-matches would not).
     PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \
         --remote-dir "$remote" --jobs 1 stop >"$TEST_TMPDIR/out" 2>&1 || true
@@ -350,7 +350,7 @@ for a in "$@"; do
         case "$a" in -*) ;; *:*) [ -z "$dst" ] && srcs+=("${a#*:}") || dst="${a#*:}" ;; *) dst="$a" ;; esac ;;
     esac
 done
-cp "${srcs[@]}" "$dst"
+for s in "${srcs[@]}"; do cp $s "$dst"; done
 EOF
     chmod +x "$FAKE_BIN/ssh" "$FAKE_BIN/scp"
     PATH="$FAKE_BIN:$PATH" "$FLEET" --matrix "$TEST_TMPDIR/matrix.csv" \

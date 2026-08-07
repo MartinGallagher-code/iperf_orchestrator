@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-07
+
+### Added
+- **`--shards N`: several agent processes per host, to scale packet
+  rate past the GIL.** One agent is one Python process, and the GIL
+  serialises its sends: measured, one sender thread reaches ~90k
+  packets/sec and three reach ~165k, so more threads stop helping well
+  short of a million. Shard *i* now carries 1/N of every cell on port
+  `base+i` and talks only to shard *i* of each peer, replicating the
+  whole mesh N times at 1/N the rate so both directions scale. Two
+  shards took a loopback pair from ~91k to ~241k packets/sec.
+
+  Every `fleet.sh` command covers all shards: per-shard pidfiles and
+  logs, `status` reports how many are alive, `stop`/`reload` signal all
+  of them, `heal` treats a host as needing repair unless *every* shard
+  is up, and `collect` pulls each shard's report.
+
+  `summarize` sums shards back into one number per host. Each process is
+  averaged over the window first and the means are added -- shards tick
+  on independent clocks and their rows never line up by timestamp, so
+  matching them up per-tick is not possible; time-averaging first and
+  summing second is the only order that treats repeated samples and
+  parallel shards correctly. Rates add; loss percentages and round-trip
+  times are averaged. With one report per host the result is unchanged.
+
+  Shards occupy ports `base .. base+N-1`, so two matrix hosts sharing an
+  address need at least N between their ports. The agent refuses to
+  start otherwise, rather than let one host's shard silently answer its
+  neighbour's traffic -- a failure that shows up as a host receiving
+  from itself.
+
 ## [1.4.2] - 2026-08-07
 
 ### Fixed
@@ -332,6 +363,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.5.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.0
 [1.4.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.2
 [1.4.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.1
 [1.4.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.0
