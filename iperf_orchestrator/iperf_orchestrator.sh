@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="1.3.0"
+ORCH_VERSION="1.3.1"
 
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
@@ -1962,6 +1962,7 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
         rows.append({
             "timestamp": ts, "source": src, "target": dst, "status": "OK",
             "protocol": "TCP",
+            "test_start": header.get("test_start", ""),
             "duration_s": header.get("duration", ""),
             "parallel_streams": header.get("parallel", ""),
             "bind_iface": header.get("bind_iface", ""),
@@ -1991,10 +1992,15 @@ if not rows:
     print("No log files found", file=sys.stderr)
     sys.exit(1)
 
+# test_start is appended last so no existing column position shifts. It
+# is the epoch the generated run script stamped just before invoking
+# iperf, which is what make-pivot/make-heatmap use to tell concurrent
+# flows apart from repeated probes -- see the aggregation note there.
 cols = ["timestamp","source","target","status","protocol","duration_s",
         "parallel_streams","bind_iface","bind_ip",
         "bytes_transferred","bps","mbps",
-        "src_port","dst_port","pair_a","pair_b","filename","error"]
+        "src_port","dst_port","pair_a","pair_b","filename","error",
+        "test_start"]
 
 with open(out_csv, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=cols)
@@ -2413,10 +2419,45 @@ def _ts(s):
 # attempt (including rows with no measured throughput, i.e. failed
 # iperf invocations) so blank cells can be annotated -- "-(5)" means
 # 5 tries, all failed.
-acc = defaultdict(lambda: defaultdict(list))
-mbps_seconds = defaultdict(lambda: defaultdict(float))  # sum(mbps * duration)
-ts_list = []
-max_dur = 0.0
+# ---- cell aggregation ------------------------------------------------
+# Rows for one cell are either CONCURRENT (parallel / sequential modes
+# fire every flow of a round at once, so their rates genuinely add) or
+# REPEATED SAMPLES (rolling probes the same pair over and over across the
+# run). Summing repeated samples is physically meaningless -- it reports
+# more than the NIC can carry. Decide from the data, not the mode name:
+# cluster rows whose test windows overlap, sum within a cluster, and
+# average across clusters.
+def _row_start(row):
+    # Prefer test_start: an epoch the generated run script stamps itself,
+    # so it survives whatever iperf2 does to its own CSV timestamp.
+    raw = (row.get("test_start") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _ts(row.get("timestamp", ""))
+
+def _cell_value(samples):
+    timed = [x for x in samples if x[0] is not None and x[1] > 0]
+    if not timed:
+        # No usable start times: never sum. Summing un-timed rows is
+        # what produced above-line-rate cells; the mean is the safe read.
+        return sum(x[2] for x in samples) / float(len(samples))
+    timed.sort(key=lambda x: x[0])
+    clusters, cur, cur_end = [], [], None
+    for start, dur, mbps in timed:
+        if cur and cur_end is not None and start >= cur_end:
+            clusters.append(cur)
+            cur, cur_end = [], None
+        cur.append(mbps)
+        end = start + dur
+        cur_end = end if cur_end is None else max(cur_end, end)
+    if cur:
+        clusters.append(cur)
+    return sum(sum(c) for c in clusters) / float(len(clusters))
+
+acc = defaultdict(lambda: defaultdict(list))   # (start_epoch|None, duration, mbps)
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
@@ -2428,38 +2469,18 @@ with open(in_csv) as f:
         except ValueError:
             f_v = None
         if f_v is not None:
-            acc[s][t].append(f_v)
             try:
                 d = float(row.get("duration_s") or "0")
             except ValueError:
                 d = 0.0
-            if d > 0:
-                mbps_seconds[s][t] += f_v * d
-                if d > max_dur:
-                    max_dur = d
-            tv = _ts(row.get("timestamp", ""))
-            if tv is not None:
-                ts_list.append(tv)
-
-# Run wall-time = span of all timestamps + the longest single-test
-# duration. For parallel / sequential-host modes (rows roughly synced)
-# the span is small and wall_time ≈ max_dur. For rolling, the span
-# covers the whole probe loop so wall_time ≈ --total-time.
-if ts_list:
-    span = max(ts_list) - min(ts_list)
-    wall_time = span + max_dur if span >= 0 else max_dur
-else:
-    wall_time = max_dur
-if wall_time <= 0:
-    wall_time = 1.0  # fallback; avoids division-by-zero
+            acc[s][t].append((_row_start(row), d, f_v))
 
 for s in acc:
     for t in acc[s]:
         vs = acc[s][t]
         if vs:
             samples_per[s][t] = len(vs)
-            ms = mbps_seconds[s].get(t, 0.0)
-            mat[s][t] = ms / wall_time if ms > 0 else sum(vs) / len(vs)
+            mat[s][t] = _cell_value(vs)
         else:
             mat[s][t] = None
 
@@ -2633,10 +2654,7 @@ except ImportError as e:
 
 mat = defaultdict(dict)
 sources, targets = set(), set()
-acc = defaultdict(lambda: defaultdict(list))
-mbps_seconds = defaultdict(lambda: defaultdict(float))
-ts_list = []
-max_dur = 0.0
+acc = defaultdict(lambda: defaultdict(list))   # (start_epoch|None, duration, mbps)
 
 def _ts(s):
     # iperf2 -y C emits "YYYYMMDDHHMMSS" with an optional ".fff"
@@ -2657,6 +2675,35 @@ def _ts(s):
     except Exception:
         return None
 
+# Same aggregation rule as make-pivot: cluster a cell's rows by
+# overlapping test windows, sum within a cluster (those flows really did
+# run at once), average across clusters (those are repeated probes).
+def _row_start(row):
+    raw = (row.get("test_start") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _ts(row.get("timestamp", ""))
+
+def _cell_value(samples):
+    timed = [x for x in samples if x[0] is not None and x[1] > 0]
+    if not timed:
+        return sum(x[2] for x in samples) / float(len(samples))
+    timed.sort(key=lambda x: x[0])
+    clusters, cur, cur_end = [], [], None
+    for start, dur, mbps in timed:
+        if cur and cur_end is not None and start >= cur_end:
+            clusters.append(cur)
+            cur, cur_end = [], None
+        cur.append(mbps)
+        end = start + dur
+        cur_end = end if cur_end is None else max(cur_end, end)
+    if cur:
+        clusters.append(cur)
+    return sum(sum(c) for c in clusters) / float(len(clusters))
+
 with open(in_csv) as f:
     for row in csv.DictReader(f):
         s, t = row["source"], row["target"]
@@ -2667,26 +2714,11 @@ with open(in_csv) as f:
         except ValueError:
             f_v = None
         if f_v is not None:
-            acc[s][t].append(f_v)
             try:
                 d = float(row.get("duration_s") or "0")
             except ValueError:
                 d = 0.0
-            if d > 0:
-                mbps_seconds[s][t] += f_v * d
-                if d > max_dur:
-                    max_dur = d
-            tv = _ts(row.get("timestamp", ""))
-            if tv is not None:
-                ts_list.append(tv)
-
-if ts_list:
-    span = max(ts_list) - min(ts_list)
-    wall_time = span + max_dur if span >= 0 else max_dur
-else:
-    wall_time = max_dur
-if wall_time <= 0:
-    wall_time = 1.0
+            acc[s][t].append((_row_start(row), d, f_v))
 
 for s in acc:
     for t in acc[s]:
@@ -2694,9 +2726,8 @@ for s in acc:
         if not vs:
             mat[s][t] = None
             continue
-        ms = mbps_seconds[s].get(t, 0.0)
-        # Time-averaged directional Mbps; concurrent flows sum naturally.
-        mat[s][t] = ms / wall_time if ms > 0 else sum(vs) / len(vs)
+        # Concurrent flows sum; repeated probes of the same pair average.
+        mat[s][t] = _cell_value(vs)
 
 hosts = sorted(sources | targets)
 n = len(hosts)

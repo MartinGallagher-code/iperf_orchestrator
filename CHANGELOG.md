@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-08-07
+
+### Fixed
+- **Pivot and heatmap cells could exceed line rate**, reporting bandwidth
+  that never existed. Each cell was `sum(mbps × duration) / run_wall_time`,
+  where the wall clock came from parsing iperf2's own CSV timestamps. When
+  those timestamps were absent or unparseable the divisor collapsed to a
+  single test's duration, so every repeated probe of a pair was added as
+  if it had run concurrently — a rolling run of four ~40 Gbps probes
+  reported ~161 Gbps on a 200 Gbps NIC.
+
+  Cells are now aggregated from the timing evidence itself: a cell's rows
+  are clustered by *overlapping test windows*, summed within a cluster
+  (those flows genuinely ran at once, e.g. `--host-flows`), and averaged
+  across clusters (those are repeated probes). With no usable start times
+  the fallback is the mean — summing is never the fallback. This also
+  fixes rolling and sequential modes under-reporting when the divisor was
+  the whole run instead of the measurement window.
+- `parse-csv` now emits `test_start`, the epoch the generated run script
+  stamps immediately before invoking iperf. Overlap is decided from our
+  own clock, so the analysis no longer depends on iperf2's CSV timestamp
+  format. Appended last, so no existing column position shifts.
+
 ## [1.3.0] - 2026-08-05
 
 ### Added
@@ -179,6 +202,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.3.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.1
 [1.3.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.1.2

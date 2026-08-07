@@ -128,9 +128,9 @@ test_make_pivot_includes_per_host_incoming_bandwidth() {
 
 test_make_pivot_sums_concurrent_flows() {
     # Three rows with the SAME timestamp = three concurrent flows in
-    # the same direction (e.g. --host-flows 3). Each flow runs for 5s.
-    # Cell = sum(mbps * duration) / wall_time = 30000 / 5 = 6000 Mbps
-    # (the directional total, not the per-flow mean of 2000).
+    # the same direction (e.g. --host-flows 3). Each runs 5s, so their
+    # windows overlap: one cluster, summed. Cell = 1000+2000+3000 =
+    # 6000 Mbps (the directional total, not the per-flow mean of 2000).
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
@@ -146,9 +146,9 @@ EOF
 
 test_make_pivot_averages_sequential_flows() {
     # Three rows with timestamps 5s apart = three back-to-back flows
-    # (e.g. --host-flows 1). Wall-time spans 10 + 5 = 15s. Cell =
-    # sum(1000+2000+3000)*5 / 15 = 30000 / 15 = 2000 Mbps (the
-    # time-averaged per-flow rate).
+    # (e.g. --host-flows 1). No two windows overlap, so each is its own
+    # cluster and they average: (1000+2000+3000)/3 = 2000 Mbps. Summing
+    # them would claim bandwidth that never existed simultaneously.
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
     cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
 timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
@@ -159,6 +159,50 @@ EOF
     run_orch make-pivot >/dev/null 2>&1
     local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
     grep -q "2000.00" "$pivot" || { echo "expected mean 2000.00 (sequential flows)"; cat "$pivot" >&2; return 1; }
+}
+
+test_make_pivot_never_sums_untimed_rows() {
+    # Field failure: a rolling run whose rows carried no usable start
+    # time collapsed to "all flows concurrent" and summed four separate
+    # ~40 Gbps probes into a 161 Gbps cell -- over the NIC's line rate,
+    # i.e. physically impossible. With no timing evidence the only safe
+    # reading is the mean; summing must never be the fallback.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
+,a,b,OK,TCP,10,1,0,0,35949.0,5001,40000,a,b,r1,
+,a,b,OK,TCP,10,1,0,0,45235.0,5001,40000,a,b,r2,
+,a,b,OK,TCP,10,1,0,0,39000.0,5001,40000,a,b,r3,
+,a,b,OK,TCP,10,1,0,0,41000.0,5001,40000,a,b,r4,
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    local pivot="$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt"
+    grep -q "40296.00" "$pivot" || { echo "expected mean 40296.00"; cat "$pivot" >&2; return 1; }
+    ! grep -q "161184" "$pivot" || { echo "summed sequential probes (impossible cell)"; cat "$pivot" >&2; return 1; }
+}
+
+test_make_pivot_uses_test_start_for_overlap() {
+    # test_start is stamped by the generated run script, so overlap is
+    # decided from our own clock rather than iperf2's CSV timestamp.
+    # Same start = concurrent = summed; staggered = probes = averaged.
+    mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,mbps,pair_a,pair_b,filename,error,test_start
+,a,b,OK,TCP,10,35949.0,a,b,r1,,1000
+,a,b,OK,TCP,10,45235.0,a,b,r2,,1000
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    grep -q "81184.00" "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" \
+        || { echo "same test_start should sum to 81184.00"; return 1; }
+
+    cat > "$RESULTS_BASE/$IPERF_RUN_ID/iperf_results.csv" <<EOF
+timestamp,source,target,status,protocol,duration_s,mbps,pair_a,pair_b,filename,error,test_start
+,a,b,OK,TCP,10,35949.0,a,b,r1,,1000
+,a,b,OK,TCP,10,45235.0,a,b,r2,,1200
+EOF
+    run_orch make-pivot >/dev/null 2>&1
+    grep -q "40592.00" "$RESULTS_BASE/$IPERF_RUN_ID/iperf_pivot.txt" \
+        || { echo "staggered test_start should average to 40592.00"; return 1; }
 }
 
 test_make_pivot_parallel_header_comes_from_csv_not_env() {
@@ -347,6 +391,8 @@ run_test test_make_pivot_includes_per_host_incoming_bandwidth
 run_test test_make_pivot_includes_fleet_aggregate_bandwidth
 run_test test_make_pivot_sums_concurrent_flows
 run_test test_make_pivot_averages_sequential_flows
+run_test test_make_pivot_never_sums_untimed_rows
+run_test test_make_pivot_uses_test_start_for_overlap
 run_test test_make_pivot_parallel_header_comes_from_csv_not_env
 run_test test_make_pivot_duration_and_port_come_from_csv_not_env
 run_test test_make_pivot_shows_gbs_alongside_mbps
