@@ -365,6 +365,12 @@ EOF
         || { cat "$TEST_TMPDIR/out"; return 1; }
     assert_contains "$(cat "$TEST_TMPDIR/out")" "window: last 60s" \
         "summary still produced" || return 1
+    # Where the copies went must be stated: they land in a dotted subdir,
+    # so looking for them in --reports and finding nothing is easy.
+    assert_contains "$(cat "$TEST_TMPDIR/out")" ".window/" \
+        "summarize says where it put the copies" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "collect" \
+        "and points at collect for full reports" || return 1
     # The windowed copy is bounded and lives beside, not on top of, the
     # archived one.
     local windowed="$reports/.window/alpha_agent.csv"

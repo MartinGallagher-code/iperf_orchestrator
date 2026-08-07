@@ -442,8 +442,13 @@ case "$CMD" in
     summarize) if [ "$TAIL_BYTES" -gt 0 ]; then
                    WORK_DIR="$REPORTS/.window"
                    mkdir -p "$WORK_DIR"
-                   log "collecting last ${TAIL_BYTES}B of each report from ${#HOST_LINES[@]} hosts"
+                   log "collecting last ${TAIL_BYTES}B of each report from ${#HOST_LINES[@]} hosts into $WORK_DIR/"
                    _fanout _h_collect_tail || warn "summarizing what was collected anyway"
+                   # Say where they landed: these are windowed copies in a
+                   # dotted subdir (so a full `collect` archive is never
+                   # overwritten), which makes them easy to go looking for
+                   # in $REPORTS and not find.
+                   log "windowed copies in $WORK_DIR/ -- use \`collect\` for full reports in $REPORTS/"
                else
                    WORK_DIR="$REPORTS"
                    mkdir -p "$WORK_DIR"
