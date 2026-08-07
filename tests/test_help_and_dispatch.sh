@@ -66,8 +66,22 @@ test_version_matches_pyproject() {
         echo "could not read version from pyproject.toml" >&2
         return 1
     }
-    assert_eq "iperf-orchestrator $pkg_ver" "$RUN_OUT" \
+    # Only the first line is the machine-readable identity; the copyright
+    # and warranty notice follow it (GNU --version convention).
+    assert_eq "iperf-orchestrator $pkg_ver" "$(echo "$RUN_OUT" | head -n 1)" \
         "--version should match the version in pyproject.toml" || return 1
+}
+
+test_version_shows_copyright_and_license() {
+    run_orch --version
+    assert_contains "$RUN_OUT" "Copyright (C) 2026 Martin J. Gallagher" || return 1
+    assert_contains "$RUN_OUT" "GPL-3.0-or-later" "license identifier" || return 1
+    assert_contains "$RUN_OUT" "NO WARRANTY" "warranty notice" || return 1
+    # The copyright line must agree with the script's own file header,
+    # so the two can't drift apart.
+    local hdr
+    hdr=$(grep -m1 '^# Copyright (C) ' "$REPO_ROOT/iperf_orchestrator/iperf_orchestrator.sh" | sed 's/^# //')
+    assert_contains "$RUN_OUT" "$hdr" "copyright must match the file header" || return 1
 }
 
 test_unknown_subcommand_is_rejected() {
@@ -83,6 +97,7 @@ run_test test_help_double_dash_help_flag
 run_test test_version_flag
 run_test test_version_subcommand
 run_test test_version_matches_pyproject
+run_test test_version_shows_copyright_and_license
 run_test test_unknown_subcommand_is_rejected
 
 report_tests

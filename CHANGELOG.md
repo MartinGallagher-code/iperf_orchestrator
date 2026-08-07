@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.3.1] - 2026-08-07
 
+### Changed
+- `--version` (and the `version` subcommand) now print the copyright
+  holder, license, and warranty notice in the conventional GNU layout.
+  The program name and version stay alone on the first line, so anything
+  parsing the version keeps working. A test pins the copyright line to
+  the script's own file header so the two cannot drift.
+
 ### Fixed
 - **Pivot and heatmap cells could exceed line rate**, reporting bandwidth
   that never existed. Each cell was `sum(mbps × duration) / run_wall_time`,

@@ -65,6 +65,12 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
 ORCH_VERSION="1.3.1"
+# Copyright holder and license, mirroring the file header, LICENSE, and
+# pyproject.toml. --version prints these in the conventional GNU layout:
+# program + version on line 1 (so scripts can still parse it), then the
+# copyright and warranty notice.
+ORCH_COPYRIGHT="Copyright (C) 2026 Martin J. Gallagher"
+ORCH_LICENSE="GPL-3.0-or-later"
 
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
@@ -2975,6 +2981,17 @@ for v, s, t in slowest:
 PYEOF
 }
 
+cmd_version() {
+    # GNU convention: "<program> <version>" alone on the first line, so
+    # anything parsing the version keeps working, followed by the
+    # copyright and warranty notice.
+    echo "iperf-orchestrator $ORCH_VERSION"
+    echo "$ORCH_COPYRIGHT"
+    echo "License $ORCH_LICENSE: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>"
+    echo "This is free software: you are free to change and redistribute it."
+    echo "There is NO WARRANTY, to the extent permitted by law."
+}
+
 cmd_doctor() {
     log "=== doctor: orchestrator-host prerequisites ==="
     local missing=0
@@ -3121,6 +3138,6 @@ case "$cmd" in
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
     help-advanced|--help-advanced) usage_advanced ;;
-    version|--version)  echo "iperf-orchestrator $ORCH_VERSION" ;;
+    version|--version)  cmd_version ;;
     *)                  err "Unknown command: $cmd"; usage; exit 2 ;;
 esac
