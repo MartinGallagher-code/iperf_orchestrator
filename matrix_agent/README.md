@@ -67,6 +67,17 @@ how many hosts are contacted at once — raise it for large fleets, lower
 it if the driver box or a bastion runs out of connections. It bounds
 SSH concurrency only; the traffic's own concurrency is the matrix shape.
 
+Re-running a command against a fleet that is *already under load* is a
+different proposition from the first run: sshd competes for CPU with
+~2N busy agent threads, and unless `--bind` puts matrix traffic on a
+separate NIC, the SSH handshake queues behind the test traffic too. So
+per-host operations are retried with backoff (`--retries`, default 2)
+and the connect timeout is 20s (`--connect-timeout`). Every operation
+is idempotent — `start` in particular is pidfile-guarded, so a retry
+after a dropped connection reports "already running" rather than
+launching a second agent. Use `--retries 0` for fail-fast when you want
+a genuine outage to be loud immediately.
+
 `summarize` only reads the last `--window` seconds, so it fetches a
 bounded tail of each report rather than the whole file — its cost is the
 same after eight hours as after eight minutes. `--tail-bytes N` overrides

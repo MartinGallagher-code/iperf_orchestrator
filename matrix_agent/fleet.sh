@@ -26,6 +26,13 @@
 # Options (env var equivalents in brackets):
 #   --matrix FILE      traffic matrix               [MXA_MATRIX, matrix.csv]
 #   --jobs N           SSH fan-out concurrency      [MXA_JOBS, 64]
+#   --retries N        retries per host, backed off [MXA_RETRIES, 2]
+#   --connect-timeout SECONDS
+#                      ssh connect timeout. Raise both of these when
+#                      re-running against a fleet already under load:
+#                      sshd competes with the agents for CPU, and unless
+#                      --bind separates them, with the NIC too.
+#                                          [MXA_CONNECT_TIMEOUT, 20]
 #   --user USER        SSH user                     [SSH_USER]
 #   --remote-dir DIR   working dir on hosts         [MXA_REMOTE_DIR, /var/tmp/mxa]
 #   --reports DIR      local dir for collected CSVs [MXA_REPORTS, ./reports]
@@ -69,13 +76,15 @@ HOSTS_FILE=""
 PPS=""
 SEND=30
 REPLY=0
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
+CONNECT_TIMEOUT="${MXA_CONNECT_TIMEOUT:-20}"
+RETRIES="${MXA_RETRIES:-2}"
+SSH_OPTS=()   # built after option parsing, from CONNECT_TIMEOUT
 
 log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,49p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,56p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -91,6 +100,8 @@ while [ $# -gt 0 ]; do
         --bind)       BIND="$2"; shift 2 ;;
         --window)     WINDOW="$2"; shift 2 ;;
         --tail-bytes) TAIL_BYTES="$2"; shift 2 ;;
+        --connect-timeout) CONNECT_TIMEOUT="$2"; shift 2 ;;
+        --retries)    RETRIES="$2"; shift 2 ;;
         --grid)       GRID="$2"; shift 2 ;;
         --hosts)      HOSTS_FILE="$2"; shift 2 ;;
         --pps)        PPS="$2"; shift 2 ;;
@@ -103,6 +114,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "$CMD" ] || usage 1
+
+# ServerAlive* so a session that survives the handshake but then stalls
+# behind test traffic fails in bounded time instead of hanging the run.
+SSH_OPTS=(-o BatchMode=yes -o "ConnectTimeout=$CONNECT_TIMEOUT"
+          -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 
 # rr builds its own matrix before the host list is read from it.
 if [ "$CMD" = "rr" ]; then
@@ -142,6 +158,32 @@ _target() { # addr -> [user@]addr for ssh/scp
     if [ -n "$SSH_USER" ]; then echo "$SSH_USER@$1"; else echo "$1"; fi
 }
 
+# Retry one host's operation with backoff.
+#
+# The failure this exists for: re-running `up` on a fleet that is
+# already pushing line rate. The first `up` ran against idle hosts; the
+# second competes with the agents themselves -- sshd needs CPU that ~2N
+# busy threads are holding, and unless --bind puts test traffic on a
+# separate NIC, the SSH handshake queues behind the test traffic. A
+# connect that took milliseconds on an idle host can then miss the
+# timeout, and with no retry a single transient miss failed the host.
+#
+# Safe to retry because every per-host operation here is idempotent:
+# deploy re-copies, start is pidfile-guarded (a retry after a dropped
+# connection sees "already running" rather than launching a second
+# agent), stop/reload/collect likewise.
+_retry() {
+    local fn="$1" name="$2" addr="$3" port="$4" attempt=1 delay=2
+    while :; do
+        "$fn" "$name" "$addr" "$port" && return 0
+        [ "$attempt" -gt "$RETRIES" ] && return 1
+        echo "attempt $attempt failed; retrying in ${delay}s" >&2
+        sleep "$delay"
+        attempt=$(( attempt + 1 ))
+        delay=$(( delay * 2 ))
+    done
+}
+
 # Run "$fn name addr port" for every host, at most $JOBS at a time.
 # Per-host output is prefixed with the host name; failures are collected
 # and reported at the end, and set the exit status.
@@ -152,7 +194,7 @@ _fanout() {
         while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.05; done
         # shellcheck disable=SC2086  -- intentional word split: name addr port
         ( set -- $line
-          if ! "$fn" "$1" "$2" "$3" 2>&1 | sed "s/^/[$1] /"; then
+          if ! _retry "$fn" "$1" "$2" "$3" 2>&1 | sed "s/^/[$1] /"; then
               touch "$faildir/$1"
           fi ) &
         pids+=($!)

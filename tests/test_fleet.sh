@@ -262,6 +262,56 @@ test_ssh_user_and_remote_dir_options() {
     assert_contains "$log" "mkdir -p '/opt/mxa/rep'" "remote dir honored" || return 1
 }
 
+test_transient_ssh_failure_is_retried() {
+    # Re-running `up` against a fleet already at line rate is where this
+    # bites: sshd competes with the agents for CPU (and, without --bind,
+    # for the NIC), so a connect that was instant on an idle host can
+    # miss the timeout. With no retry a single transient miss failed the
+    # host -- "connection errors the second time that I didn't get the
+    # first". ssh here fails once per host, then succeeds.
+    _fleet_env
+    cat > "$FAKE_BIN/ssh" <<EOF
+#!/usr/bin/env bash
+echo "ssh \$*" >> "\$FLEET_LOG"
+# One counter file per target host: fail the first attempt only.
+# The target carries the SSH user the harness exports, so match on the
+# address anywhere in the argument, not as a prefix.
+target=\$(for a in "\$@"; do case "\$a" in *10.0.0.*) echo "\${a##*@}"; break ;; esac; done)
+c="$TEST_TMPDIR/attempts.\$target"
+n=\$(cat "\$c" 2>/dev/null || echo 0)
+echo \$((n + 1)) > "\$c"
+[ "\$n" -eq 0 ] && { echo "ssh: connect to host \$target port 22: Connection timed out" >&2; exit 255; }
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+    local rc=0
+    _run_fleet --retries 2 deploy || rc=$?
+    assert_status 0 "$rc" "a transient failure must not fail the host" \
+        || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "retrying" "retry is announced" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "OK on all 2 hosts" || return 1
+    # Both hosts must have been tried twice: once failing, once not.
+    assert_eq "2" "$(cat "$TEST_TMPDIR/attempts.10.0.0.1")" "alpha retried once" || return 1
+    assert_eq "2" "$(cat "$TEST_TMPDIR/attempts.10.0.0.2")" "beta retried once" || return 1
+    # --retries 0 must restore fail-fast, so a real outage is still loud.
+    rm -f "$TEST_TMPDIR"/attempts.*
+    rc=0
+    _run_fleet --retries 0 deploy || rc=$?
+    [ "$rc" -ne 0 ] || { echo "--retries 0 should fail fast"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "2/2 hosts failed" || return 1
+}
+
+test_connect_timeout_is_configurable() {
+    _fleet_env
+    _run_fleet --connect-timeout 45 deploy || { cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$FLEET_LOG")" "ConnectTimeout=45" "timeout forwarded" || return 1
+    : > "$FLEET_LOG"
+    _run_fleet deploy || { cat "$TEST_TMPDIR/out"; return 1; }
+    local log; log=$(cat "$FLEET_LOG")
+    assert_contains "$log" "ConnectTimeout=20" "default raised from the old 8s" || return 1
+    assert_contains "$log" "ServerAliveInterval" "stalled sessions time out" || return 1
+}
+
 test_failed_host_is_reported_and_exit_nonzero() {
     _fleet_env
     # ssh fails for beta only.
@@ -341,6 +391,8 @@ run_test test_bind_option_forwarded_to_every_agent
 run_test test_stop_and_reload_signal_agents
 run_test test_summarize_pulls_only_the_report_tail
 run_test test_ssh_user_and_remote_dir_options
+run_test test_transient_ssh_failure_is_retried
+run_test test_connect_timeout_is_configurable
 run_test test_failed_host_is_reported_and_exit_nonzero
 
 report_tests
