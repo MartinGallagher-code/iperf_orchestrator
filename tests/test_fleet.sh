@@ -89,15 +89,85 @@ test_rr_command_builds_matrix_and_restarts_in_rr_mode() {
     assert_contains "$log" "--respond-bytes 500" || return 1
 }
 
-test_bind_option_forwarded_to_every_agent() {
+_bind_aware_ssh() {
+    # ssh shim that answers the --bind address query: the data network
+    # (192.168.50.x) is deliberately a different subnet from the login
+    # network (10.0.0.x), which is the whole point of the feature.
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$FLEET_LOG"
+case "$*" in
+    *"ip -o -4 addr show"*)
+        for a in "$@"; do
+            case "$a" in *10.0.0.*) echo "192.168.50.${a##*.}"; exit 0 ;; esac
+        done ;;
+esac
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+}
+
+test_bind_puts_traffic_on_the_bound_nic_not_the_login_address() {
+    # --bind used to pin only the source address and the listener; the
+    # destination still came from the matrix, which is also the ssh
+    # target. Where the data network differs from the management network
+    # that meant senders transmitted from the data NIC but connected to
+    # the login IP -- flows=N with tx=0.0, peers=0 on every receiver.
+    # fleet.sh now resolves each host's address on the bound device over
+    # the control path and hands the whole map to every agent.
     _fleet_env
+    _bind_aware_ssh
     _run_fleet --bind eth1 start || { cat "$TEST_TMPDIR/out"; return 1; }
     local log; log=$(cat "$FLEET_LOG")
     assert_contains "$log" "--bind eth1" "--bind reaches the remote agents" || return 1
+    # Traffic endpoints must be the data addresses, with the matrix port
+    # preserved (beta's is a non-default 5299).
+    assert_contains "$log" "--map alpha=192.168.50.1:5220" "alpha mapped to its eth1 address" || return 1
+    assert_contains "$log" "--map beta=192.168.50.2:5299" "beta mapped, port kept" || return 1
+    # Every agent must get the whole map, not just its own entry.
+    local per_host
+    per_host=$(grep -c -- "--map alpha=192.168.50.1:5220" "$FLEET_LOG")
+    assert_eq "2" "$per_host" "both agents receive the full map" || return 1
+    # ssh/scp still go to the login addresses -- identity is untouched.
+    assert_contains "$log" "10.0.0.1" "ssh still uses the login address" || return 1
     # Same via the orchestrator's env var, no flag.
     : > "$FLEET_LOG"
     IPERF_BIND=eth2 _run_fleet start || { cat "$TEST_TMPDIR/out"; return 1; }
     assert_contains "$(cat "$FLEET_LOG")" "--bind eth2" "IPERF_BIND honored" || return 1
+}
+
+test_bind_that_matches_no_interface_fails_loudly() {
+    # Silently falling back to the login address would recreate exactly
+    # the bug this resolution exists to prevent, so an unresolvable
+    # --bind must stop the run instead.
+    _fleet_env
+    cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/usr/bin/env bash
+echo "ssh $*" >> "$FLEET_LOG"
+exit 0
+EOF
+    chmod +x "$FAKE_BIN/ssh"
+    local rc=0
+    _run_fleet --bind nosuch0 --retries 0 start || rc=$?
+    [ "$rc" -ne 0 ] || { echo "unresolvable --bind should fail"; cat "$TEST_TMPDIR/out"; return 1; }
+    assert_contains "$(cat "$TEST_TMPDIR/out")" "matched no interface" || return 1
+    # And no agent may have been launched with the wrong endpoints.
+    case "$(cat "$FLEET_LOG")" in
+        *"nohup"*) echo "agents started despite unresolved --bind"; return 1 ;;
+    esac
+}
+
+test_no_bind_leaves_endpoints_alone() {
+    # Without --bind there is nothing to resolve: no ssh probe, no --map,
+    # and the matrix addresses stay the traffic endpoints.
+    _fleet_env
+    _run_fleet start || { cat "$TEST_TMPDIR/out"; return 1; }
+    local log; log=$(cat "$FLEET_LOG")
+    case "$log" in
+        *"--map"*)             echo "unexpected --map without --bind"; return 1 ;;
+        *"ip -o -4 addr"*)     echo "unexpected bind probe without --bind"; return 1 ;;
+    esac
+    assert_contains "$log" "nohup" "agents still start" || return 1
 }
 
 test_stop_and_reload_signal_agents() {
@@ -387,7 +457,9 @@ run_test test_deploy_pushes_agent_and_matrix_to_every_host
 run_test test_start_passes_hostname_and_agent_flags
 run_test test_start_really_launches_agents_no_pgrep_self_match
 run_test test_rr_command_builds_matrix_and_restarts_in_rr_mode
-run_test test_bind_option_forwarded_to_every_agent
+run_test test_bind_puts_traffic_on_the_bound_nic_not_the_login_address
+run_test test_bind_that_matches_no_interface_fails_loudly
+run_test test_no_bind_leaves_endpoints_alone
 run_test test_stop_and_reload_signal_agents
 run_test test_summarize_pulls_only_the_report_tail
 run_test test_ssh_user_and_remote_dir_options

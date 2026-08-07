@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-08-07
+
+### Fixed
+- **`--bind` now puts the traffic on the bound NIC, not just its source
+  address.** It pinned the sender's source address and the listeners,
+  but the *destination* still came from the matrix — which is also the
+  address `fleet.sh` SSHes to. When the bound device's address differs
+  from the login address (separate management and data networks, the
+  normal case) that produced traffic sourced from the data NIC and
+  aimed at the management IP: senders showed `flows=N` with `tx=0.0`
+  and every receiver showed `peers=0`, with nothing on the wire.
+
+  `fleet.sh` now resolves each host's address *on the bound device* over
+  the control path — using the same `ip -o -4 addr show` substring match
+  the agent's own `--bind` uses — and hands the whole map to every
+  agent. Senders connect to, and listeners accept on, the bound NIC.
+  The matrix keeps the login addresses, so ssh/scp, host identity,
+  `status` and `collect` are untouched. A `--bind` that matches no
+  interface on some host now fails the run rather than silently falling
+  back to the login address and recreating the bug. Nothing changes
+  when `--bind` is absent: no probe, no map, matrix addresses stay the
+  endpoints.
+
 ## [1.3.3] - 2026-08-07
 
 ### Fixed
@@ -267,6 +290,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.3.4]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.4
 [1.3.3]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.3
 [1.3.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.2
 [1.3.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.3.1

@@ -98,7 +98,7 @@ addresses, a directly-invoked agent doesn't need `--hostname` at all: it
 finds its own row by matching the matrix addresses against its local
 interface addresses (and refuses to guess if more than one matches).
 
-### Pinning traffic to a NIC
+### Pinning traffic to a NIC (when the data network isn't the login network)
 
 `--bind SPEC` uses the same semantics as `iperf-orchestrator --bind`:
 the spec is substring-matched against `ip -o -4 addr show`, so it
@@ -111,6 +111,27 @@ that NIC:
 ./fleet.sh --matrix matrix.csv --bind eth1 up   # forwarded to every agent
 ./matrix_agent.py run --matrix matrix.csv --bind 192.168.50.   # direct
 ```
+
+**The bound device's address does not have to be the address you log in
+to.** Through `fleet.sh`, `--bind` covers both ends: it resolves each
+host's address *on that device* over SSH (same substring match, run
+remotely) and gives every agent the resulting map, so senders connect
+to the data addresses and listeners accept on them. The matrix keeps
+the login addresses, so `status`, `collect` and host identity are
+unchanged. One flag, two networks:
+
+```bash
+# matrix.csv holds management IPs; all traffic rides eth1's network
+./fleet.sh --matrix matrix.csv --bind eth1 up
+```
+
+This matters because binding only the *source* would aim data-NIC
+traffic at management IPs — which shows up as `flows=N` with `tx=0.0`
+on senders and `peers=0` everywhere, and is easy to misread as a fabric
+fault. If `--bind` matches no interface on some host the run stops
+rather than quietly falling back. Direct `matrix_agent.py run` has no
+control path to resolve peers over, so there you still pass endpoints
+yourself with `--map`.
 
 The matrix is a plain grid CSV — rows are sources, columns are
 destinations, cells are Mbit/s. Hand-edit it for non-uniform patterns;

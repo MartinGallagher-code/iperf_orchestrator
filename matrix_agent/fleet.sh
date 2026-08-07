@@ -38,8 +38,14 @@
 #   --reports DIR      local dir for collected CSVs [MXA_REPORTS, ./reports]
 #   --python BIN       remote python                [MXA_PYTHON, python3]
 #   --nic DEV          NIC for `prep`               [MXA_NIC]
-#   --bind SPEC        pin agent traffic to a NIC (iperf-orchestrator
-#                      semantics; forwarded to every agent) [IPERF_BIND]
+#   --bind SPEC        put ALL matrix traffic on one NIC: interface name
+#                      or address, substring-matched against
+#                      `ip -o -4 addr show` (iperf-orchestrator
+#                      semantics). Each host's address on that device is
+#                      resolved over ssh, so senders transmit from AND
+#                      connect to it, and listeners accept on it -- the
+#                      data network can differ from the login network.
+#                      The matrix keeps the login addresses. [IPERF_BIND]
 #   --window SECONDS   summarize window             [60]
 #   --tail-bytes N     bytes of each report summarize pulls (0 = whole
 #                      file). Default is sized from --window and the host
@@ -84,7 +90,7 @@ log()  { echo "[fleet] $*"; }
 warn() { echo "[fleet] WARN: $*" >&2; }
 die()  { echo "[fleet] ERROR: $*" >&2; exit 1; }
 
-usage() { sed -n '9,56p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '9,62p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 AGENT_FLAGS=()
 CMD=""
@@ -302,7 +308,65 @@ _h_prep() { local name="$1" addr="$2"
         "sudo tc qdisc replace dev '$NIC' root fq && echo fq-set"
 }
 
+# ---- --bind: put the traffic on the bound NIC, not just its source ---------
+#
+# --bind alone only pins the *source* address and the listener. The
+# destination still came from the matrix -- which is also the address
+# fleet.sh SSHes to. When the bound device's address differs from the
+# login address (separate management and data networks, the normal case)
+# that produced traffic sourced from the data NIC but aimed at the
+# management IP: senders showed `flows=N` with `tx=0.0`, receivers
+# `peers=0`, and nothing on the wire.
+#
+# So resolve every host's address ON THE BOUND DEVICE over the control
+# path, and hand the whole map to every agent as --map. Senders then
+# connect to, and listeners accept on, the bound NIC. The matrix keeps
+# the login addresses, so ssh/scp and host identity are untouched.
+#
+# Resolution deliberately runs the same `ip -o -4 addr show` substring
+# match the agent's own --bind uses, so a spec that resolves here
+# resolves identically there. When a host's bound address already equals
+# its matrix address the map entry is a harmless no-op.
+BINDMAP_DIR=""
+
+_h_bindaddr() { local name="$1" addr="$2" port="$3" found
+    found=$(ssh "${SSH_OPTS[@]}" "$(_target "$addr")" \
+        "ip -o -4 addr show 2>/dev/null | grep -F -- '$BIND' | head -n1 \
+         | awk '{print \$4}' | cut -d/ -f1")
+    if [ -z "$found" ]; then
+        echo "--bind '$BIND' matched no interface" >&2
+        return 1
+    fi
+    printf '%s=%s:%s\n' "$name" "$found" "$port" > "$BINDMAP_DIR/$name"
+}
+
+# Build --map flags for every host from the bound device. Prepended to
+# AGENT_FLAGS so an explicit --map after `--` still wins (later
+# overrides are applied last).
+_resolve_bind_map() {
+    local line name mapped flags=()
+    BINDMAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mxa-bindmap-XXXXXX")"
+    log "resolving --bind '$BIND' to a per-host address on ${#HOST_LINES[@]} hosts"
+    _fanout _h_bindaddr || die "could not resolve --bind '$BIND' on every host; \
+fix the spec or pass explicit --map flags after --"
+    for line in "${HOST_LINES[@]}"; do
+        name="${line%% *}"
+        mapped="$(cat "$BINDMAP_DIR/$name" 2>/dev/null || true)"
+        [ -n "$mapped" ] || die "no bind address resolved for $name"
+        flags+=(--map "$mapped")
+    done
+    rm -rf "$BINDMAP_DIR"
+    AGENT_FLAGS=("${flags[@]}" ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"})
+    log "traffic will use the '$BIND' address on each host; ssh still uses the matrix addresses"
+}
+
 # ---- commands --------------------------------------------------------------
+
+# Only the commands that launch agents need the map; status/collect/stop
+# talk over the control path and are unaffected.
+case "$CMD" in
+    start|up|rr) [ -n "$BIND" ] && _resolve_bind_map ;;
+esac
 
 case "$CMD" in
     deploy)    log "deploying agent + $MATRIX to ${#HOST_LINES[@]} hosts (jobs=$JOBS)"
