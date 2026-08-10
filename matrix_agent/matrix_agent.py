@@ -776,9 +776,23 @@ def cmd_gen(args):
     if args.rate_mbps is not None:
         rate = args.rate_mbps
     elif args.pps is not None:
-        rate = args.pps * args.payload * 8.0 / 1e6
+        # A datagram cannot be smaller than its own framing: MAGIC(4) +
+        # a name-length byte + the host name + an 8-byte sequence. Below
+        # that the agent pads up to the floor, so budgeting the smaller
+        # size would pace the flow in bytes for packets that are bigger
+        # than assumed -- and quietly deliver proportionally fewer of
+        # them (asking 20000 pps at 8 bytes yields ~10666). Size the
+        # cell from what will actually go on the wire.
+        floor = 13 + max(len(parse_token(h)[0]) for h in hosts)
+        payload = max(args.payload, floor)
+        if payload != args.payload:
+            print("note: %dB payload is below this matrix's %dB framing "
+                  "floor (header + longest host name + sequence); sizing "
+                  "cells for %dB so the packet rate is actually met"
+                  % (args.payload, floor, payload))
+        rate = args.pps * payload * 8.0 / 1e6
         print("pps target: %d pkts/s x %dB per flow = %.3f Mbps per cell"
-              % (args.pps, args.payload, rate))
+              % (args.pps, payload, rate))
     else:
         rate = args.egress_gbps * 1000.0 / (n - 1)
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")

@@ -337,6 +337,14 @@ packets: requests 80000/s offered, 79800/s delivered; replies 79600/s /
 159400 pkts/s, 338.5 Mbps
 ```
 
+Note on the smallest usable payload: a datagram carries MAGIC + a
+name-length byte + the host name + an 8-byte sequence, so it cannot be
+smaller than `13 + len(name)` -- 21 bytes for `10.0.0.7`, more for an
+FQDN. `gen --pps` sizes cells from that real floor rather than from a
+smaller requested `--payload`, and says so; before that, `--pps 20000
+--payload 8` quietly delivered 10,666 pps, because the flow was paced
+in bytes for packets half the size of the ones actually sent.
+
 Note on tiny packets: our framing needs ~26 bytes (name + sequence), but
 anything under ~46 bytes rides the wire in Ethernet's minimum 64-byte
 frame anyway — a 30-byte payload produces the same frames and pps as a

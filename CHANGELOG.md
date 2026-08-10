@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-08-07
+
+### Fixed
+- **`gen --pps --payload` below the framing floor delivered half the
+  packets asked for.** A datagram carries MAGIC + a name-length byte +
+  the host name + an 8-byte sequence, so it cannot be smaller than
+  `13 + len(name)`; the agent pads up to that. But `gen` sized the cell
+  from the *requested* payload, so the token bucket paced bytes for
+  packets smaller than the ones actually sent -- measured, `--pps 20000
+  --payload 8` delivered 10,666 pps. Cells are now sized from the real
+  datagram, with a note when the floor applies. Longer host names raise
+  the floor, so an FQDN matrix pays more per packet than an IP one.
+
 ## [1.5.0] - 2026-08-07
 
 ### Added
@@ -363,6 +376,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.5.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.1
 [1.5.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.0
 [1.4.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.2
 [1.4.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.1

@@ -495,6 +495,38 @@ EOF
     assert_contains "$out" "only 1 apart" "names the actual gap" || return 1
 }
 
+test_gen_pps_sizes_cells_for_the_real_datagram() {
+    # A datagram carries MAGIC + a name-length byte + the host name + an
+    # 8-byte sequence, so it cannot be smaller than 13 + len(name). Below
+    # that the agent pads up, and a cell budgeted for the smaller size
+    # paces bytes for packets bigger than assumed -- delivering
+    # proportionally fewer of them (20000 pps at 8 bytes gave 10666).
+    cat > "$TEST_TMPDIR/pn.txt" <<'EOF'
+aa
+bb
+EOF
+    local out
+    out=$(python3 "$AGENT" gen --hosts "$TEST_TMPDIR/pn.txt" --pps 20000 \
+        --payload 8 -o "$TEST_TMPDIR/pn.csv" 2>&1)
+    assert_contains "$out" "framing floor" "the floor is explained" || return 1
+    # 13 + len("aa") = 15 -> 20000 * 15 * 8 / 1e6 = 2.400 Mbps
+    assert_contains "$out" "15B per flow = 2.400 Mbps" "cell sized for 15B" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/pn.csv")" "2.400" || return 1
+    # Longer names push the floor up: 13 + len("host-eleven") = 24.
+    cat > "$TEST_TMPDIR/pn2.txt" <<'EOF'
+host-eleven
+host-twelvex
+EOF
+    out=$(python3 "$AGENT" gen --hosts "$TEST_TMPDIR/pn2.txt" --pps 1000 \
+        --payload 8 -o "$TEST_TMPDIR/pn2.csv" 2>&1)
+    assert_contains "$out" "25B per flow" "floor tracks the longest name" || return 1
+    # A payload above the floor is used as given, with no note.
+    out=$(python3 "$AGENT" gen --hosts "$TEST_TMPDIR/pn.txt" --pps 20000 \
+        --payload 30 -o "$TEST_TMPDIR/pn3.csv" 2>&1)
+    assert_contains "$out" "30B per flow = 4.800 Mbps" || return 1
+    case "$out" in *"framing floor"*) echo "unexpected floor note for 30B"; return 1 ;; esac
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -522,6 +554,7 @@ run_test test_summarize_explains_mismatched_in_out_targets
 run_test test_summarize_reports_per_host_packet_rates
 run_test test_shards_split_the_matrix_across_processes
 run_test test_shards_reject_overlapping_port_ranges
+run_test test_gen_pps_sizes_cells_for_the_real_datagram
 run_test test_agent_rejects_unknown_hostname
 
 report_tests
