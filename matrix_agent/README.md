@@ -30,6 +30,17 @@ counters only show what TCP queued, not what the fabric delivered.
 
 ## Quick start (any two hosts, or one)
 
+**How to invoke it.** `fleet.sh` is not on `$PATH` — it ships inside the
+package and is reached through the orchestrator's front door:
+
+```bash
+iperf-orchestrator matrix --matrix matrix.csv status     # installed wheel
+bash matrix_agent/fleet.sh --matrix matrix.csv status    # source tree or bundle
+```
+
+The `./fleet.sh` and `./matrix_agent.py` examples below assume you are
+*inside* `matrix_agent/`; anywhere else, use one of the two forms above.
+
 ```bash
 # 1. Host list, one token per line: name[=addr[:port]] -- bare IPs are
 #    fine ('10.0.0.7', or '10.0.0.7:5299' with a port); the address then
