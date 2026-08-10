@@ -556,6 +556,7 @@ class Reporter(object):
         self.last_tick = mono
         now = int(time.time())
         tx_sum = tx_target = 0.0
+        tx_pps = reply_pps = reply_mbps = 0.0
         for fl in self.flows:
             with fl.lock:
                 total, rec = fl.bytes_sent, fl.reconnects
@@ -569,9 +570,12 @@ class Reporter(object):
             tx_target += fl.mbps
             if self.proto == "udp":
                 dpkts = pkts - prev[1]
+                tx_pps += dpkts / elapsed
                 extra = "pps=%d" % (dpkts / elapsed)
                 drpk = rpk - prev[2]
                 if drpk or self.respond:
+                    reply_pps += drpk / elapsed
+                    reply_mbps += (rbytes - prev[5]) * 8.0 / elapsed / 1e6
                     extra += " rpps=%d resp_pct=%.1f resp_mbps=%.3f" % (
                         drpk / elapsed,
                         min(100.0, drpk / dpkts * 100) if dpkts else 0.0,
@@ -587,6 +591,7 @@ class Reporter(object):
                                total - prev[0], extra])
 
         rx_sum = rx_target = 0.0
+        rx_pps = 0.0
         snap = self.book.snapshot()
         for peer, cur in sorted(snap.items()):
             prev = self.prev_rx.get(peer, {"bytes": 0, "pkts": 0, "max_seq": -1})
@@ -599,6 +604,7 @@ class Reporter(object):
             extra = ""
             if self.proto == "udp" and cur["max_seq"] >= 0:
                 dpkts = cur["pkts"] - prev["pkts"]
+                rx_pps += dpkts / elapsed
                 extra = "pps=%d" % (dpkts / elapsed)
                 dseq = cur["max_seq"] - prev["max_seq"]
                 if dseq > 0:
@@ -606,9 +612,19 @@ class Reporter(object):
             self.csv.writerow([now, self.me, "rx", peer, self.proto,
                                "%.3f" % target, "%.3f" % mbps, dbytes, extra])
         self.fh.flush()
-        print("ts=%d tx=%.1f/%.1fMbps rx=%.1f/%.1fMbps flows=%d peers=%d"
-              % (now, tx_sum, tx_target, rx_sum, rx_target,
-                 len(self.flows), len(snap)))
+        # Throughput and packet rate together: "is it fast" and "is it
+        # busy" are different questions, and a small-packet workload can
+        # be pinned on one while idle on the other.
+        line = ("ts=%d tx=%.1f/%.1fMbps rx=%.1f/%.1fMbps"
+                % (now, tx_sum, tx_target, rx_sum, rx_target))
+        if self.proto == "udp":
+            line += " tx=%dpkt/s rx=%dpkt/s" % (tx_pps, rx_pps)
+            if self.respond:
+                line += " reply=%dpkt/s/%.1fMbps" % (reply_pps, reply_mbps)
+                line += " total=%dpkt/s/%.1fMbps" % (rx_pps + reply_pps,
+                                                     rx_sum + reply_mbps)
+        line += " flows=%d peers=%d" % (len(self.flows), len(snap))
+        print(line)
         sys.stdout.flush()
         return True
 
@@ -709,6 +725,16 @@ def cmd_run(args):
     rep = Reporter(me, report_path, args.interval, flows, book,
                    rx_targets, args.protocol, args.respond_bytes)
 
+    if args.respond_bytes and not bind_ip:
+        # The listener is on 0.0.0.0, so the kernel picks each reply's
+        # source address by route. On a multi-homed host that can differ
+        # from the address the requester connected to, and a connected
+        # UDP socket silently drops those replies -- reply=0pkt/s with
+        # everything else healthy. --bind pins the listener and removes
+        # the ambiguity.
+        print("note: --respond-bytes without --bind; on a multi-homed host "
+              "replies may leave by a different address than requests "
+              "arrived on and be dropped. Pass --bind <nic> if reply=0.")
     print("matrix_agent: host=%s shard=%d/%d port=%d proto=%s tx_flows=%d "
           "expected_rx_peers=%d report=%s"
           % (me, args.shard, args.shards, port, args.protocol, len(flows),

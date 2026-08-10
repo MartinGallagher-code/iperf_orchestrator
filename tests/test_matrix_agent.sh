@@ -527,6 +527,43 @@ EOF
     case "$out" in *"framing floor"*) echo "unexpected floor note for 30B"; return 1 ;; esac
 }
 
+test_ticker_shows_throughput_and_packets_together() {
+    # `status` shows the last ticker line, so the ticker is where an
+    # operator sees live numbers. A small-packet workload can be pinned
+    # on packet rate while idle on bandwidth, so one without the other
+    # answers half the question.
+    cat > "$TEST_TMPDIR/tk.txt" <<EOF
+k1=127.0.0.1:$(( PORT_A + 400 ))
+k2=127.0.0.1:$(( PORT_A + 500 ))
+EOF
+    python3 "$AGENT" gen --hosts "$TEST_TMPDIR/tk.txt" --pps 3000 --payload 10 \
+        -o "$TEST_TMPDIR/tk.csv" >/dev/null
+    python3 "$AGENT" run --matrix "$TEST_TMPDIR/tk.csv" --hostname k2 \
+        --protocol udp --udp-payload 10 --respond-bytes 500 \
+        --interval 1 --duration 6 --report-dir "$TEST_TMPDIR/tkrep" \
+        > "$TEST_TMPDIR/tk2.out" 2>&1 &
+    sleep 0.3
+    local out
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/tk.csv" --hostname k1 \
+        --protocol udp --udp-payload 10 --respond-bytes 500 \
+        --interval 1 --duration 6 --report-dir "$TEST_TMPDIR/tkrep" 2>&1)
+    wait 2>/dev/null
+    local tick; tick=$(echo "$out" | grep '^ts=' | tail -1)
+    [ -n "$tick" ] || { echo "no ticker line"; echo "$out"; return 1; }
+    assert_contains "$tick" "Mbps" "throughput on the ticker" || return 1
+    assert_contains "$tick" "pkt/s" "packet rate on the ticker" || return 1
+    assert_contains "$tick" "reply=" "reply rate in request/response mode" || return 1
+    assert_contains "$tick" "total=" "combined request+reply totals" || return 1
+    # Replies must actually come back on a matched-address pair.
+    local rp; rp=$(echo "$tick" | sed -n 's/.*reply=\([0-9]*\)pkt.*/\1/p')
+    [ "${rp:-0}" -gt 0 ] || { echo "no replies counted: $tick"; return 1; }
+    # TCP has no datagrams, so the ticker must not claim a packet rate.
+    out=$(python3 "$AGENT" run --matrix "$TEST_TMPDIR/tk.csv" --hostname k1 \
+        --interval 1 --duration 2 --report-dir "$TEST_TMPDIR/tkrep2" 2>&1)
+    tick=$(echo "$out" | grep '^ts=' | tail -1)
+    case "$tick" in *pkt/s*) echo "TCP ticker should not show pkt/s: $tick"; return 1 ;; esac
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -555,6 +592,7 @@ run_test test_summarize_reports_per_host_packet_rates
 run_test test_shards_split_the_matrix_across_processes
 run_test test_shards_reject_overlapping_port_ranges
 run_test test_gen_pps_sizes_cells_for_the_real_datagram
+run_test test_ticker_shows_throughput_and_packets_together
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

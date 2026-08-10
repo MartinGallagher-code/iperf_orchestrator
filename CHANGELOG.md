@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-07
+
+### Added
+- **The ticker (and therefore `status`) now shows packets as well as
+  bandwidth.** A small-packet workload can be pinned on packet rate
+  while idle on bandwidth, so one number without the other answers half
+  the question -- and `status` only ever showed Mbps:
+
+  ```
+  ts=... tx=0.6/0.6Mbps rx=0.6/0.6Mbps tx=5000pkt/s rx=4999pkt/s
+         reply=4999pkt/s/20.0Mbps total=9999pkt/s/20.6Mbps flows=1 peers=1
+  ```
+
+  In request/response mode it also carries the reply rate and the
+  combined request+reply totals, matching what `summarize` reports.
+  UDP only: TCP has no datagram to count.
+- `rr` validates `--pps`/`--send`/`--reply` as whole numbers, explains
+  the per-flow vs per-host arithmetic when `--pps` is missing, and ends
+  by printing the exact `status`/`summarize`/`down` commands for the run
+  it just started.
+- The agent warns when `--respond-bytes` is used without `--bind`: the
+  listener is then on `0.0.0.0`, so on a multi-homed host the kernel can
+  pick a reply source address that differs from the one the requester
+  connected to, and a connected UDP socket drops those replies silently
+  (`reply=0pkt/s` with everything else healthy).
+
 ## [1.5.1] - 2026-08-07
 
 ### Fixed
@@ -376,6 +402,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.6.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.6.0
 [1.5.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.1
 [1.5.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.0
 [1.4.2]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.4.2

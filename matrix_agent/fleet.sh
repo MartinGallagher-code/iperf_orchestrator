@@ -144,7 +144,12 @@ SSH_OPTS=(-o BatchMode=yes -o "ConnectTimeout=$CONNECT_TIMEOUT"
 if [ "$CMD" = "rr" ]; then
     [ -n "$HOSTS_FILE" ] || die "rr needs --hosts <file> (one IP/name per line)"
     [ -f "$HOSTS_FILE" ] || die "hosts file not found: $HOSTS_FILE"
-    [ -n "$PPS" ] || die "rr needs --pps <request packets/sec per flow>"
+    [ -n "$PPS" ] || die "rr needs --pps N -- the request packets/sec you want \
+per flow. With H hosts each host sends N x (H-1) packets/sec, so for a target \
+of T packets/sec per host use --pps T/(H-1)."
+    case "$PPS" in *[!0-9]*|"") die "--pps must be a whole number, got '$PPS'" ;; esac
+    case "$SEND" in *[!0-9]*|"") die "--send must be a whole number of bytes, got '$SEND'" ;; esac
+    case "$REPLY" in *[!0-9]*|"") die "--reply must be a whole number of bytes, got '$REPLY'" ;; esac
     python3 "$AGENT" gen --hosts "$HOSTS_FILE" --pps "$PPS" --payload "$SEND" \
         -o "$MATRIX" || die "matrix generation failed"
     AGENT_FLAGS=(--protocol udp --udp-payload "$SEND" \
@@ -464,13 +469,20 @@ case "$CMD" in
                log "starting agents"
                _fanout _h_start ;;
     rr)        log "request/response: ${PPS} req/s per flow, ${SEND}B requests, ${REPLY}B replies"
+               [ "$SHARDS" -gt 1 ] && log "sharding across $SHARDS processes per host"
                log "stopping any running agents"
                _fanout _h_stop || true
                log "deploying agent + $MATRIX to ${#HOST_LINES[@]} hosts (jobs=$JOBS)"
                _fanout _h_deploy
                log "starting agents in request/response mode"
                _fanout _h_start
-               log "watch with: summarize (packets line shows req+reply pps, answered %, rtt)" ;;
+               echo
+               log "watch it:"
+               log "  fleet.sh --matrix $MATRIX${SHARDS:+ --shards $SHARDS} status"
+               log "      -> per host: Mbps AND pkt/s, both directions, live"
+               log "  fleet.sh --matrix $MATRIX${SHARDS:+ --shards $SHARDS} summarize"
+               log "      -> fleet totals, per-host table, worst flows"
+               log "  fleet.sh --matrix $MATRIX${SHARDS:+ --shards $SHARDS} down   # stop everything" ;;
     status)    _fanout _h_status ;;
     reload)    log "pushing $MATRIX and reloading rates on ${#HOST_LINES[@]} hosts"
                _fanout _h_reload ;;
