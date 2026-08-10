@@ -41,6 +41,7 @@ Python 3.6+, stdlib only.
 
 import argparse
 import csv
+import errno
 import os
 import signal
 import socket
@@ -465,13 +466,34 @@ def tcp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     srv.bind((bind_ip, port))
     srv.listen(1024)
     srv.settimeout(1)
+    warned = False
     while not stop.is_set():
         try:
             conn, addr = srv.accept()
         except socket.timeout:
             continue
-        except OSError:
-            break
+        except OSError as exc:
+            # Running out of file descriptors is TRANSIENT: an agent
+            # holds ~2N of them, so a big matrix can hit the soft limit
+            # mid-accept. Treating it as fatal used to end the accept
+            # loop for the rest of the run -- every peer that had not
+            # connected yet was locked out permanently, and the mesh
+            # looked half-connected with no error anywhere. Keep
+            # accepting; the senders retry with backoff, so the mesh
+            # heals once descriptors free up.
+            if exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS,
+                             errno.ENOMEM, errno.ECONNABORTED, errno.EINTR,
+                             errno.EAGAIN):
+                if not warned:
+                    warned = True
+                    print("accept: %s -- out of descriptors or interrupted; "
+                          "still listening. Raise `ulimit -n` (an agent needs "
+                          "~2 per peer) if peers stay low." % exc,
+                          file=sys.stderr)
+                    sys.stderr.flush()
+                time.sleep(0.05)      # don't spin while the pressure lasts
+                continue
+            break                     # socket really is gone
         t = threading.Thread(target=_tcp_conn_reader, daemon=True,
                              args=(conn, addr, book, stop))
         t.start()
@@ -633,6 +655,40 @@ class Reporter(object):
 # Subcommands
 # ---------------------------------------------------------------------------
 
+def _raise_fd_limit(peers):
+    """Lift RLIMIT_NOFILE toward the hard limit for an N-host matrix.
+
+    An agent holds roughly two descriptors per peer -- one outbound flow
+    and one accepted connection -- plus the listeners and report files.
+    Distributions still ship a 1024 soft limit, which a few hundred
+    hosts blows straight through; accept() then fails and peers go
+    missing with nothing obvious in the logs. Raising the SOFT limit
+    needs no privileges (the hard limit is usually far higher), so do it
+    rather than make every operator discover ulimit the hard way.
+    """
+    need = peers * 2 + 64
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, OSError, ValueError):
+        return
+    if soft >= need:
+        return
+    want = need if hard == resource.RLIM_INFINITY else min(need, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (OSError, ValueError):
+        want = soft
+    if want >= need:
+        print("raised open-file limit %d -> %d for %d peers" % (soft, want, peers))
+    else:
+        print("WARNING: open-file limit is %d but this matrix needs ~%d "
+              "(%d peers x 2 + overhead). Peers will go missing as accept() "
+              "runs out of descriptors. Raise the hard limit: "
+              "LimitNOFILE under systemd, or /etc/security/limits.conf."
+              % (want, need, peers), file=sys.stderr)
+
+
 def cmd_run(args):
     try:
         threading.stack_size(512 * 1024)   # ~1000 threads at large N
@@ -714,6 +770,7 @@ def cmd_run(args):
             fl.start()
 
     rx_targets = {src: mbps for (src, dst), mbps in rates.items() if dst == me}
+    _raise_fd_limit(max(len(flows), len(rx_targets)))
 
     os.makedirs(args.report_dir, exist_ok=True)
     # Each shard writes its own file so they cannot clobber each other,

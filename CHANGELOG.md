@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-08-10
+
+### Fixed
+- **Large matrices left many hosts unable to reach each other.** The
+  TCP accept loop treated every `OSError` as fatal and broke out.
+  `accept()` raises `EMFILE` when the process runs out of file
+  descriptors -- an agent holds roughly two per peer, and a 1024 soft
+  limit is still the default on many distributions -- so past a few
+  hundred hosts the listener exited *for the rest of the run*. Every
+  peer that had not connected yet was locked out permanently, senders
+  retried into a dead listener, and the mesh sat half-connected with
+  nothing in the logs to explain it.
+
+  Descriptor exhaustion (and `ECONNABORTED`/`EINTR`/`ENOBUFS`) is
+  transient, so the loop now logs once and keeps accepting; because
+  senders reconnect with backoff, the mesh heals by itself once
+  descriptors free up. Only a genuinely dead socket ends the loop.
+- **The agent now raises its own descriptor limit.** It knows its peer
+  count, so at startup it lifts `RLIMIT_NOFILE` toward the hard limit
+  (`peers x 2 + 64`), which needs no privileges. When the hard limit is
+  too low to cover the matrix it says so, with the number it needs and
+  where to change it, instead of leaving the operator to discover
+  `ulimit` from missing peers.
+
 ## [1.6.0] - 2026-08-07
 
 ### Added
@@ -402,6 +426,7 @@ First packaged release.
   non-interactive SSH to every host is now a prerequisite you configure
   yourself (for example with `ssh-copy-id`).
 
+[1.6.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.6.1
 [1.6.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.6.0
 [1.5.1]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.1
 [1.5.0]: https://github.com/MartinGallagher-code/iperf_orchestrator/releases/tag/v1.5.0

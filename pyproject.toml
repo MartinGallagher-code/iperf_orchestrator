@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iperf-orchestrator"
-version = "1.6.0"
+version = "1.6.1"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
 requires-python = ">=3.6"

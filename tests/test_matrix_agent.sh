@@ -589,6 +589,85 @@ EOF
     case "$tick" in *pkt/s*) echo "TCP ticker should not show pkt/s: $tick"; return 1 ;; esac
 }
 
+test_listener_survives_descriptor_exhaustion() {
+    # Regression: the accept loop treated every OSError as fatal and
+    # broke out. accept() raises EMFILE when the process runs out of
+    # descriptors -- an agent holds ~2 per peer, and a 1024 soft limit is
+    # still common -- so a large matrix killed the listener for the rest
+    # of the run. Every peer that had not connected yet was locked out
+    # permanently, which looks exactly like "lots of hosts are not
+    # talking to each other" with no error in sight. EMFILE is transient;
+    # the loop must keep accepting so the mesh heals as senders retry.
+    python3 - "$REPO_ROOT/matrix_agent" <<'PYX' || return 1
+import errno, socket, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+import matrix_agent as M
+
+class Conn(object):
+    def recv(self, n): return b""
+    def settimeout(self, *a): pass
+    def setsockopt(self, *a): pass
+    def close(self): pass
+
+class FakeSrv(Conn):
+    def __init__(self): self.served = 0; self.raised = 0
+    def bind(self, *a): pass
+    def listen(self, *a): pass
+    def accept(self):
+        if self.raised < 3:                 # descriptor exhaustion
+            self.raised += 1
+            raise OSError(errno.EMFILE, "Too many open files")
+        if self.served >= 2:
+            time.sleep(0.02)
+            raise socket.timeout()
+        self.served += 1
+        return Conn(), ("10.0.0.9", 1234)
+
+fake = FakeSrv()
+real = socket.socket
+socket.socket = lambda *a, **k: fake
+try:
+    stop = threading.Event()
+    t = threading.Thread(target=M.tcp_listener, args=(1, M.RxBook(), stop), daemon=True)
+    t.start()
+    time.sleep(1.0)
+    stop.set(); t.join(timeout=3)
+finally:
+    socket.socket = real
+if fake.raised != 3:
+    print("EMFILE was not exercised (raised=%d)" % fake.raised); sys.exit(1)
+if fake.served != 2:
+    print("listener died on EMFILE: served %d after it, want 2" % fake.served)
+    sys.exit(1)
+PYX
+}
+
+test_fd_limit_is_raised_for_the_matrix_size() {
+    # The agent knows its peer count, so it lifts the soft limit itself
+    # rather than making every operator discover ulimit the hard way --
+    # and says so plainly when the hard limit is too low to fix.
+    local h="$TEST_TMPDIR/manyhosts.txt"
+    python3 - "$h" <<'PYX'
+import sys
+with open(sys.argv[1], "w") as f:
+    for i in range(1, 121):
+        f.write("f%d=127.0.0.1:%d\n" % (i, 49500 + i))
+PYX
+    python3 "$AGENT" gen --hosts "$h" --rate-mbps 1 \
+        -o "$TEST_TMPDIR/many.csv" >/dev/null
+    local out
+    out=$(bash -c "ulimit -n 200 2>/dev/null || exit 0; exec python3 '$AGENT' run \
+        --matrix '$TEST_TMPDIR/many.csv' --hostname f1 --interval 1 --duration 2 \
+        --report-dir '$TEST_TMPDIR/fdrep'" 2>&1) || true
+    case "$out" in
+        *"WARNING: open-file limit"*)
+            assert_contains "$out" "119 peers" "the warning counts the peers" || return 1
+            assert_contains "$out" "LimitNOFILE" "and names the remedy" || return 1 ;;
+        *"raised open-file limit"*) : ;;
+        *) echo "no fd-limit diagnostic at all:"; echo "$out"; return 1 ;;
+    esac
+}
+
 test_agent_rejects_unknown_hostname() {
     _write_hosts
     python3 "$AGENT" gen --hosts "$TEST_TMPDIR/hosts.txt" --rate-mbps 10 \
@@ -618,6 +697,8 @@ run_test test_shards_split_the_matrix_across_processes
 run_test test_shards_reject_overlapping_port_ranges
 run_test test_gen_pps_sizes_cells_for_the_real_datagram
 run_test test_ticker_shows_throughput_and_packets_together
+run_test test_listener_survives_descriptor_exhaustion
+run_test test_fd_limit_is_raised_for_the_matrix_size
 run_test test_agent_rejects_unknown_hostname
 
 report_tests

@@ -394,6 +394,13 @@ LimitNOFILE=16384
 At N=1000, raise `LimitNOFILE` (each agent holds ~2N sockets) and give
 the matrix file to every host (it's ~N² cells; at 1000 hosts a few MB).
 
+The agent lifts its own **soft** descriptor limit at startup to
+`peers x 2 + 64`, so most fleets need nothing. Where the **hard** limit
+is lower than that it prints the number it needs and where to raise it
+— take that seriously at scale: running out of descriptors is what
+makes a large mesh look half-connected, because `accept()` starts
+failing while everything else keeps running.
+
 ## Testing on one machine
 
 `--map name=addr:port` overrides a host's address, so a whole "fleet"
