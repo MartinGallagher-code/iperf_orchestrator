@@ -224,16 +224,33 @@ test_udp_request_response_mode() {
     # a broken reply path.
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname beta \
         --protocol udp --udp-payload 60 --respond-bytes 500 \
-        --interval 1 --duration 8 --report-dir "$rep" >/dev/null 2>&1 &
+        --interval 1 --duration 8 --report-dir "$rep" > "$TEST_TMPDIR/rrb.out" 2>&1 &
     local bpid=$!
     python3 "$AGENT" run --matrix "$TEST_TMPDIR/matrix.csv" --hostname alpha \
         --protocol udp --udp-payload 60 --respond-bytes 500 \
         --interval 1 --duration 4 --report-dir "$rep" >/dev/null 2>&1
     wait "$bpid" 2>/dev/null
-    local tx; tx=$(grep ",tx," "$rep/alpha_agent.csv" | tail -n 1)
+    # If the responder never came up (a port still held by a previous
+    # test, say), every reply count is legitimately zero -- say so
+    # instead of blaming the reply path.
+    case "$(cat "$TEST_TMPDIR/rrb.out" 2>/dev/null)" in
+        *Traceback*|*"Address already in use"*)
+            echo "responder failed to start:"; cat "$TEST_TMPDIR/rrb.out"; return 1 ;;
+    esac
+    # Assert on the last row that reports a round trip, not on the last
+    # row full stop: the final row sits on the teardown boundary, where
+    # zero replies is honest rather than a fault. The claim under test is
+    # that request/response traffic IS measured, not that the last
+    # partial interval measures it.
+    local tx; tx=$(grep ",tx," "$rep/alpha_agent.csv" | grep "rtt_ms=" | tail -n 1)
+    [ -n "$tx" ] || {
+        echo "no tx row reported a round trip; all rows were:"
+        grep ",tx," "$rep/alpha_agent.csv" || true
+        echo "responder log:"; cat "$TEST_TMPDIR/rrb.out" 2>/dev/null
+        return 1
+    }
     assert_contains "$tx" "pps=" "tx rows carry packet rate" || return 1
     assert_contains "$tx" "resp_pct=" "answered fraction reported" || return 1
-    assert_contains "$tx" "rtt_ms=" "sampled RTT reported" || return 1
     local pct; pct=$(echo "$tx" | grep -o "resp_pct=[0-9.]*" | cut -d= -f2)
     awk -v p="$pct" 'BEGIN { exit !(p >= 50) }' \
         || { echo "resp_pct too low on loopback: $pct"; return 1; }
