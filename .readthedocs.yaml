@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
+#
+# Read the Docs build configuration.
+# Reference: https://docs.readthedocs.io/en/stable/config-file/v2.html
+
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    # The docs toolchain, not the tool's runtime floor: Sphinx 8 needs
+    # 3.11+, while the orchestrator itself still supports 3.6. The two
+    # are unrelated -- nothing in docs/ ships in the wheel.
+    python: "3.12"
+
+sphinx:
+  configuration: docs/conf.py
+  # The pages are assembled from README.md by `include` directives keyed
+  # on <!-- docs:* --> markers. If a marker is renamed or deleted the
+  # include silently yields an empty section, so treat warnings as
+  # errors and let the build fail loudly instead.
+  fail_on_warning: true
+
+python:
+  install:
+    - requirements: docs/requirements.txt
+
+# HTML plus a downloadable zip. No PDF: the LaTeX builder is a second
+# toolchain to keep working for a document nobody asked to print.
+formats:
+  - htmlzip

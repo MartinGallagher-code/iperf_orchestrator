@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Read the Docs integration.** `.readthedocs.yaml` and a Sphinx
+  project under `docs/` publish the documentation as a searchable
+  site. The version number is unchanged: nothing here ships in the
+  wheel, and the tool itself is untouched.
+
+  The site carries no prose of its own. Every page pulls its body out
+  of `README.md` with a MyST `include` directive, sliced on invisible
+  `<!-- docs:* -->` HTML comments above each section, so there is one
+  copy of the text and the site cannot drift from the repository;
+  `CHANGELOG.md` and `PUBLISHING.md` are included whole. `conf.py`
+  scrapes `__version__` with a regex instead of importing the package,
+  which would have dragged numpy and matplotlib into the docs build.
+
+  Two things keep the arrangement from rotting. `tests/test_docs_sources.sh`
+  (8 tests, no Sphinx needed) fails when a README section grows no
+  marker, when a marker reaches no page, when an include names a marker
+  that no longer exists, or when a page is missing from the toctree. A
+  new `docs` CI job builds the site with `-W`, the same fail-on-warning
+  setting Read the Docs uses, so a broken include fails the pull
+  request rather than the post-merge build.
+- A `## Documentation` section in the README covering the marker
+  convention and how to build the site locally.
+
+### Changed
+- The README's `LICENSE` link is now an absolute URL. As a repo-relative
+  link it resolved on GitHub but pointed at nothing once the same text
+  was rendered on the docs site.
+
 ## [2.0.0] - 2026-08-12
 
 ### Removed
