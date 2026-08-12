@@ -3,7 +3,5 @@ include README.md
 include SUMMARY.md
 include REUSE.toml
 include iperf_orchestrator/iperf_orchestrator.sh
-include matrix_agent/fleet.sh
-include matrix_agent/README.md
 recursive-include completions *
 recursive-include LICENSES *

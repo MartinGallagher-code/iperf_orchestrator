@@ -82,7 +82,7 @@ echo "python-compat check: $PYTHON_BIN ($pyver)"
 echo "  embedded blocks: ${#blocks[@]}"
 
 fail=0
-for f in "${blocks[@]}" "$REPO_ROOT"/iperf_orchestrator/*.py "$REPO_ROOT"/matrix_agent/*.py; do
+for f in "${blocks[@]}" "$REPO_ROOT"/iperf_orchestrator/*.py; do
     if "$PYTHON_BIN" -m py_compile "$f" 2>/tmp/pycompat.$$ ; then
         echo "  OK       $(basename "$f")"
     else
@@ -94,7 +94,7 @@ for f in "${blocks[@]}" "$REPO_ROOT"/iperf_orchestrator/*.py "$REPO_ROOT"/matrix
 done
 
 # py_compile leaves __pycache__ next to the package sources; don't dirty the tree.
-rm -rf "$REPO_ROOT/iperf_orchestrator/__pycache__" "$REPO_ROOT/matrix_agent/__pycache__"
+rm -rf "$REPO_ROOT/iperf_orchestrator/__pycache__"
 
 if [ "$fail" -ne 0 ]; then
     echo "python-compat: $fail file(s) failed to compile under $pyver" >&2
