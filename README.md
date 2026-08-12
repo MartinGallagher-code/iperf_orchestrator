@@ -5,13 +5,19 @@
 [![CI](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/MartinGallagher-code/iperf_orchestrator/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![REUSE status](https://api.reuse.software/badge/github.com/MartinGallagher-code/iperf_orchestrator)](https://api.reuse.software/info/github.com/MartinGallagher-code/iperf_orchestrator)
+[![Documentation Status](https://readthedocs.org/projects/iperf-orchestrator/badge/?version=latest)](https://iperf-orchestrator.readthedocs.io/en/latest/)
 
 A bash orchestrator for running full-mesh iperf2 throughput tests across a list of servers, collecting per-host CPU samples during the run, and producing a CSV, pivot table, and heatmap + bar chart visualization of the results.
 
 Built primarily for **network fabric stress testing**: load every link in both directions simultaneously and find out what breaks or degrades. Also useful for one-off "is the network healthy" surveys of a fleet.
 
+<!-- docs:end -->
+
+📖 **Full documentation:** [iperf-orchestrator.readthedocs.io](https://iperf-orchestrator.readthedocs.io/en/latest/) — the same content as this README, split into pages and searchable.
+
 ---
 
+<!-- docs:installation -->
 ## Installation
 
 ### With pip (recommended)
@@ -44,8 +50,10 @@ The analysis steps need Python 3.6+. Only `make-heatmap` needs third-party
 packages (`numpy` and `matplotlib`); `make-pivot`, `parse-cpu`,
 `collect-results` and `results-summary` are stdlib-only. Run `doctor` to check.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:quick-start -->
 ## Quick Start
 
 ```bash
@@ -72,8 +80,10 @@ Results in `./results/<run-id>/`:
 - `iperf_pivot.txt` — text pivot table of throughput
 - `iperf_heatmap.png` — heatmap + sorted bar chart with CPU annotations
 
+<!-- docs:end -->
 ---
 
+<!-- docs:requirements -->
 ## Requirements
 
 ### On the orchestrator host (where you run the script)
@@ -92,8 +102,10 @@ The script's `check-iperf` subcommand verifies both iperf2 and mpstat before you
 ### Why iperf2 and not iperf3
 iperf3's server is single-threaded and accepts only one client at a time. A full mesh of N hosts would need N iperf3 servers per host on different ports just to function, plus a port-assignment scheme, plus N times the firewall holes. iperf2's multi-threaded server handles concurrent clients on a single port — one daemon per host on port 5001 and you're done. iperf2's `--full-duplex` also gives you a true single-socket bidirectional test, which is what fabric stress testing actually wants.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:subcommands -->
 ## Subcommands
 
 Key-based SSH to every host must already be configured (the orchestrator
@@ -190,8 +202,10 @@ Every connection uses `BatchMode=yes`, so any host still requiring a password wi
 
 `--dry-run` prints every SSH/SCP command without executing — useful for inspecting what `all` would do before unleashing it on a fleet. `--verbose` echoes every ssh/scp invocation as it runs; `--quiet` drops normal INFO logs and keeps only WARN/ERROR.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:run-modes -->
 ## Run modes
 
 `run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. The first three modes use canonical-pair generation — each unordered pair `{A, B}` is tested exactly once, with `--full-duplex` measuring both directions concurrently on a single TCP socket. `rolling` is structured differently (see below).
@@ -203,8 +217,10 @@ Every connection uses `BatchMode=yes`, so any host still requiring a password wi
 | `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
 | `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--flows`, independent of fleet size |
 
+<!-- docs:end -->
 ---
 
+<!-- docs:how-it-works -->
 ## How it works
 
 ### Synchronized start (`parallel` mode)
@@ -253,8 +269,10 @@ Cell annotations, axis labels, and figure size adapt to N:
 
 At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts visible as red rows and columns.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:output-schema -->
 ## Output schema
 
 ### `iperf_results.csv` (one row per direction, two per test file)
@@ -295,8 +313,10 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 - A column that's all red → that host has bad inbound
 - The bar chart underneath ranks hosts by mean outgoing Mbps with peak CPU% labeled when available
 
+<!-- docs:end -->
 ---
 
+<!-- docs:run-directories -->
 ## Stateless mode and run directories
 
 There is no state file. Each invocation that produces results creates a fresh `./results/<run-id>/` directory (run-id = timestamp), and `./results/latest` is updated to point at it. Read-side commands (`parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`, `results-summary`) follow `latest` by default, or take `--run-id <id>` to address a specific run. `status` derives state by probing hosts live (running `iperf -v` and `pgrep iperf` on each).
@@ -326,8 +346,10 @@ ls results/
 
 `REMOTE_DIR` (default `/tmp/iperf_orchestrator`) can safely point at a shared filesystem (NFS home, GPFS, etc.). Every remote-side file the orchestrator creates embeds both the sanitized hostname and the run-id, so simultaneous runs (or back-to-back runs sharing the same `REMOTE_DIR`) never overwrite each other. `cleanup` (without `--all`) only removes files matching the active run-id, leaving prior runs untouched.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:design-decisions -->
 ## Design decisions and lessons learned
 
 This section documents *why* the script is shaped the way it is. Most of these were arrived at by hitting a real problem and fixing it.
@@ -364,8 +386,10 @@ The most common surprise on first runs: the heatmap shows a host with low throug
 
 A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100% on core 0. The box-wide CPU looks fine, but RSS is hashing every flow to the same core. This is invisible without per-core data, which is why `mpstat -P ALL` is preferred over the `/proc/stat` fallback.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:limitations -->
 ## Limitations and known gaps
 
 - **No automatic retry on transient SSH failures by default.** If `start-servers` fails on one host, the orchestrator reports it and moves on. Pass `--retries N` to retry each parallel-fan-out worker N extra times with linear back-off, or re-run the subcommand to pick up stragglers.
@@ -376,8 +400,10 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 > **Resolved**: setup/teardown fan-out is now capped-concurrency parallel SSH (see `--jobs`); workers gain optional retries with linear back-off via `--retries`.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:troubleshooting -->
 ## Troubleshooting
 
 **`check-iperf` says `WRONG_VERSION`.** Some distributions ship `iperf` as a symlink to `iperf3`. Verify with `iperf -v` on the host and install the actual iperf2 package (`apt install iperf` on Debian/Ubuntu, where `iperf` is iperf2 and `iperf3` is iperf3).
@@ -394,8 +420,10 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **A run aborted halfway and I want to pick up where it left off.** `./iperf-orchestrator.sh all --resume` consults `~/.iperf_orchestrator/state` and skips the steps already marked done. If the failure was on a single flaky host and you want to barrel past it instead, add `--keep-going`.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:file-layout -->
 ## File layout
 
 ### Local: `<script-dir>/results/<run-id>/`
@@ -435,8 +463,10 @@ cpu_<host>_<run-id>.log
 
 Hostnames are sanitized: `:`, `/`, `[`, `]`, whitespace are replaced with `_` so bracketed-IPv6 names like `[fe80::1]` produce safe filenames. The unsanitized name is preserved inside file headers (`# pair_a=...`, `# host=...`).
 
+<!-- docs:end -->
 ---
 
+<!-- docs:completions -->
 ## Shell completions
 
 Tab-completion stubs for the subcommand and global flags live in `completions/`:
@@ -452,8 +482,10 @@ fpath+=("$PWD/completions")
 autoload -Uz compinit && compinit
 ```
 
+<!-- docs:end -->
 ---
 
+<!-- docs:tests -->
 ## Tests
 
 The repository ships an extensive bash-based test suite under `tests/` covering pair assignment, parallel fan-out, the generated remote run-script, all parsers, the run-tests modes, the `doctor` command, the `--keep-going` semantics on `all`, and a long tail of edge cases.
@@ -463,8 +495,40 @@ The repository ships an extensive bash-based test suite under `tests/` covering 
 ./tests/test_pair_assignment.sh                # one suite
 ```
 
+<!-- docs:end -->
 ---
 
+<!-- docs:documentation -->
+## Documentation
+
+The rendered documentation lives at
+[iperf-orchestrator.readthedocs.io](https://iperf-orchestrator.readthedocs.io/en/latest/)
+and is rebuilt by Read the Docs on every push to `main` (configuration in
+`.readthedocs.yaml`).
+
+The site has no prose of its own. Every page pulls its body straight out of
+this README with a MyST `include` directive, sliced on the invisible
+`<!-- docs:* -->` HTML comments that sit above each section, so there is one
+copy of the text and the site cannot drift from the repository. `CHANGELOG.md`
+and `PUBLISHING.md` are included whole.
+
+To build it locally:
+
+```bash
+pip install -r docs/requirements.txt
+python -m sphinx -b html -W docs docs/_build/html
+```
+
+`-W` matches the `fail_on_warning: true` that Read the Docs and CI both use.
+When you add a section to this README, give it a `<!-- docs:slug -->` marker
+and include the slice from a page under `docs/` — `tests/test_docs_sources.sh`
+fails if you forget, and the docs build fails if a marker an include names
+goes missing.
+
+<!-- docs:end -->
+---
+
+<!-- docs:utility-scripts -->
 ## Utility scripts
 
 `merge.sh` bundles a directory tree into a single text file and `split.sh`
@@ -500,11 +564,13 @@ bundle-controlled strings to a shell.
 
 `bundle.txt` is generated, not committed — rebuild it whenever you need one.
 
+<!-- docs:end -->
 ---
 
+<!-- docs:license -->
 ## License and contribution
 
-This project is licensed under the **GNU General Public License v3.0** (GPL-3.0). See the [LICENSE](LICENSE) file for the full text.
+This project is licensed under the **GNU General Public License v3.0** (GPL-3.0). See the [LICENSE](https://github.com/MartinGallagher-code/iperf_orchestrator/blob/main/LICENSE) file for the full text.
 
 In short: you are free to use, modify, and redistribute this software, but any distributed derivative work must also be licensed under GPL v3 and made available in source form. The software is provided without warranty.
 

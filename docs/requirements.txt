@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Martin J. Gallagher
+#
+# Documentation toolchain only. These are never installed alongside the
+# orchestrator itself: the docs build runs on a modern Python (see
+# .readthedocs.yaml), while the tool keeps its 3.6 floor. Nothing here
+# ends up in the wheel.
+#
+# Pinned to a minor series so a Read the Docs rebuild of an old tag
+# renders the way it did when the tag was cut, while still picking up
+# patch releases.
+sphinx~=8.1
+myst-parser~=4.0
+furo==2024.8.6
+sphinx-copybutton~=0.5

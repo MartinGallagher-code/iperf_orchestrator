@@ -1,0 +1,5 @@
+# Placeholder so git tracks docs/_static/, which conf.py declares in
+# html_static_path. Sphinx warns when the directory is absent, and both
+# CI and Read the Docs build with warnings as errors -- an empty dir
+# would vanish on clone and fail the build. Drop custom CSS or images
+# here; this file can go once there is real content.
