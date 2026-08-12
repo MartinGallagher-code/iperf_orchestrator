@@ -6,7 +6,7 @@ wrapper that puts an ``iperf-orchestrator`` command on your PATH and pulls in
 the Python libraries the analysis steps need.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.6.1"
 
 __all__ = ["__version__", "main"]
 

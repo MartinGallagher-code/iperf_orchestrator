@@ -41,6 +41,7 @@ Python 3.6+, stdlib only.
 
 import argparse
 import csv
+import errno
 import os
 import signal
 import socket
@@ -51,6 +52,7 @@ import threading
 import time
 
 MAGIC = b"MXA1"
+RMAGIC = b"MXR1"              # request/response mode: reply datagrams
 DEFAULT_PORT = 5220
 MAX_CHUNK = 256 * 1024        # TCP write size for high-rate flows
 UDP_PAYLOAD = 1400            # keep under typical 1500 MTU
@@ -196,6 +198,11 @@ class Flow(object):
         self.tuning = tuning
         self.mbps = mbps          # mutable: reload updates it in place
         self.bytes_sent = 0       # cumulative, guarded by lock
+        self.pkts_sent = 0        # UDP: datagrams sent
+        self.resp_pkts = 0        # UDP: reply datagrams received back
+        self.resp_bytes = 0
+        self.rtt_sum = 0.0        # sampled request->reply round trips
+        self.rtt_n = 0
         self.reconnects = 0
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -208,8 +215,12 @@ class Flow(object):
     def _apply_kernel_pacing(self, sock, bps):
         # Best-effort: absent on non-Linux, and harmless to skip because
         # the token bucket below still bounds the average rate.
+        # The kernel takes a u32 of bytes/sec; pack it explicitly. A bare
+        # int above 2**31-1 (rates over ~17 Gbps) makes CPython retry the
+        # argument as a buffer and raise TypeError, killing the flow.
         try:
-            sock.setsockopt(socket.SOL_SOCKET, _SO_MAX_PACING_RATE, int(bps))
+            val = struct.pack("=I", min(int(bps), 0xFFFFFFFF))
+            sock.setsockopt(socket.SOL_SOCKET, _SO_MAX_PACING_RATE, val)
         except OSError:
             pass
 
@@ -237,10 +248,19 @@ class Flow(object):
         state["tokens"] -= nbytes
 
     def _run(self):
-        if self.proto == "udp":
-            self._run_udp()
-        else:
-            self._run_tcp()
+        # A sender thread must never die silently: without this, a bug in
+        # the loop leaves the flow listed at 0 Mbps with the only evidence
+        # buried in a thread traceback.
+        try:
+            if self.proto == "udp":
+                self._run_udp()
+            else:
+                self._run_tcp()
+        except Exception as exc:
+            print("FLOW DIED %s -> %s: %r" % (self.me, self.dst, exc),
+                  file=sys.stderr)
+            sys.stderr.flush()
+            raise
 
     def _open_tcp(self):
         # Manual socket instead of create_connection: TCP_MAXSEG must be
@@ -302,12 +322,35 @@ class Flow(object):
                 self.stop.wait(backoff)
                 backoff = min(backoff * 2, RECONNECT_MAX)
 
+    def _udp_reply_reader(self, sock, pending):
+        # Drains reply datagrams (request/response mode) off the sender's
+        # connected socket: counts them and matches sampled seqs for RTT.
+        while not self.stop.is_set():
+            try:
+                data = sock.recv(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if len(data) < len(RMAGIC) + 8 or not data.startswith(RMAGIC):
+                continue
+            rseq = struct.unpack("!Q", data[4:12])[0]
+            t_now = time.monotonic()
+            with self.lock:
+                self.resp_pkts += 1
+                self.resp_bytes += len(data)
+                t_sent = pending.pop(rseq, None)
+                if t_sent is not None:
+                    self.rtt_sum += t_now - t_sent
+                    self.rtt_n += 1
+
     def _run_udp(self):
         header = MAGIC + struct.pack("!B", len(self.me)) + self.me.encode()
         # Honor --udp-payload, but never below what the header needs.
         want = self.tuning["udp_payload"] or UDP_PAYLOAD
         pad = b"\x00" * max(0, want - len(header) - 8)
         seq = 0
+        pending = {}   # sampled seq -> send time, shared with reply reader
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             if self.tuning["sndbuf"]:
@@ -319,6 +362,9 @@ class Flow(object):
             if self.tuning["bind_ip"]:
                 sock.bind((self.tuning["bind_ip"], 0))
             sock.connect((self.addr, self.port))
+            sock.settimeout(1)
+            threading.Thread(target=self._udp_reply_reader, daemon=True,
+                             args=(sock, pending)).start()
             state = {"tokens": 0.0, "last": time.monotonic()}
             cur_mbps = self.mbps
             bps = cur_mbps * 125000.0
@@ -336,9 +382,15 @@ class Flow(object):
                 except OSError:
                     self.stop.wait(0.5)
                     continue
-                seq += 1
                 with self.lock:
                     self.bytes_sent += size
+                    self.pkts_sent += 1
+                    # RTT sampling: every 64th request, bounded memory.
+                    if seq % 64 == 0:
+                        if len(pending) > 256:
+                            pending.clear()
+                        pending[seq] = time.monotonic()
+                seq += 1
         finally:
             sock.close()
 
@@ -414,20 +466,41 @@ def tcp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     srv.bind((bind_ip, port))
     srv.listen(1024)
     srv.settimeout(1)
+    warned = False
     while not stop.is_set():
         try:
             conn, addr = srv.accept()
         except socket.timeout:
             continue
-        except OSError:
-            break
+        except OSError as exc:
+            # Running out of file descriptors is TRANSIENT: an agent
+            # holds ~2N of them, so a big matrix can hit the soft limit
+            # mid-accept. Treating it as fatal used to end the accept
+            # loop for the rest of the run -- every peer that had not
+            # connected yet was locked out permanently, and the mesh
+            # looked half-connected with no error anywhere. Keep
+            # accepting; the senders retry with backoff, so the mesh
+            # heals once descriptors free up.
+            if exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS,
+                             errno.ENOMEM, errno.ECONNABORTED, errno.EINTR,
+                             errno.EAGAIN):
+                if not warned:
+                    warned = True
+                    print("accept: %s -- out of descriptors or interrupted; "
+                          "still listening. Raise `ulimit -n` (an agent needs "
+                          "~2 per peer) if peers stay low." % exc,
+                          file=sys.stderr)
+                    sys.stderr.flush()
+                time.sleep(0.05)      # don't spin while the pressure lasts
+                continue
+            break                     # socket really is gone
         t = threading.Thread(target=_tcp_conn_reader, daemon=True,
                              args=(conn, addr, book, stop))
         t.start()
     srv.close()
 
 
-def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
+def udp_listener(port, book, stop, rcvbuf=0, bind_ip="", respond=0):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -438,9 +511,12 @@ def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
     sock.bind((bind_ip, port))
     sock.settimeout(1)
     hlen = len(MAGIC) + 1
+    # Request/response mode: every request gets a reply of `respond`
+    # bytes carrying the request's seq, straight back to the source.
+    reply_pad = b"\x00" * max(0, respond - len(RMAGIC) - 8)
     while not stop.is_set():
         try:
-            data, _ = sock.recvfrom(65535)
+            data, addr = sock.recvfrom(65535)
         except socket.timeout:
             continue
         except OSError:
@@ -451,8 +527,14 @@ def udp_listener(port, book, stop, rcvbuf=0, bind_ip=""):
         if len(data) < hlen + nlen + 8:
             continue
         name = data[hlen:hlen + nlen].decode(errors="replace")
-        seq = struct.unpack("!Q", data[hlen + nlen:hlen + nlen + 8])[0]
+        seq_raw = data[hlen + nlen:hlen + nlen + 8]
+        seq = struct.unpack("!Q", seq_raw)[0]
         book.account(name, len(data), seq)
+        if respond:
+            try:
+                sock.sendto(RMAGIC + seq_raw + reply_pad, addr)
+            except OSError:
+                pass
     sock.close()
 
 
@@ -467,8 +549,10 @@ class Reporter(object):
     FIELDS = ["ts", "host", "dir", "peer", "proto",
               "target_mbps", "achieved_mbps", "bytes", "extra"]
 
-    def __init__(self, me, path, interval, flows, book, rx_targets, proto):
+    def __init__(self, me, path, interval, flows, book, rx_targets, proto,
+                 respond=0):
         self.me, self.interval, self.proto = me, interval, proto
+        self.respond = respond
         self.flows, self.book, self.rx_targets = flows, book, rx_targets
         self.prev_tx = {}
         self.prev_rx = {}
@@ -480,26 +564,56 @@ class Reporter(object):
             self.csv.writerow(self.FIELDS)
 
     def tick(self):
-        now = int(time.time())
         # Rate over the *actual* elapsed time, not the nominal interval,
         # so the final partial tick and any scheduling drift stay honest.
         mono = time.monotonic()
-        elapsed = max(mono - self.last_tick, 1e-3)
+        elapsed = mono - self.last_tick
+        # ...but refuse to divide by a sliver. A tick this close on the
+        # heels of the last one measures scheduling noise, not traffic:
+        # bytes already sitting in socket buffers get accounted in a
+        # millisecond-wide window and come out as hundreds of Gbps. Drop
+        # the sample and let the next one cover the whole span.
+        if elapsed < self.interval * 0.1:
+            return False
         self.last_tick = mono
+        now = int(time.time())
         tx_sum = tx_target = 0.0
+        tx_pps = reply_pps = reply_mbps = 0.0
         for fl in self.flows:
             with fl.lock:
                 total, rec = fl.bytes_sent, fl.reconnects
-            prev = self.prev_tx.get(fl.dst, 0)
-            self.prev_tx[fl.dst] = total
-            mbps = (total - prev) * 8.0 / elapsed / 1e6
+                pkts, rpk = fl.pkts_sent, fl.resp_pkts
+                rbytes = fl.resp_bytes
+                rtt_s, rtt_n = fl.rtt_sum, fl.rtt_n
+            prev = self.prev_tx.get(fl.dst, (0, 0, 0, 0.0, 0, 0))
+            self.prev_tx[fl.dst] = (total, pkts, rpk, rtt_s, rtt_n, rbytes)
+            mbps = (total - prev[0]) * 8.0 / elapsed / 1e6
             tx_sum += mbps
             tx_target += fl.mbps
+            if self.proto == "udp":
+                dpkts = pkts - prev[1]
+                tx_pps += dpkts / elapsed
+                extra = "pps=%d" % (dpkts / elapsed)
+                drpk = rpk - prev[2]
+                if drpk or self.respond:
+                    reply_pps += drpk / elapsed
+                    reply_mbps += (rbytes - prev[5]) * 8.0 / elapsed / 1e6
+                    extra += " rpps=%d resp_pct=%.1f resp_mbps=%.3f" % (
+                        drpk / elapsed,
+                        min(100.0, drpk / dpkts * 100) if dpkts else 0.0,
+                        (rbytes - prev[5]) * 8.0 / elapsed / 1e6)
+                    drtt_n = rtt_n - prev[4]
+                    if drtt_n:
+                        extra += " rtt_ms=%.3f" % (
+                            (rtt_s - prev[3]) / drtt_n * 1000)
+            else:
+                extra = "reconnects=%d" % rec
             self.csv.writerow([now, self.me, "tx", fl.dst, self.proto,
                                "%.3f" % fl.mbps, "%.3f" % mbps,
-                               total - prev, "reconnects=%d" % rec])
+                               total - prev[0], extra])
 
         rx_sum = rx_target = 0.0
+        rx_pps = 0.0
         snap = self.book.snapshot()
         for peer, cur in sorted(snap.items()):
             prev = self.prev_rx.get(peer, {"bytes": 0, "pkts": 0, "max_seq": -1})
@@ -512,21 +626,68 @@ class Reporter(object):
             extra = ""
             if self.proto == "udp" and cur["max_seq"] >= 0:
                 dpkts = cur["pkts"] - prev["pkts"]
+                rx_pps += dpkts / elapsed
+                extra = "pps=%d" % (dpkts / elapsed)
                 dseq = cur["max_seq"] - prev["max_seq"]
                 if dseq > 0:
-                    extra = "loss_pct=%.2f" % (max(0.0, 1.0 - dpkts / dseq) * 100)
+                    extra += " loss_pct=%.2f" % (max(0.0, 1.0 - dpkts / dseq) * 100)
             self.csv.writerow([now, self.me, "rx", peer, self.proto,
                                "%.3f" % target, "%.3f" % mbps, dbytes, extra])
         self.fh.flush()
-        print("ts=%d tx=%.1f/%.1fMbps rx=%.1f/%.1fMbps flows=%d peers=%d"
-              % (now, tx_sum, tx_target, rx_sum, rx_target,
-                 len(self.flows), len(snap)))
+        # Throughput and packet rate together: "is it fast" and "is it
+        # busy" are different questions, and a small-packet workload can
+        # be pinned on one while idle on the other.
+        line = ("ts=%d tx=%.1f/%.1fMbps rx=%.1f/%.1fMbps"
+                % (now, tx_sum, tx_target, rx_sum, rx_target))
+        if self.proto == "udp":
+            line += " tx=%dpkt/s rx=%dpkt/s" % (tx_pps, rx_pps)
+            if self.respond:
+                line += " reply=%dpkt/s/%.1fMbps" % (reply_pps, reply_mbps)
+                line += " total=%dpkt/s/%.1fMbps" % (rx_pps + reply_pps,
+                                                     rx_sum + reply_mbps)
+        line += " flows=%d peers=%d" % (len(self.flows), len(snap))
+        print(line)
         sys.stdout.flush()
+        return True
 
 
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+
+def _raise_fd_limit(peers):
+    """Lift RLIMIT_NOFILE toward the hard limit for an N-host matrix.
+
+    An agent holds roughly two descriptors per peer -- one outbound flow
+    and one accepted connection -- plus the listeners and report files.
+    Distributions still ship a 1024 soft limit, which a few hundred
+    hosts blows straight through; accept() then fails and peers go
+    missing with nothing obvious in the logs. Raising the SOFT limit
+    needs no privileges (the hard limit is usually far higher), so do it
+    rather than make every operator discover ulimit the hard way.
+    """
+    need = peers * 2 + 64
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, OSError, ValueError):
+        return
+    if soft >= need:
+        return
+    want = need if hard == resource.RLIM_INFINITY else min(need, hard)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (OSError, ValueError):
+        want = soft
+    if want >= need:
+        print("raised open-file limit %d -> %d for %d peers" % (soft, want, peers))
+    else:
+        print("WARNING: open-file limit is %d but this matrix needs ~%d "
+              "(%d peers x 2 + overhead). Peers will go missing as accept() "
+              "runs out of descriptors. Raise the hard limit: "
+              "LimitNOFILE under systemd, or /etc/security/limits.conf."
+              % (want, need, peers), file=sys.stderr)
+
 
 def cmd_run(args):
     try:
@@ -537,6 +698,38 @@ def cmd_run(args):
     hosts, endpoints, rates = load_matrix(args.matrix, args.map)
     me = resolve_self(hosts, endpoints, args.hostname)
     port = endpoints[me][1]
+
+    # Sharding: one Python process is GIL-bound at roughly 100-250k
+    # packets/sec however many sender threads it runs, so high packet
+    # rates need several processes per host. Shard i runs the WHOLE mesh
+    # at 1/shards of every cell's rate, on its own port (base + i), and
+    # talks only to shard i of each peer. That scales both directions --
+    # sharding by peer instead would funnel all of a host's inbound into
+    # one process -- and keeps every shard a plain, complete agent.
+    if not 0 <= args.shard < args.shards:
+        raise SystemExit("--shard must be in [0, --shards)")
+    if args.shards > 1:
+        # Shards occupy ports base..base+shards-1, so two matrix hosts on
+        # the same address must be at least --shards apart or their
+        # ranges overlap. That failure is baffling in the wild -- a
+        # host's shard silently answers traffic meant for its neighbour,
+        # and reports show a host receiving from itself -- so refuse.
+        by_addr = {}
+        for n, (a, p) in endpoints.items():
+            by_addr.setdefault(a, []).append((p, n))
+        for a, lst in sorted(by_addr.items()):
+            lst.sort()
+            for (p1, n1), (p2, n2) in zip(lst, lst[1:]):
+                if p2 - p1 < args.shards:
+                    raise SystemExit(
+                        "--shards %d needs %d consecutive ports per host, but "
+                        "%s (%s:%d) and %s (%s:%d) are only %d apart; space "
+                        "the matrix ports out or use fewer shards"
+                        % (args.shards, args.shards, n1, a, p1, n2, a, p2,
+                           p2 - p1))
+        port += args.shard
+        rates = {k: v / float(args.shards) for k, v in rates.items()}
+        endpoints = {n: (a, p + args.shard) for n, (a, p) in endpoints.items()}
 
     bind_ip = ""
     if args.bind:
@@ -563,7 +756,8 @@ def cmd_run(args):
         threading.Thread(target=tcp_listener, daemon=True,
                          args=(port, book, stop, args.rcvbuf, bind_ip)).start()
         threading.Thread(target=udp_listener, daemon=True,
-                         args=(port, book, stop, args.rcvbuf, bind_ip)).start()
+                         args=(port, book, stop, args.rcvbuf, bind_ip,
+                               args.respond_bytes)).start()
 
     flows = []
     if not args.no_send:
@@ -576,14 +770,32 @@ def cmd_run(args):
             fl.start()
 
     rx_targets = {src: mbps for (src, dst), mbps in rates.items() if dst == me}
+    _raise_fd_limit(max(len(flows), len(rx_targets)))
 
     os.makedirs(args.report_dir, exist_ok=True)
-    report_path = os.path.join(args.report_dir, "%s_agent.csv" % me)
+    # Each shard writes its own file so they cannot clobber each other,
+    # but the `host` column stays the real host name -- summarize keys on
+    # that column, not the filename, and sums same-timestamp rows across
+    # shards back into one host.
+    suffix = "" if args.shards == 1 else ".s%d" % args.shard
+    report_path = os.path.join(args.report_dir, "%s%s_agent.csv" % (me, suffix))
     rep = Reporter(me, report_path, args.interval, flows, book,
-                   rx_targets, args.protocol)
+                   rx_targets, args.protocol, args.respond_bytes)
 
-    print("matrix_agent: host=%s port=%d proto=%s tx_flows=%d expected_rx_peers=%d report=%s"
-          % (me, port, args.protocol, len(flows), len(rx_targets), report_path))
+    if args.respond_bytes and not bind_ip:
+        # The listener is on 0.0.0.0, so the kernel picks each reply's
+        # source address by route. On a multi-homed host that can differ
+        # from the address the requester connected to, and a connected
+        # UDP socket silently drops those replies -- reply=0pkt/s with
+        # everything else healthy. --bind pins the listener and removes
+        # the ambiguity.
+        print("note: --respond-bytes without --bind; on a multi-homed host "
+              "replies may leave by a different address than requests "
+              "arrived on and be dropped. Pass --bind <nic> if reply=0.")
+    print("matrix_agent: host=%s shard=%d/%d port=%d proto=%s tx_flows=%d "
+          "expected_rx_peers=%d report=%s"
+          % (me, args.shard, args.shards, port, args.protocol, len(flows),
+             len(rx_targets), report_path))
     sys.stdout.flush()
 
     deadline = time.monotonic() + args.duration if args.duration > 0 else None
@@ -597,6 +809,12 @@ def cmd_run(args):
             except SystemExit as exc:
                 print("reload failed: %s" % exc, file=sys.stderr)
             else:
+                # Reloaded cells are whole-host rates; this process only
+                # carries its 1/shards slice, so divide again or a reload
+                # would silently multiply the fleet's load by --shards.
+                if args.shards > 1:
+                    new_rates = {k: v / float(args.shards)
+                                 for k, v in new_rates.items()}
                 by_dst = {fl.dst: fl for fl in flows}
                 for (src, dst), mbps in new_rates.items():
                     if src == me and dst in by_dst:
@@ -607,6 +825,15 @@ def cmd_run(args):
         if time.monotonic() >= next_tick:
             rep.tick()
             next_tick += args.interval
+            # If the reporter fell behind -- a starved thread at high flow
+            # counts, a stalled disk, a suspended process -- advancing by
+            # one interval leaves next_tick in the past, and the loop then
+            # fires every missed slot back to back. Skip the missed slots
+            # instead: those catch-up ticks would each divide a real byte
+            # delta by a near-zero window and print impossible rates.
+            behind = time.monotonic()
+            if next_tick <= behind:
+                next_tick = behind + args.interval
         if deadline is not None and time.monotonic() >= deadline:
             stop.set()
 
@@ -631,6 +858,24 @@ def cmd_gen(args):
     n = len(hosts)
     if args.rate_mbps is not None:
         rate = args.rate_mbps
+    elif args.pps is not None:
+        # A datagram cannot be smaller than its own framing: MAGIC(4) +
+        # a name-length byte + the host name + an 8-byte sequence. Below
+        # that the agent pads up to the floor, so budgeting the smaller
+        # size would pace the flow in bytes for packets that are bigger
+        # than assumed -- and quietly deliver proportionally fewer of
+        # them (asking 20000 pps at 8 bytes yields ~10666). Size the
+        # cell from what will actually go on the wire.
+        floor = 13 + max(len(parse_token(h)[0]) for h in hosts)
+        payload = max(args.payload, floor)
+        if payload != args.payload:
+            print("note: %dB payload is below this matrix's %dB framing "
+                  "floor (header + longest host name + sequence); sizing "
+                  "cells for %dB so the packet rate is actually met"
+                  % (args.payload, floor, payload))
+        rate = args.pps * payload * 8.0 / 1e6
+        print("pps target: %d pkts/s x %dB per flow = %.3f Mbps per cell"
+              % (args.pps, payload, rate))
     else:
         rate = args.egress_gbps * 1000.0 / (n - 1)
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
@@ -750,45 +995,210 @@ def _write_grid_outputs(gdir, agg, protos, latest, window):
     print("  iperf-orchestrator -o '%s' --run-id '%s' make-heatmap" % (parent, base))
 
 
+def _read_report(path, tail_bytes):
+    """Rows from one report CSV, optionally only its tail.
+
+    Reports append forever, but a summary only ever uses the last
+    --window seconds, so parsing from byte zero makes each summary
+    slower than the one before it. With tail_bytes > 0 we seek instead.
+    Binary mode is deliberate: seeking a text stream to an arbitrary
+    offset is not supported. The read starts mid-row, so the first
+    (partial) line is discarded -- which is why the header is read
+    separately and supplied as field names.
+    """
+    with open(path, "rb") as f:
+        header = f.readline()
+        if not header.strip():
+            return [], False
+        truncated = False
+        if tail_bytes > 0:
+            f.seek(0, 2)
+            end = f.tell()
+            if end - len(header) > tail_bytes:
+                f.seek(end - tail_bytes)
+                f.readline()
+                truncated = True
+            else:
+                f.seek(len(header))
+        data = f.read()
+    names = header.decode("utf-8", "replace").rstrip("\r\n").split(",")
+    text = data.decode("utf-8", "replace").splitlines()
+    return list(csv.DictReader(text, fieldnames=names)), truncated
+
+
+_SUM_KEYS = ("pps", "rpps", "resp_mbps")        # rates: shards add up
+_AVG_KEYS = ("loss_pct", "resp_pct", "rtt_ms")   # ratios/latency: they don't
+
+
+def _combine_shards(per_src):
+    """Collapse {(host, peer, src): [sum, ..., n]} to {(host, peer): ...}.
+
+    Several agent processes on a host each carry a slice of every cell
+    and each write their own report. They tick on independent clocks, so
+    their rows almost never share a timestamp and cannot be matched up
+    pair-by-pair. What is well defined is each process's *mean over the
+    window*; those means are concurrent slices of one flow, so they sum.
+
+    Time-averaging first and summing second is the only order that is
+    right for both axes: repeated samples average, parallel shards add.
+    With one report per host this is exactly the old behaviour.
+    """
+    out = {}
+    for (host, peer, _src), v in per_src.items():
+        o = out.setdefault((host, peer), [0.0, 0.0, 1])
+        o[0] += v[0] / v[2]
+        o[1] += v[1] / v[2]
+    return out
+
+
 def cmd_summarize(args):
     rows = []
+    truncated = []
+    tail_bytes = getattr(args, "tail_bytes", 0)
     for path in args.reports:
-        with open(path, newline="") as f:
-            for r in csv.DictReader(f):
-                rows.append(r)
+        got, cut = _read_report(path, tail_bytes)
+        for r in got:
+            r["_src"] = path
+        rows.extend(got)
+        if cut and got:
+            truncated.append(min(int(r["ts"]) for r in got))
     if not rows:
         raise SystemExit("no report rows found")
     latest = max(int(r["ts"]) for r in rows)
     cutoff = latest - args.window
+    # A tail that starts after the cutoff means the window is wider than
+    # the bytes we read, so the summary would silently cover less time
+    # than asked for. Say so rather than under-report.
+    if truncated and max(truncated) > cutoff:
+        sys.stderr.write(
+            "warning: --tail-bytes %d covers only %ds of the requested %ds "
+            "window; raise it (or use 0) for the full window\n"
+            % (tail_bytes, max(1, latest - max(truncated)), args.window))
+
+    def _kv(extra):
+        d = {}
+        for part in (extra or "").split():
+            if "=" in part:
+                k, _, v = part.partition("=")
+                try:
+                    d[k] = float(v)
+                except ValueError:
+                    pass
+        return d
+
     recent = [r for r in rows if int(r["ts"]) >= cutoff and r["dir"] == "rx"]
-    agg = {}     # (host, peer) -> [sum_target, sum_achieved, n]
+    # Keyed by report file as well as by pair: one file is one agent
+    # process, and shards must be time-averaged separately before their
+    # means are added together (see _combine_shards).
+    agg = {}     # (host, peer, src) -> [sum_target, sum_achieved, n]
     protos = {}  # (src, dst) -> proto
+    rx_pps = {}  # (host, peer, src) -> [sum_pps, n]
     for r in recent:
-        key = (r["host"], r["peer"])
+        key = (r["host"], r["peer"], r.get("_src", ""))
         a = agg.setdefault(key, [0.0, 0.0, 0])
         a[0] += float(r["target_mbps"])
         a[1] += float(r["achieved_mbps"])
         a[2] += 1
         protos[(r["peer"], r["host"])] = r.get("proto", "tcp")
+        kv = _kv(r.get("extra"))
+        if "pps" in kv:
+            p = rx_pps.setdefault(key, [0.0, 0])
+            p[0] += kv["pps"]
+            p[1] += 1
+    agg = _combine_shards(agg)
+    # Same treatment for packet rates: mean per process, then summed.
+    _pp = {}
+    for (h, pr, _src), v in rx_pps.items():
+        _pp[(h, pr)] = [_pp.get((h, pr), [0.0, 1])[0] + v[0] / v[1], 1]
+    rx_pps = _pp
+    # Sender-side transactional stats (request/response mode) live on tx
+    # rows: offered pps, fraction answered, sampled RTT.
+    txagg = {}   # (src, dst) -> {"pps": [s,n], "resp_pct": [s,n], "rtt_ms": [s,n]}
+    for r in rows:
+        if int(r["ts"]) < cutoff or r["dir"] != "tx":
+            continue
+        kv = _kv(r.get("extra"))
+        if not kv:
+            continue
+        slot = txagg.setdefault((r["host"], r["peer"], r.get("_src", "")), {})
+        for k in ("pps", "rpps", "resp_pct", "resp_mbps", "rtt_ms"):
+            if k in kv:
+                s = slot.setdefault(k, [0.0, 0])
+                s[0] += kv[k]
+                s[1] += 1
+
+    # Collapse shards: each process's mean over the window, then summed
+    # for rates and averaged for ratios and latencies.
+    _tx = {}
+    for (h, pr, _src), slot in txagg.items():
+        tgt = _tx.setdefault((h, pr), {})
+        for k, v in slot.items():
+            mean = v[0] / v[1]
+            if k in _AVG_KEYS:
+                cur = tgt.get(k, [0.0, 0])
+                tgt[k] = [cur[0] + mean, cur[1] + 1]
+            else:
+                cur = tgt.get(k, [0.0, 1])
+                tgt[k] = [cur[0] + mean, 1]
+    txagg = _tx
+
+    def _txmean(src, dst, key):
+        s = txagg.get((src, dst), {}).get(key)
+        return s[0] / s[1] if s else None
     tt = sum(a[0] / a[2] for a in agg.values())
     ta = sum(a[1] / a[2] for a in agg.values())
     print("window: last %ds (%d samples, %d flows)"
           % (args.window, len(recent), len(agg)))
     print("aggregate rx: %.1f / %.1f Mbps (%.1f%% of target)"
           % (ta, tt, (ta / tt * 100) if tt else 0.0))
+    # Packet accounting (UDP): requests and replies each count as packets.
+    req_offered = sum(s["pps"][0] / s["pps"][1]
+                      for s in txagg.values() if "pps" in s)
+    req_delivered = sum(p[0] / p[1] for p in rx_pps.values())
+    replies = sum(s["rpps"][0] / s["rpps"][1]
+                  for s in txagg.values() if "rpps" in s)
+    if req_offered or req_delivered:
+        line = ("packets: requests %d/s offered, %d/s delivered"
+                % (req_offered, req_delivered))
+        resp_slots = [s for s in txagg.values() if "resp_pct" in s]
+        if resp_slots or replies:
+            resp_avg = (sum(s["resp_pct"][0] / s["resp_pct"][1]
+                            for s in resp_slots) / len(resp_slots)
+                        if resp_slots else 0.0)
+            rtt_slots = [s for s in txagg.values() if "rtt_ms" in s]
+            rtt_txt = (", rtt ~%.3f ms" % (sum(s["rtt_ms"][0] / s["rtt_ms"][1]
+                                               for s in rtt_slots) / len(rtt_slots))
+                       if rtt_slots else "")
+            reply_mbps = sum(s["resp_mbps"][0] / s["resp_mbps"][1]
+                             for s in txagg.values() if "resp_mbps" in s)
+            line += ("; replies %d/s / %.1f Mbps returned (%.1f%% answered%s)"
+                     % (replies, reply_mbps, resp_avg, rtt_txt))
+            line += ("; total delivered %d pkts/s, %.1f Mbps"
+                     % (req_delivered + replies, ta + reply_mbps))
+        print(line)
     # Per-host totals, receiver-side truth for both directions: a host's
     # "in" sums its own rx rows, its "out" sums every peer's rx rows for
     # flows it sent. Worst-first separates one sick host from congested
     # fabric at a glance.
-    per_host = {}   # h -> [in_target, in_achieved, out_target, out_achieved]
+    # h -> [in_target, in_achieved, out_target, out_achieved, n_in, n_out]
+    per_host = {}
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
-        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0])
+        # Packets are receiver-side too (UDP only -- TCP has no datagram
+        # to count), so one host's inbound rate and its peer's outbound
+        # rate come from the same rows.
+        pv = rx_pps.get((host, peer))
+        pps = pv[0] / pv[1] if pv else 0.0
+        hs = per_host.setdefault(host, [0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0.0])
         hs[0] += t
         hs[1] += ach
-        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0])
+        hs[4] += 1
+        hs[6] += pps
+        ps = per_host.setdefault(peer, [0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0.0])
         ps[2] += t
         ps[3] += ach
+        ps[5] += 1
+        ps[7] += pps
 
     def _frac(ach, t):
         return ach / t if t else 1.0
@@ -796,13 +1206,48 @@ def cmd_summarize(args):
     ranked = sorted(per_host.items(),
                     key=lambda kv: min(_frac(kv[1][1], kv[1][0]),
                                        _frac(kv[1][3], kv[1][2])))
-    print("per host (rx in / tx out, achieved/target Mbps, worst first):")
-    for h, (it, ia, ot, oa) in ranked[:args.top_hosts]:
-        print("  %-24s in %8.1f/%-8.1f (%3.0f%%)   out %8.1f/%-8.1f (%3.0f%%)"
-              % (h, ia, it, _frac(ia, it) * 100, oa, ot, _frac(oa, ot) * 100))
+    reporting = set(r["host"] for r in recent)
+    # Packet columns only exist in UDP mode; TCP has no datagram to count,
+    # and printing an empty column would read as "zero packets".
+    show_pps = any(v[6] or v[7] for v in per_host.values())
+    print("per host (rx in / tx out, achieved/target Mbps, [peers counted]%s, "
+          "worst first; %d of %d hosts reporting):"
+          % (", pkt/s in|out" if show_pps else "",
+             len(reporting), len(per_host)))
+    def _pct(ach, t):
+        # A zero target means no rows, not a healthy 100%.
+        return "n/a" if not t else "%3.0f%%" % (_frac(ach, t) * 100)
+    for h, (it, ia, ot, oa, nin, nout, ipps, opps) in ranked[:args.top_hosts]:
+        line = ("  %-24s in %8.1f/%-8.1f (%4s) [%d]   out %8.1f/%-8.1f (%4s) [%d]"
+                % (h, ia, it, _pct(ia, it), nin, oa, ot, _pct(oa, ot), nout))
+        if show_pps:
+            line += "   %9d|%-9d pkt/s" % (ipps, opps)
+        print(line)
     if len(ranked) > args.top_hosts:
         print("  ... %d more hosts (raise --top-hosts)"
               % (len(ranked) - args.top_hosts))
+    # "in" is a host's own rx rows -- its matrix column, always complete.
+    # "out" is assembled from its *receivers'* rx rows, so it is only as
+    # complete as the set of reports collected. Unequal in/out targets
+    # are therefore either an asymmetric matrix or a coverage problem,
+    # and the two look identical unless we say which hosts are missing.
+    silent = sorted(set(per_host) - reporting)
+    if silent:
+        print("  note: %d host(s) named as senders never reported (%s%s) -- "
+              "they have no 'in' row, and every host they send to has an "
+              "'out' target short by those flows."
+              % (len(silent), ", ".join(silent[:6]),
+                 ", ..." if len(silent) > 6 else ""))
+    elif [h for h, v in per_host.items()
+          if abs(v[0] - v[2]) > 0.01 * max(v[0], v[2], 1.0)]:
+        # Every report is present, so a target mismatch is about the
+        # matrix, not coverage -- worth naming, because the two causes
+        # look identical in the table.
+        print("  note: some hosts' in and out targets differ. 'in' is the "
+              "host's matrix column; 'out' is its matrix row as seen by its "
+              "receivers. Expected for an asymmetric matrix -- otherwise "
+              "agents are running different matrix versions, or stale "
+              "*_agent.csv are being globbed from the reports directory.")
     deficits = []
     for (host, peer), a in agg.items():
         t, ach = a[0] / a[2], a[1] / a[2]
@@ -812,8 +1257,15 @@ def cmd_summarize(args):
     if deficits:
         print("worst flows (achieved/target):")
         for frac, host, peer, t, ach in deficits[:args.top]:
-            print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)"
-                  % (peer, host, ach, t, frac * 100))
+            note = ""
+            resp = _txmean(peer, host, "resp_pct")
+            if resp is not None:
+                note += "  resp=%.1f%%" % resp
+            rtt = _txmean(peer, host, "rtt_ms")
+            if rtt is not None:
+                note += " rtt=%.3fms" % rtt
+            print("  %s -> %s: %.1f / %.1f Mbps (%.0f%%)%s"
+                  % (peer, host, ach, t, frac * 100, note))
     if args.grid:
         if not agg:
             raise SystemExit("--grid: no rx rows inside the window")
@@ -832,6 +1284,12 @@ def main(argv=None):
     rate.add_argument("--rate-mbps", type=float, help="Mbps for every pair")
     rate.add_argument("--egress-gbps", type=float,
                       help="per-host total egress, split evenly across peers")
+    rate.add_argument("--pps", type=float,
+                      help="packets/sec for every pair; rate is computed from "
+                           "--payload (run the agents with the same "
+                           "--udp-payload to hit this packet rate)")
+    g.add_argument("--payload", type=int, default=UDP_PAYLOAD, metavar="BYTES",
+                   help="datagram size the --pps math assumes (default %d)" % UDP_PAYLOAD)
     g.add_argument("--output", "-o", default="-", help="output file (default stdout)")
 
     c = sub.add_parser("check", help="admissibility check")
@@ -845,12 +1303,24 @@ def main(argv=None):
     r.add_argument("--protocol", choices=["tcp", "udp"], default="tcp")
     r.add_argument("--interval", type=float, default=10.0, help="report interval seconds")
     r.add_argument("--report-dir", default="reports")
+    r.add_argument("--shards", type=int, default=1, metavar="N",
+                   help="run as one of N processes on this host, to get "
+                        "past the GIL ceiling (~100-250k pkt/s per "
+                        "process). Each shard carries 1/N of every cell "
+                        "on port base+shard")
+    r.add_argument("--shard", type=int, default=0, metavar="I",
+                   help="which shard this process is, 0-based")
     r.add_argument("--duration", type=float, default=0.0,
                    help="exit after N seconds (0 = run until signalled)")
     r.add_argument("--no-send", action="store_true", help="receiver only")
     r.add_argument("--no-recv", action="store_true", help="sender only")
     r.add_argument("--map", action="append", default=[], metavar="NAME=ADDR[:PORT]",
                    help="override a host's address (repeatable; for testing)")
+    r.add_argument("--respond-bytes", type=int, default=0, metavar="BYTES",
+                   help="request/response mode (UDP): reply to every received "
+                        "request datagram with a BYTES-sized response; the "
+                        "requester side then reports resp_pct and sampled "
+                        "rtt_ms per flow (default: no replies)")
     r.add_argument("--udp-payload", type=int, default=UDP_PAYLOAD, metavar="BYTES",
                    help="UDP datagram size (default %d; >MTU exercises fragmentation)" % UDP_PAYLOAD)
     r.add_argument("--chunk-bytes", type=int, default=0, metavar="BYTES",
@@ -878,6 +1348,11 @@ def main(argv=None):
     s.add_argument("--top", type=int, default=10, help="worst flows to list")
     s.add_argument("--top-hosts", type=int, default=10,
                    help="hosts to list in the per-host table (worst first)")
+    s.add_argument("--tail-bytes", type=int, default=0, metavar="N",
+                   help="read only the last N bytes of each report instead "
+                        "of the whole file; reports grow for the life of the "
+                        "run but only --window seconds are used (0 = whole "
+                        "file)")
     s.add_argument("--grid", metavar="DIR",
                    help="also write achieved/deficit N x N grid CSVs and an "
                         "orchestrator-compatible iperf_results.csv into DIR, "
