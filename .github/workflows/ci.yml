@@ -61,7 +61,7 @@ jobs:
           python -m pip install --upgrade vermin
           ./tests/check_python_compat.sh --extract-to "$RUNNER_TEMP/pyblocks"
           vermin --eval-annotations --violations --target=3.6 \
-            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py matrix_agent/*.py
+            "$RUNNER_TEMP/pyblocks"/*.py iperf_orchestrator/*.py
 
       # GitHub's hosted runners no longer offer a 3.6 toolchain (it only ever
       # shipped for the retired ubuntu-20.04 image), so use the container
@@ -86,11 +86,4 @@ jobs:
               pip install --no-deps dist/*.whl
               iperf-orchestrator --version
               python -m iperf_orchestrator --version
-              # The matrix tooling must work out of the box from the wheel:
-              # the pass-through finds site-packages/matrix_agent/fleet.sh,
-              # and the matrix-agent console script runs on 3.6.
-              iperf-orchestrator matrix --help | grep -q fleet.sh
-              matrix-agent --help >/dev/null
-              matrix-agent gen --hosts <(printf "a\nb\n") --rate-mbps 5 -o /tmp/m.csv
-              matrix-agent check --matrix /tmp/m.csv --egress-gbps 1
             '

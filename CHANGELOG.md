@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-12
+
+### Removed
+- **The matrix agent has moved to its own repository and tool.** The
+  sustained-load emulator (`matrix_agent/matrix_agent.py`, its
+  `fleet.sh` driver, and the `matrix_agent/README.md` that documented
+  them) is gone from this repository, along with its two test files.
+  Sustained traffic-matrix emulation and one-shot mesh sweeps had
+  grown into separate tools that happened to share a checkout: they
+  share no code, no state, and no release cadence, and the agent's
+  field-driven release rate was dragging the orchestrator's version
+  number along with it.
+
+  Concretely, this removes:
+  - the `matrix-agent` console script,
+  - the `iperf-orchestrator matrix ...` pass-through subcommand,
+  - the `matrix_agent` package from the wheel.
+
+  Nothing in the sweep pipeline changes: `all`, `run-tests`,
+  `parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`,
+  `collect-results`, `results-summary` and every flag and environment
+  variable behave exactly as in 1.6.1. Only the matrix surface is
+  withdrawn, which is why this is a major version rather than a
+  minor one.
+
+  Anyone still running `iperf-orchestrator matrix ...` should pin
+  `iperf-orchestrator==1.6.1` until they have switched to the new
+  standalone tool.
+
 ## [1.6.1] - 2026-08-10
 
 ### Fixed

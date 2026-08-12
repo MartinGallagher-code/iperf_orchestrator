@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iperf-orchestrator"
-version = "1.6.1"
+version = "2.0.0"
 description = "Full-mesh iperf2 throughput testing across a fleet, with CSV/pivot/heatmap analysis"
 readme = "README.md"
 requires-python = ">=3.6"
@@ -62,16 +62,11 @@ Changelog = "https://github.com/MartinGallagher-code/iperf_orchestrator/blob/mai
 
 [project.scripts]
 iperf-orchestrator = "iperf_orchestrator.cli:main"
-matrix-agent = "matrix_agent.matrix_agent:main"
 
 [tool.setuptools]
-packages = ["iperf_orchestrator", "matrix_agent"]
+packages = ["iperf_orchestrator"]
 
-# Ship the bash scripts inside the wheel: the orchestrator so the
-# console-script wrapper can exec it, and fleet.sh so the `matrix`
-# subcommand works out of the box from a pip install (the orchestrator
-# finds it at site-packages/matrix_agent/fleet.sh via its ../matrix_agent
-# search path).
+# Ship the orchestrator bash script inside the wheel so the console-script
+# wrapper can exec it.
 [tool.setuptools.package-data]
 iperf_orchestrator = ["iperf_orchestrator.sh"]
-matrix_agent = ["fleet.sh"]

@@ -74,16 +74,6 @@ Results in `./results/<run-id>/`:
 
 ---
 
-## Sustained load emulation (matrix_agent)
-
-The orchestrator *sweeps* a mesh: test every pair once, analyze afterwards.
-For the complementary job — hold a prescribed traffic matrix across the whole
-fleet indefinitely and watch whether the fabric sustains it — see
-[`matrix_agent/`](matrix_agent/README.md): a stdlib-only Python agent with
-paced per-pair flows, receiver-side achieved-rate reporting, and matrix
-admissibility checking. It scales where a sweep can't, because flows are
-rate-limited rather than saturating.
-
 ## Requirements
 
 ### On the orchestrator host (where you run the script)
@@ -142,11 +132,6 @@ CONVENIENCE:
   doctor                     Check local prerequisites
   help                       Common commands and flags
   help-advanced              Every command, every flag, every env var
-
-SUSTAINED LOAD:
-  matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
-                             traffic matrix across the fleet indefinitely
-                             (up / status / reload / summarize / down)
 ```
 
 The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.

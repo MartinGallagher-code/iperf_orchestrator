@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="1.6.1"
+ORCH_VERSION="2.0.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -159,37 +159,6 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 #------------------------------------------------------------------------------
 _flag_die() { echo "iperf-orchestrator: $*" >&2; exit 2; }
 _flag_need() { [ -n "${2:-}" ] || _flag_die "flag $1 requires a value"; }
-
-# `matrix` is a pass-through to the sustained-load fleet driver
-# (matrix_agent/fleet.sh), which has its own flag namespace (--matrix,
-# --jobs, ...) that must not be filtered through this script's global
-# flag parser. Dispatch it before the parsing loop, and only when it is
-# the first argument so flag handling for every other command is
-# untouched. Works from a source checkout, an expanded bundle, or a pip
-# install (the wheel ships matrix_agent/ alongside this package).
-if [ "${1:-}" = "matrix" ]; then
-    shift
-    # Candidate locations: a source checkout / expanded bundle (sibling
-    # matrix_agent/ dir), or matrix_agent/ dropped next to this script --
-    # the latter lets a pip install opt in by copying one directory.
-    _fleet=""
-    for _cand in "$SCRIPT_DIR/../matrix_agent/fleet.sh" \
-                 "$SCRIPT_DIR/matrix_agent/fleet.sh"; do
-        if [ -f "$_cand" ]; then _fleet="$_cand"; break; fi
-    done
-    if [ -z "$_fleet" ]; then
-        echo "$PROG: matrix tooling (matrix_agent/fleet.sh) not found; looked in:" >&2
-        echo "    $SCRIPT_DIR/../matrix_agent/" >&2
-        echo "    $SCRIPT_DIR/matrix_agent/" >&2
-        echo "  This suggests a broken or partial install. Reinstall with" >&2
-        echo "  'pip install --force-reinstall iperf-orchestrator', or run from a" >&2
-        echo "  source checkout / expanded bundle. See matrix_agent/README.md." >&2
-        exit 1
-    fi
-    # Exec via bash, not directly: some transports and bundle splitters
-    # drop file modes, and a lost executable bit must not break this.
-    exec bash "$_fleet" "$@"
-fi
 
 _PARSED=()
 _saw_subcommand=0
@@ -712,9 +681,6 @@ an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 Other useful commands:
     $PROG doctor             Check that local prerequisites are installed
     $PROG status             Probe hosts and list available result runs
-    $PROG matrix <cmd>       Sustained traffic-matrix emulation across the
-                             fleet (up/status/reload/summarize/down); see
-                             matrix_agent/README.md
     $PROG --help             Common commands and flags (also: help, -h)
     $PROG help-advanced      Every command, every flag, every env var
     $PROG --version          Print the version and exit
@@ -875,15 +841,6 @@ CONVENIENCE:
     help                       Show the simple help (this command's short form).
     help-advanced              Show this message.
     version                    Print the version and exit (same as --version).
-
-SUSTAINED LOAD:
-    matrix <cmd> [opts]        Pass-through to matrix_agent/fleet.sh: hold a
-                               prescribed traffic matrix across the whole fleet
-                               indefinitely (paced flows, receiver-side
-                               reporting). Commands: up, status, reload,
-                               collect, summarize, down, prep. All flags after
-                               'matrix' belong to fleet.sh -- see
-                               $PROG matrix --help and matrix_agent/README.md.
 
 CONFIG (env vars; CLI flags above take precedence):
     IPERF_PORT=$IPERF_PORT
