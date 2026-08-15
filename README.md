@@ -535,24 +535,36 @@ goes missing.
 expands it again — handy for moving the tree through a channel that only
 carries plain text.
 
-```bash
-./merge.sh bundle.txt some/dir     # bundle a tree (default: current dir)
-./split.sh bundle.txt restored/    # expand it (default: current dir)
-```
-
-When a transport caps the size of a single file, `-n` spreads the tree over
-several bundles:
+**They no longer live here.** The canonical copies are in
+[shared_tools](https://github.com/MartinGallagher-code/shared_tools), under
+`scripts/`. This repository used to carry its own pair, which is how the two
+copies that once existed drifted apart in the first place — one repository's
+copy gained features the others never saw. Use the shared ones:
 
 ```bash
-./merge.sh -n 2                      # bundle.part1of2.txt, bundle.part2of2.txt
-./split.sh bundle.part1of2.txt out/  # expand the parts in any order
-./split.sh bundle.part2of2.txt out/  # ...into the same directory
+git clone https://github.com/MartinGallagher-code/shared_tools
+shared_tools/scripts/merge.sh bundle.txt some/dir   # bundle a tree
+shared_tools/scripts/split.sh bundle.txt restored/  # expand it
 ```
 
-Parts are cut on entry boundaries and balanced by byte size, so no file is
-ever chopped in half and each part is a complete, independently valid bundle
-with its own header and checksums. The `.txt` extension stays last in the
-name for transports that judge a file by its suffix.
+When a transport caps the size of a single file, `-m` keeps every part under
+a limit:
+
+```bash
+merge.sh -m 390K bundle.txt some/dir   # bundle-part1-of-N.txt, ...
+split.sh bundle-part1-of-3.txt out/    # expand the parts in any order
+```
+
+> **Note:** the copy that used to live here took `-n PARTS` and produced
+> `bundle.part1of2.txt`. The canonical version takes `-m SIZE` instead and
+> names parts `bundle-part1-of-N.txt`. A size limit is the more useful knob,
+> because the constraint is nearly always "the upload is refused above N
+> bytes" rather than a part count — but any script or muscle memory using
+> `-n` needs updating.
+
+Parts are cut on entry boundaries, so no file is ever chopped in half and
+each part is a complete, independently valid bundle with its own header and
+checksums.
 
 The bundle format inlines text files verbatim and base64-encodes binaries
 (and any text file whose content would collide with the section markers).
