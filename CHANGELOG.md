@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+- **`merge.sh` and `split.sh`.** The canonical copies live in
+  [shared_tools](https://github.com/MartinGallagher-code/shared_tools) under
+  `scripts/`, and every repository now uses those rather than keeping its
+  own. Carrying a private copy is exactly how the two that once existed
+  drifted apart: this repository's pair had been hardened to the v2 bundle
+  format while other repositories still shipped the original 26-line
+  version, and shared_tools has since moved on to v3.
+
+  The interface differs, so this is a change and not just a move: the copy
+  removed here took `-n PARTS` and produced `bundle.part1of2.txt`, while the
+  canonical version takes `-m SIZE` and names parts `bundle-part1-of-N.txt`.
+  A size limit is the more useful knob — the constraint is nearly always
+  "the upload is refused above N bytes" rather than a part count — but any
+  script using `-n` needs updating. The "Utility scripts" section of the
+  README now documents the canonical interface.
+
+  Nothing automated referenced either script, and `bundle.txt` stays
+  gitignored and rebuilt on demand.
+
 ### Added
 - **Read the Docs integration.** `.readthedocs.yaml` and a Sphinx
   project under `docs/` publish the documentation as a searchable
