@@ -2944,9 +2944,9 @@ cmd_version() {
     # copyright and warranty notice.
     echo "iperf-orchestrator $ORCH_VERSION"
     echo "$ORCH_COPYRIGHT"
-    echo "License $ORCH_LICENSE: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>"
+    echo "License: $ORCH_LICENSE <https://www.gnu.org/licenses/gpl-3.0.html>"
     echo "This is free software: you are free to change and redistribute it."
-    echo "There is NO WARRANTY, to the extent permitted by law."
+    echo "There is no warranty, to the extent permitted by law."
 }
 
 cmd_doctor() {
