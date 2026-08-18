@@ -76,7 +76,7 @@ test_version_shows_copyright_and_license() {
     run_orch --version
     assert_contains "$RUN_OUT" "Copyright (C) 2026 Martin J. Gallagher" || return 1
     assert_contains "$RUN_OUT" "GPL-3.0-or-later" "license identifier" || return 1
-    assert_contains "$RUN_OUT" "NO WARRANTY" "warranty notice" || return 1
+    assert_contains "$RUN_OUT" "no warranty" "warranty notice" || return 1
     # The copyright line must agree with the script's own file header,
     # so the two can't drift apart.
     local hdr
