@@ -518,9 +518,88 @@ read_servers() {
         die "no server list. Pass --servers <file> (or set IPERF_SERVERS, or place servers.txt next to the script)"
     fi
     [ -f "$SERVER_LIST_FILE" ] || die "server list not found: $SERVER_LIST_FILE"
-    # Strip blank lines, comments, and surrounding whitespace
-    sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-        "$SERVER_LIST_FILE" | grep -v '^$'
+    # Two accepted shapes. Plain: one host per line ('#' comments). Grid
+    # (written by `gen --grid`, mx matrix.csv shape): a 'src\dst,...'
+    # header row whose columns are the hosts, then one row per source
+    # whose cells mark which directed pairs to test. Hosts here come from
+    # the header; the cells are parsed separately by _load_pair_grid.
+    local first
+    first=$(sed -e 's/^[[:space:]]*//' "$SERVER_LIST_FILE" | grep -v -E '^(#|$)' | head -n1)
+    case "$first" in
+        'src\dst,'*)
+            printf '%s\n' "${first#src\\dst,}" | tr ',' '\n' \
+                | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$'
+            ;;
+        *)
+            # Strip blank lines, comments, and surrounding whitespace
+            sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                "$SERVER_LIST_FILE" | grep -v '^$'
+            ;;
+    esac
+}
+
+#------------------------------------------------------------------------------
+# Pair grid (partial mesh)
+#
+# When the server list is a grid ('src\dst,...' header), a non-empty cell
+# enables that directed (row -> column) pair and a blank cell skips it --
+# exactly matrix.csv's editing model: blank a cell to drop a flow, blank
+# both cells to drop the pair entirely. A plain host list means full mesh.
+#
+# _load_pair_grid parses the grid once (cached per file) into:
+#   _GRID_PRESENT       1 when the file is a grid
+#   PAIR_OK[src|dst]    set when that directed pair is enabled
+#   GRID_TX_COUNT[src]  how many directed pairs src originates
+# pair_enabled() is the single lookup every mode goes through.
+#------------------------------------------------------------------------------
+_GRID_PRESENT=0
+_GRID_LOADED=""
+
+_load_pair_grid() {
+    local f="$1"
+    [ -n "$f" ] && [ -f "$f" ] || return 0
+    [ "$_GRID_LOADED" = "$f" ] && return 0
+    _GRID_LOADED="$f"
+    _GRID_PRESENT=0
+    declare -gA PAIR_OK=() GRID_TX_COUNT=()
+
+    local first
+    first=$(sed -e 's/^[[:space:]]*//' "$f" | grep -v -E '^(#|$)' | head -n1)
+    case "$first" in 'src\dst,'*) ;; *) return 0 ;; esac
+    _GRID_PRESENT=1
+
+    local cols=() line cells=() src cell i cnt
+    IFS=',' read -r -a cols <<< "$first"    # cols[0] is the src\dst label
+    declare -A _col_set=()
+    for ((i=1; i<${#cols[@]}; i++)); do _col_set["${cols[$i]}"]=1; done
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+        case "$line" in ''|'#'*|'src\dst,'*) continue ;; esac
+        IFS=',' read -r -a cells <<< "$line"
+        src="${cells[0]//[[:space:]]/}"     # hosts never contain whitespace
+        if [ -z "${_col_set[$src]:-}" ]; then
+            warn "pair grid: row '$src' is not a header column; row ignored"
+            continue
+        fi
+        cnt=0
+        for ((i=1; i<${#cols[@]}; i++)); do
+            cell="${cells[$i]:-}"
+            cell="${cell//[[:space:]]/}"
+            if [ -n "$cell" ] && [ "${cols[$i]}" != "$src" ]; then
+                PAIR_OK["$src|${cols[$i]}"]=1
+                cnt=$((cnt + 1))
+            fi
+        done
+        GRID_TX_COUNT["$src"]=$cnt
+    done < "$f"
+}
+
+pair_enabled() {
+    # pair_enabled <src> <dst>: true when src should run iperf -c against
+    # dst. Full mesh (no grid) enables everything.
+    _load_pair_grid "$SERVER_LIST_FILE"
+    [ "$_GRID_PRESENT" = "1" ] || return 0
+    [ -n "${PAIR_OK["$1|$2"]:-}" ]
 }
 
 # Validate the server list once, when something needs hosts. Catches
@@ -818,8 +897,10 @@ QUICK START (key-based SSH to every host must already be configured):
 
 THE SIX COMMANDS (each reads the plan file, so no flags need repeating):
     gen [MODE]      Build the plan: host list + every setting in one file
+                    (--grid: a src\\dst pair grid; blank a cell to skip it)
     start [MODE]    Start iperf2 daemons everywhere and run the tests
     status          One line per host: probes, daemons, live test progress
+                    (--watch SECONDS keeps refreshing until ctrl-c)
     summarize       Collect results; render CSV, pivot, heatmap; print the
                     throughput summary and what to do next
     stop            Stop the iperf2 daemons (test logs stay on the hosts)
@@ -931,13 +1012,21 @@ Key-based SSH to every host must be configured before use (e.g. via
 ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
 
 PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
-    gen [MODE]             Write the plan file: host list + settings in one
+    gen [MODE] [--grid]    Write the plan file: host list + settings in one
                            artifact. The plan doubles as the server list;
                            CLI flags and env vars still beat its values.
                            Re-running gen preserves settings you don't
                            override (the old plan is loaded as defaults).
+                           --grid writes the hosts as an mx-style src\dst
+                           pair grid instead of a plain list: blank a cell
+                           to skip that directed pair (partial mesh). All
+                           commands accept either shape, and re-running gen
+                           on a grid plan keeps its blanked cells.
     start [MODE] [--keep-going]
                            start-servers + run-tests in one verb.
+    status [--watch SECONDS]
+                           Probes + live per-host progress; --watch redraws
+                           every SECONDS until ctrl-c (like mx status).
     summarize              process + pivot + results-summary (with hints).
     stop                   stop-servers, plus what-to-do-next breadcrumbs.
     clean                  stop-servers + remove \$REMOTE_DIR on every host,
@@ -1035,6 +1124,10 @@ EOF
 # just grows).
 _worker_run_progress() {
     local host="$1" run="$_PROGRESS_RUN_ID" expected="${_PROGRESS_EXPECTED:-}"
+    # Pair grids give each host its own expected count (see _status_once).
+    if [ -n "${_PROGRESS_EXPECTED_MAP[$host]:-}" ]; then
+        expected="${_PROGRESS_EXPECTED_MAP[$host]}"
+    fi
     local safe; safe=$(_sanitize_host "$host")
     local out
     if ! out=$(ssh_run "$host" "
@@ -1073,8 +1166,34 @@ _worker_run_progress() {
 
 #------------------------------------------------------------------------------
 # Probe hosts and list local run directories. No state file is read or
-# written; everything is derived live.
+# written; everything is derived live. cmd_status parses --watch and loops
+# over _status_once, mirroring `mx status --watch`.
 cmd_status() {
+    local watch=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --watch)   _flag_need "$1" "${2:-}"; watch="$2"; shift 2 ;;
+            --watch=*) watch="${1#*=}"; shift ;;
+            *) die "status: unknown argument: $1 (expected --watch SECONDS)" ;;
+        esac
+    done
+    if [ "$watch" != "0" ]; then
+        _validate_uint "--watch" "$watch" 1
+    fi
+    while :; do
+        if [ "$watch" != "0" ]; then
+            # Clear + home, like watch(1) / mx status --watch.
+            printf '\033[2J\033[H'
+            echo "status -- $(date '+%H:%M:%S') (every ${watch}s, ctrl-c to stop)"
+            echo
+        fi
+        _status_once
+        [ "$watch" != "0" ] || break
+        sleep "$watch"
+    done
+}
+
+_status_once() {
     echo "Results base: $RESULTS_BASE"
     echo "Server list:  ${SERVER_LIST_FILE:-(none; pass --servers)}"
     echo "Plan file:    ${PLAN_FILE:-(none; '$PROG gen' writes one)}"
@@ -1117,6 +1236,17 @@ cmd_status() {
             local nh; nh=$(read_servers | wc -l)
             _PROGRESS_RUN_ID="$prun"
             _PROGRESS_EXPECTED=$(( (nh - 1) * IPERF_HOST_FLOWS ))
+            # With a pair grid, each host owes its own directed-edge
+            # count rather than N-1; the worker prefers this map.
+            declare -gA _PROGRESS_EXPECTED_MAP=()
+            _load_pair_grid "$SERVER_LIST_FILE"
+            if [ "$_GRID_PRESENT" = "1" ]; then
+                local ph
+                while IFS= read -r ph; do
+                    [ -n "$ph" ] || continue
+                    _PROGRESS_EXPECTED_MAP[$ph]=$(( ${GRID_TX_COUNT[$ph]:-0} * IPERF_HOST_FLOWS ))
+                done < <(read_servers)
+            fi
             echo
             echo "Progress (run $prun):"
             parallel_hosts _worker_run_progress | sed 's/^/  /'
@@ -1241,23 +1371,31 @@ cmd_create_scripts() {
         local src_safe; src_safe=$(_sanitize_host "$src")
         local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
-        # Every host is a client against every other host. Each directed
-        # edge (src -> dst) is its own iperf2 invocation, producing a
-        # log with exactly one direction's data. This sidesteps the
-        # iperf2 --full-duplex CSV reporting quirks (per-direction row
-        # vs SUM-of-both-directions row) that made cell values
-        # unreliable across -P values and iperf2 builds.
+        # Every host is a client against every other host -- unless the
+        # server list is a pair grid, in which case only the enabled
+        # directed edges get a client invocation. Each directed edge
+        # (src -> dst) is its own iperf2 invocation, producing a log
+        # with exactly one direction's data. This sidesteps the iperf2
+        # --full-duplex CSV reporting quirks (per-direction row vs
+        # SUM-of-both-directions row) that made cell values unreliable
+        # across -P values and iperf2 builds.
         local targets=() t
         for t in "${hosts_arr[@]}"; do
             [ "$t" = "$src" ] && continue
+            pair_enabled "$src" "$t" || continue
             targets+=("$t")
         done
 
-        # Hard guard: every host must have N-1 targets. An empty list
-        # means the run script will silently no-op for that source, and
-        # the pivot will show '-(1)' for everything in that row -- the
-        # exact failure mode we saw before this guard was added.
+        # Hard guard: every host must end up with the target count the
+        # input calls for -- N-1 in full mesh, the grid row's count when
+        # a pair grid restricts the mesh. An unexpected shortfall means
+        # the run script would silently no-op for that source, and the
+        # pivot would show '-(1)' for everything in that row -- the
+        # exact failure mode we saw before this guard was added. (A grid
+        # row that legitimately enables 0 pairs is fine: the host still
+        # runs its CPU sampler and receives traffic.)
         local expected_targets=$(( ${#hosts_arr[@]} - 1 ))
+        [ "$_GRID_PRESENT" = "1" ] && expected_targets="${GRID_TX_COUNT[$src]:-0}"
         if [ "${#targets[@]}" -ne "$expected_targets" ]; then
             die "create-scripts: $src ended up with ${#targets[@]} target(s), expected $expected_targets. Server list: ${hosts_arr[*]}"
         fi
@@ -1587,6 +1725,7 @@ cmd_run_tests() {
             for s in "${hosts[@]}"; do
                 for d in "${hosts[@]}"; do
                     [ "$s" = "$d" ] && continue
+                    pair_enabled "$s" "$d" || continue
                     _run_one_round 0 "$d" "$s"
                 done
             done
@@ -1612,6 +1751,7 @@ _run_rolling() {
         local peers="" peer_conn_ips_decl="declare -A PEER_CONN_IPS=( " p
         for p in "${hosts[@]}"; do
             [ "$p" = "$src" ] && continue
+            pair_enabled "$src" "$p" || continue
             peers+="\"$p\" "
             # Embed an associative-array entry per peer so the rolling
             # loop can look up the data-plane IP by name. Empty value
@@ -1665,6 +1805,15 @@ _run_rolling() {
             # The rolling loop picks targets by name (for fair-share
             # counting) but connects via the resolved conn IP.
             $peer_conn_ips_decl
+            # A pair grid can leave this host with no outbound pairs at
+            # all (receive-only). Keep the CPU sampler running for the
+            # window, but skip the probe loop -- an empty PEERS array
+            # would divide by zero at target-pick time.
+            if [ \${#PEERS[@]} -eq 0 ]; then
+                echo \"[rolling] $src: no enabled outbound pairs; sampling CPU only\"
+                wait
+                exit 0
+            fi
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
             declare -A counts
             for t in \"\${PEERS[@]}\"; do counts[\"\$t\"]=0; done
@@ -3361,14 +3510,21 @@ cmd_all() {
 # one file. Because an existing plan was already loaded as defaults before
 # this runs, re-running gen preserves settings you don't override.
 cmd_gen() {
-    local mode="${IPERF_MODE:-parallel}" a
+    local mode="${IPERF_MODE:-parallel}" grid=0 a
     for a in "$@"; do
         case "$a" in
+            --grid) grid=1 ;;
             parallel|sequential-host|sequential-pair|rolling) mode="$a" ;;
-            *) die "gen: unknown argument: $a (expected a mode: parallel|sequential-host|sequential-pair|rolling)" ;;
+            *) die "gen: unknown argument: $a (expected a mode and/or --grid)" ;;
         esac
     done
     _validate_server_list
+
+    # If the input is already a grid (re-gen from a hand-edited plan),
+    # stay a grid and keep its blanked cells; --servers with a plain list
+    # resets to full mesh unless --grid asks for an explicit grid.
+    _load_pair_grid "$SERVER_LIST_FILE"
+    [ "$_GRID_PRESENT" = "1" ] && grid=1
 
     # The plan's settings tokens are whitespace-split at load time, so a
     # value containing whitespace can't round-trip. Catch it at write time.
@@ -3381,27 +3537,72 @@ cmd_gen() {
     hosts=$(read_servers)
     [ -n "$hosts" ] || die "gen: server list $SERVER_LIST_FILE has no hosts"
     local n; n=$(printf '%s\n' "$hosts" | wc -l)
+    if [ "$grid" = "1" ]; then
+        # Grid rows are comma-separated, so a comma inside a hostname
+        # would corrupt the format.
+        case "$hosts" in
+            *,*) die "gen: --grid needs comma-free hostnames" ;;
+        esac
+    fi
 
     local tmp
     tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-plan-XXXXXX") || die "mktemp failed"
     {
         echo "# iperf-orchestrator plan v1 -- one file drives every command"
         echo "#"
-        echo "# Hosts below, one per line ('#' comments OK). Settings ride in the"
-        echo "# key=value tokens; edit either and just re-run. Every command reads"
-        echo "# this file (./iperf_plan.conf, or --plan FILE / \$IPERF_PLAN), so no"
-        echo "# flag needs repeating. CLI flags and env vars still win over the plan."
+        echo "# Hosts live below: one per line, or a src\\dst pair grid ('#'"
+        echo "# comments OK). Settings ride in the key=value tokens; edit either"
+        echo "# and just re-run. Every command reads this file (./iperf_plan.conf,"
+        echo "# or --plan FILE / \$IPERF_PLAN), so no flag needs repeating. CLI"
+        echo "# flags and env vars still win over the plan."
         echo "#"
         echo "# mode=$mode"
         echo "# port=$IPERF_PORT duration=$IPERF_DURATION streams=$IPERF_STREAMS host_flows=$IPERF_HOST_FLOWS total_time=$IPERF_TOTAL_TIME"
         echo "# bandwidth=$IPERF_BANDWIDTH length=$IPERF_LENGTH window=$IPERF_WINDOW mss=$IPERF_MSS no_nagle=$IPERF_NO_NAGLE"
         echo "# bind=$IPERF_BIND server_bind=$IPERF_SERVER_BIND"
         echo "# ssh_user=$SSH_USER remote_dir=$REMOTE_DIR"
-        printf '%s\n' "$hosts"
+        if [ "$grid" = "1" ]; then
+            # mx matrix.csv shape: rows send, columns receive, a non-empty
+            # cell enables that directed pair. Blank a cell to skip it.
+            echo "#"
+            echo "# Rows send, columns receive; 'x' tests that directed pair."
+            echo "# Blank a cell to skip a direction; blank both to drop the pair."
+            local hosts_arr=() gh s d
+            while IFS= read -r gh; do [ -n "$gh" ] && hosts_arr+=("$gh"); done <<< "$hosts"
+            printf 'src\\dst'
+            for d in "${hosts_arr[@]}"; do printf ',%s' "$d"; done
+            printf '\n'
+            for s in "${hosts_arr[@]}"; do
+                printf '%s' "$s"
+                for d in "${hosts_arr[@]}"; do
+                    if [ "$s" = "$d" ]; then
+                        printf ','
+                    elif [ "$_GRID_PRESENT" = "1" ] && [ -z "${PAIR_OK["$s|$d"]:-}" ]; then
+                        printf ','
+                    else
+                        printf ',x'
+                    fi
+                done
+                printf '\n'
+            done
+        else
+            printf '%s\n' "$hosts"
+        fi
     } > "$tmp"
     [ -f "$out" ] && log "gen: overwriting existing plan $out (its settings were this invocation's defaults)"
     mv "$tmp" "$out" || die "gen: could not write $out"
-    log "gen: wrote $out ($n hosts, mode=$mode, port=$IPERF_PORT, duration=${IPERF_DURATION}s)"
+    local shape="full mesh"
+    if [ "$grid" = "1" ]; then
+        local edges=$(( n * (n - 1) )) gh2
+        if [ "$_GRID_PRESENT" = "1" ]; then
+            edges=0
+            for gh2 in "${!GRID_TX_COUNT[@]}"; do
+                edges=$(( edges + GRID_TX_COUNT[$gh2] ))
+            done
+        fi
+        shape="grid, $edges enabled pair(s)"
+    fi
+    log "gen: wrote $out ($n hosts, $shape, mode=$mode, port=$IPERF_PORT, duration=${IPERF_DURATION}s)"
     log "Next: $PROG start          # daemons up + run the tests"
     log "      (or '$PROG run' for the whole pipeline in one shot)"
 }
@@ -3544,6 +3745,15 @@ EOF
     fi
     if [ "$n" -ge 2 ]; then
         local edges=$(( n * (n - 1) ))
+        # A pair grid tests only the enabled directed edges.
+        _load_pair_grid "$SERVER_LIST_FILE"
+        if [ "$_GRID_PRESENT" = "1" ]; then
+            edges=0
+            local gh
+            for gh in "${!GRID_TX_COUNT[@]}"; do
+                edges=$(( edges + GRID_TX_COUNT[$gh] ))
+            done
+        fi
         local seq_secs=$(( edges * IPERF_DURATION ))
         local par_secs=$(( START_DELAY + IPERF_DURATION ))
         echo

@@ -15,15 +15,19 @@ _iperf_orchestrator() {
     }
 
     local subcommands="gen start summarize stop clean run hints \
-        init status check-iperf check-servers \
+        status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
-        make-pivot make-heatmap doctor results-summary all help version"
+        make-pivot make-heatmap doctor results-summary all help \
+        help-advanced version"
 
-    local global_flags="--plan --port --duration -d --parallel -P --jobs -j \
-        --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
-        --retries \
-        --dry-run -n --verbose -v --quiet -q -h --help --version"
+    local global_flags="--plan --servers -s --output -o --run-id \
+        --port --duration -d --streams -P --ssh-jobs -j --start-delay \
+        --total-time --host-flows --bandwidth -b --length -l --window -w \
+        --mss -M --no-nagle -N --bind -B --server-bind \
+        --ssh-user -u --remote-dir --python \
+        --dry-run -n --verbose -v --quiet -q \
+        -h --help --help-advanced --version"
 
     local run_modes="parallel sequential-host sequential-pair rolling"
 
@@ -38,10 +42,12 @@ _iperf_orchestrator() {
 
     # Value-taking flags: complete the value, not another flag.
     case "$prev" in
-        --plan|--iperf-dir|--remote-dir|--python)
+        --plan|--servers|-s|--output|-o|--python)
             _filedir
             return ;;
-        --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--ssh-user|-u)
+        --run-id|--port|--duration|-d|--streams|-P|--ssh-jobs|-j|--start-delay|\
+        --total-time|--host-flows|--bandwidth|-b|--length|-l|--window|-w|\
+        --mss|-M|--bind|-B|--server-bind|--remote-dir|--ssh-user|-u|--for|--watch)
             return ;;  # numeric/text values, no completion
     esac
 
@@ -58,10 +64,10 @@ _iperf_orchestrator() {
     # After the subcommand: subcommand-specific completion.
     case "$sub" in
         run-tests|all)
-            COMPREPLY=( $(compgen -W "$run_modes --keep-going --resume --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$run_modes --keep-going --help" -- "$cur") )
             ;;
         gen)
-            COMPREPLY=( $(compgen -W "$run_modes --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$run_modes --grid --help" -- "$cur") )
             ;;
         start)
             COMPREPLY=( $(compgen -W "$run_modes --keep-going --help" -- "$cur") )
@@ -69,14 +75,11 @@ _iperf_orchestrator() {
         run)
             COMPREPLY=( $(compgen -W "$run_modes --for --keep-going --help" -- "$cur") )
             ;;
-        init)
-            _filedir
-            ;;
         cleanup)
             COMPREPLY=( $(compgen -W "--yes --help" -- "$cur") )
             ;;
         status)
-            COMPREPLY=( $(compgen -W "--json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--watch --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

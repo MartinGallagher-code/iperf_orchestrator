@@ -27,6 +27,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   maximum?", "does the fabric degrade under load?"), sized to the fleet
   when a server list or plan is at hand: directed-test counts and
   wall-clock estimates per mode.
+- **Partial-mesh pair grids.** `gen --grid` writes the hosts as an
+  mx-style `src\dst` grid instead of a plain list: rows send, columns
+  receive, a non-empty cell tests that directed pair, and blanking a
+  cell skips it — matrix.csv's editing model. Every mode honors the
+  grid (parallel and sequential filter their targets; rolling restricts
+  each host's peer set, and a receive-only host still runs its CPU
+  sampler), `status` shows each host's own expected test count, `hints`
+  sizes its estimates from the enabled edges, and re-running `gen` on a
+  grid plan preserves hand-blanked cells. Plain host lists and
+  `servers.txt` files keep meaning full mesh everywhere.
+- **`status --watch SECONDS`.** Clears and redraws the whole status
+  view (probes, daemons, live progress) every SECONDS until ctrl-c,
+  mirroring `mx status --watch`.
 - **Live progress in `status`.** One ticker line per host for the active
   run (or `--run-id`), read from each host's own remote status file and
   per-test log count: `DONE 22/22 tests`, `RUNNING 7/22 tests` with the
@@ -63,6 +76,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   convention and how to build the site locally.
 
 ### Changed
+- The completions (bash + zsh) and the README's configuration table
+  caught up with the real CLI: retired names (`init`, `--parallel`/
+  `IPERF_PARALLEL`, `--jobs`/`IPERF_JOBS`, `--flows`/`IPERF_FLOWS`,
+  `--retries`, `--iperf-dir`, `status --json`, `--resume`) are gone,
+  today's flags (`--streams`, `--ssh-jobs`, `--host-flows`, the iperf2
+  performance knobs, `--plan`, `--for`, `--grid`, `--watch`) are in,
+  and the documented `--ssh-jobs` default now matches the derived
+  4×cores-capped-at-32 behavior.
 - The pip wrapper no longer auto-points
   `IPERF_SERVERS` at `./servers.txt` when `./iperf_plan.conf` exists, so
   the plan's host list is not silently overridden.
