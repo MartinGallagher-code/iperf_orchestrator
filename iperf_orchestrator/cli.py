@@ -38,7 +38,11 @@ def _default_environment() -> Dict[str, str]:
     env.setdefault("RESULTS_BASE", str(Path.cwd() / "results"))
     if not env.get("IPERF_SERVERS"):
         local_servers = Path.cwd() / "servers.txt"
-        if local_servers.is_file():
+        # A plan file supplies its own host list, and the script treats
+        # IPERF_SERVERS as an explicit user choice that beats the plan --
+        # so only auto-point at servers.txt when no plan is present.
+        local_plan = Path.cwd() / "iperf_plan.conf"
+        if local_servers.is_file() and not local_plan.is_file():
             env["IPERF_SERVERS"] = str(local_servers)
     return env
 

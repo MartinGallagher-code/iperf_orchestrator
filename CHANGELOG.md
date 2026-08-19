@@ -4,29 +4,41 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Removed
-- **`merge.sh` and `split.sh`.** The canonical copies live in
-  [shared_tools](https://github.com/MartinGallagher-code/shared_tools) under
-  `scripts/`, and every repository now uses those rather than keeping its
-  own. Carrying a private copy is exactly how the two that once existed
-  drifted apart: this repository's pair had been hardened to the v2 bundle
-  format while other repositories still shipped the original 26-line
-  version, and shared_tools has since moved on to v3.
-
-  The interface differs, so this is a change and not just a move: the copy
-  removed here took `-n PARTS` and produced `bundle.part1of2.txt`, while the
-  canonical version takes `-m SIZE` and names parts `bundle-part1-of-N.txt`.
-  A size limit is the more useful knob — the constraint is nearly always
-  "the upload is refused above N bytes" rather than a part count — but any
-  script using `-n` needs updating. The "Utility scripts" section of the
-  README now documents the canonical interface.
-
-  Nothing automated referenced either script, and `bundle.txt` stays
-  gitignored and rebuilt on demand.
+## [2.1.0] - 2026-08-19
 
 ### Added
+- **A plan file and `gen`.** `gen` writes `iperf_plan.conf` — the host
+  list plus every setting for a run in one artifact, mirroring
+  matrix_orchestrator's `matrix.csv`. Every command reads it (from
+  `./iperf_plan.conf`, `--plan FILE`, or `$IPERF_PLAN`), so no flag needs
+  repeating and a run is reproducible from the one file. The plan doubles
+  as the server list; precedence is `CLI flag > env var > plan > default`,
+  and re-running `gen` preserves settings you don't override. A `mode=`
+  key (new `IPERF_MODE` env var) sets the default run mode.
+- **The mx-style verb surface.** `start` (start-servers + run-tests),
+  `summarize` (process + pivot + results-summary), `stop` (stop-servers
+  with next-step breadcrumbs), `clean` (stop + remove `$REMOTE_DIR`
+  everywhere, then *verify* nothing is left — no `--yes` needed), and
+  `run` (`all` + results-summary, with `--for N` pinning total-time in
+  rolling mode or per-test duration otherwise). Every step command still
+  exists unchanged; the front-page help now leads with the six-verb
+  workflow and `--help-advanced` carries the full surface.
+- **`hints`.** A goal → command cheatsheet ("what is each link's true
+  maximum?", "does the fabric degrade under load?"), sized to the fleet
+  when a server list or plan is at hand: directed-test counts and
+  wall-clock estimates per mode.
+- **Live progress in `status`.** One ticker line per host for the active
+  run (or `--run-id`), read from each host's own remote status file and
+  per-test log count: `DONE 22/22 tests`, `RUNNING 7/22 tests` with the
+  pair currently under test, `NOT-STARTED`, or `UNREACHABLE`. Works from
+  a second terminal while `run-tests` blocks in the first.
+- **What-next hints in `results-summary`.** After the percentile stats,
+  the summary now says what the numbers mean and which command to run
+  next: a below-half-median direction points at `run sequential-pair`
+  isolation, a uniform mesh suggests raising the load with
+  `--host-flows`/`--streams`, and hosts whose CPU peaked ≥ 85% during
+  the test are flagged as possibly CPU-bound (joined from
+  `cpu_summary.csv`).
 - **Read the Docs integration.** `.readthedocs.yaml` and a Sphinx
   project under `docs/` publish the documentation as a searchable
   site. The version number is unchanged: nothing here ships in the
@@ -51,9 +63,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   convention and how to build the site locally.
 
 ### Changed
+- The pip wrapper no longer auto-points
+  `IPERF_SERVERS` at `./servers.txt` when `./iperf_plan.conf` exists, so
+  the plan's host list is not silently overridden.
 - The README's `LICENSE` link is now an absolute URL. As a repo-relative
   link it resolved on GitHub but pointed at nothing once the same text
   was rendered on the docs site.
+
+### Removed
+- **`merge.sh` and `split.sh`.** The canonical copies live in
+  [shared_tools](https://github.com/MartinGallagher-code/shared_tools) under
+  `scripts/`, and every repository now uses those rather than keeping its
+  own. Carrying a private copy is exactly how the two that once existed
+  drifted apart: this repository's pair had been hardened to the v2 bundle
+  format while other repositories still shipped the original 26-line
+  version, and shared_tools has since moved on to v3.
+
+  The interface differs, so this is a change and not just a move: the copy
+  removed here took `-n PARTS` and produced `bundle.part1of2.txt`, while the
+  canonical version takes `-m SIZE` and names parts `bundle-part1-of-N.txt`.
+  A size limit is the more useful knob — the constraint is nearly always
+  "the upload is refused above N bytes" rather than a part count — but any
+  script using `-n` needs updating. The "Utility scripts" section of the
+  README now documents the canonical interface.
+
+  Nothing automated referenced either script, and `bundle.txt` stays
+  gitignored and rebuilt on demand.
 
 ## [2.0.0] - 2026-08-12
 

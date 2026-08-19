@@ -14,17 +14,18 @@ _iperf_orchestrator() {
         cword="$COMP_CWORD"
     }
 
-    local subcommands="init status check-iperf check-servers \
+    local subcommands="gen start summarize stop clean run hints \
+        init status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
         make-pivot make-heatmap doctor results-summary all help version"
 
-    local global_flags="--port --duration -d --parallel -P --jobs -j \
+    local global_flags="--plan --port --duration -d --parallel -P --jobs -j \
         --start-delay --ssh-user -u --iperf-dir --remote-dir --python \
         --retries \
         --dry-run -n --verbose -v --quiet -q -h --help --version"
 
-    local run_modes="parallel sequential-host sequential-pair"
+    local run_modes="parallel sequential-host sequential-pair rolling"
 
     # Find the first non-flag word: that's the subcommand (if any).
     local i sub=""
@@ -37,7 +38,7 @@ _iperf_orchestrator() {
 
     # Value-taking flags: complete the value, not another flag.
     case "$prev" in
-        --iperf-dir|--remote-dir|--python)
+        --plan|--iperf-dir|--remote-dir|--python)
             _filedir
             return ;;
         --port|--duration|-d|--parallel|-P|--jobs|-j|--start-delay|--retries|--ssh-user|-u)
@@ -58,6 +59,15 @@ _iperf_orchestrator() {
     case "$sub" in
         run-tests|all)
             COMPREPLY=( $(compgen -W "$run_modes --keep-going --resume --help" -- "$cur") )
+            ;;
+        gen)
+            COMPREPLY=( $(compgen -W "$run_modes --help" -- "$cur") )
+            ;;
+        start)
+            COMPREPLY=( $(compgen -W "$run_modes --keep-going --help" -- "$cur") )
+            ;;
+        run)
+            COMPREPLY=( $(compgen -W "$run_modes --for --keep-going --help" -- "$cur") )
             ;;
         init)
             _filedir

@@ -7,6 +7,13 @@
 _iperf_orchestrator() {
     local -a subcommands run_modes global_flags
     subcommands=(
+        'gen:Write the plan file (hosts + settings in one artifact)'
+        'start:Start iperf2 daemons everywhere and run the tests'
+        'summarize:Collect results, render CSV/pivot/heatmap, print hints'
+        'stop:Stop the iperf2 daemons (logs stay on the hosts)'
+        'clean:Stop + delete the remote work dir everywhere, verified'
+        'run:start + summarize + stop + clean in one shot'
+        'hints:What you want to know -> the command for it'
         'init:Load a server list'
         'status:Show pipeline progress and next step'
         'check-iperf:Probe iperf2 + mpstat on every host'
@@ -29,9 +36,10 @@ _iperf_orchestrator() {
         'version:Print the version and exit'
     )
 
-    run_modes=(parallel sequential-host sequential-pair)
+    run_modes=(parallel sequential-host sequential-pair rolling)
 
     global_flags=(
+        '--plan[plan file written by gen]:file:_files'
         '--port[iperf2 listening port]:port:'
         '--duration[seconds per pair]:seconds:'
         '-d[seconds per pair]:seconds:'
@@ -73,6 +81,22 @@ _iperf_orchestrator() {
                         "1:mode:(${run_modes[*]})" \
                         '--keep-going[continue past per-host failures]' \
                         '--resume[skip steps already done in state]' \
+                        '--help[show help]'
+                    ;;
+                gen)
+                    _arguments "1:mode:(${run_modes[*]})" '--help[show help]'
+                    ;;
+                start)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--keep-going[continue past per-host failures]' \
+                        '--help[show help]'
+                    ;;
+                run)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--for[total-time (rolling) or per-test duration]:seconds:' \
+                        '--keep-going[continue past per-host failures]' \
                         '--help[show help]'
                     ;;
                 init)

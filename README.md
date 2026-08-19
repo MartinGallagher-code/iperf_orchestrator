@@ -68,9 +68,30 @@ EOF
 # 2. Make sure key-based SSH to every host is already set up, e.g.
 #    for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
-# 3. Run everything end-to-end
-./iperf-orchestrator.sh --servers servers.txt all
+# 3. Write the plan file once: hosts + every setting in one artifact.
+#    Every later command reads it, so no flag needs repeating.
+./iperf-orchestrator.sh gen --servers servers.txt
+
+# 4. Run everything end-to-end (start + summarize + stop + clean)
+./iperf-orchestrator.sh run
 ```
+
+Or drive it step by step with the six core commands (mirroring
+[`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator)'s
+workflow):
+
+| Command | What it does |
+|---|---|
+| `gen` | Build `iperf_plan.conf` from your server list — hosts + settings in one file. |
+| `start` | Start the iperf2 daemons everywhere and run the tests. |
+| `status` | One line per host: probes, daemons, and live test progress. |
+| `summarize` | Collect results; render CSV, pivot, heatmap; print the summary and what to do next. |
+| `stop` | Stop the daemons (test logs stay on the hosts). |
+| `clean` | Stop, then delete the remote work dir everywhere — verified gone. |
+
+Not sure what to ask for? `./iperf-orchestrator.sh hints` turns a goal into
+the command that gets you there. The classic one-liner still works too:
+`./iperf-orchestrator.sh --servers servers.txt all`.
 
 Each invocation that produces results creates a fresh timestamped run directory under `./results/<run-id>/`, and a `./results/latest` symlink is updated to point at it. Analysis subcommands default to following `latest`; pass `--run-id <id>` to address an older run.
 
@@ -112,6 +133,17 @@ Key-based SSH to every host must already be configured (the orchestrator
 connects non-interactively with `BatchMode=yes`).
 
 ```
+PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
+  gen [MODE]             Write iperf_plan.conf: host list + settings in one file
+  start [MODE]           start-servers + run-tests in one verb
+  status                 Probes, daemons, and a live progress line per host
+  summarize              process + pivot + results-summary (with what-next hints)
+  stop                   stop-servers, plus the next steps spelled out
+  clean                  stop + remove $REMOTE_DIR everywhere, then verify
+  run [MODE] [--for N]   all + results-summary; --for pins total-time (rolling)
+                         or per-test duration (other modes)
+  hints                  What you want to know -> the command that gets you there
+
 SETUP:
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
@@ -146,7 +178,31 @@ CONVENIENCE:
   help-advanced              Every command, every flag, every env var
 ```
 
-The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
+The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt` — or carried by the plan file. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
+
+### The plan file
+
+`gen` writes a single plan file (default `./iperf_plan.conf`; `--plan FILE`
+or `$IPERF_PLAN` override) that every other command reads, so a run is
+reproducible from one artifact and no flag needs repeating:
+
+```text
+# iperf-orchestrator plan v1 -- one file drives every command
+# mode=parallel
+# port=5001 duration=10 streams=1 host_flows=1 total_time=300
+# bandwidth= length= window= mss= no_nagle=0
+# bind= server_bind=
+# ssh_user=root remote_dir=/tmp/iperf_orchestrator
+10.0.0.10
+10.0.0.11
+10.0.0.12
+```
+
+Hosts are plain lines (the plan doubles as the server list); settings ride
+in the `key=value` tokens. Edit either by hand and just re-run. Precedence
+is `CLI flag > env var > plan file > built-in default`, so a one-off
+`--duration 60` still wins without touching the plan, and re-running `gen`
+preserves any setting you don't override.
 
 ### Configuration
 
@@ -160,7 +216,9 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 
 | Env var | Flag | Default | Purpose |
 |---|---|---|---|
-| `IPERF_SERVERS` | `--servers`, `-s` | `<script-dir>/servers.txt` | server list path |
+| `IPERF_PLAN` | `--plan` | `./iperf_plan.conf` when it exists | plan file written by `gen` |
+| `IPERF_MODE` | *(plan `mode=` key)* | `parallel` | default run mode when none is passed |
+| `IPERF_SERVERS` | `--servers`, `-s` | plan hosts, else `<script-dir>/servers.txt` | server list path |
 | `RESULTS_BASE` | `--output`, `-o` | `<script-dir>/results` | base directory for run subdirs |
 | `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address |
 | `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
