@@ -274,6 +274,20 @@ Every knob has both a long flag and an env-var. The env-var form is
 useful when chaining multiple invocations (e.g.
 `IPERF_DURATION=60 ./iperf_orchestrator.sh all`).
 
+There is also a third, lowest-precedence source: the plan file written
+by `gen` (default `./iperf_plan.conf`, overridable via `--plan` /
+`$IPERF_PLAN`). It holds the host list (plain lines — the file doubles
+as a server list, since `read_servers()` strips `#` comments) plus
+`key=value` settings tokens inside comment lines. The plan is loaded at
+startup *before* the env-default expansion — a plan value is applied
+only when the matching env var is unset — and before the CLI pre-pass,
+which yields the precedence `CLI flag > env var > plan > default`
+without any per-flag bookkeeping. `--plan` itself is peeked out of argv
+ahead of the pre-pass for the same reason. The plan-driven verbs
+(`gen`, `start`, `summarize`, `stop`, `clean`, `run`, `hints`) are thin
+orchestration over the step commands and live together near the end of
+the script, just above the dispatcher.
+
 The flag pre-pass recognizes global flags in *any* position on the
 command line, so all of these are equivalent:
 

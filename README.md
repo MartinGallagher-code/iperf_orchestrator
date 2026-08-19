@@ -68,9 +68,30 @@ EOF
 # 2. Make sure key-based SSH to every host is already set up, e.g.
 #    for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
-# 3. Run everything end-to-end
-./iperf-orchestrator.sh --servers servers.txt all
+# 3. Write the plan file once: hosts + every setting in one artifact.
+#    Every later command reads it, so no flag needs repeating.
+./iperf-orchestrator.sh gen --servers servers.txt
+
+# 4. Run everything end-to-end (start + summarize + stop + clean)
+./iperf-orchestrator.sh run
 ```
+
+Or drive it step by step with the six core commands (mirroring
+[`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator)'s
+workflow):
+
+| Command | What it does |
+|---|---|
+| `gen` | Build `iperf_plan.conf` from your server list — hosts + settings in one file. |
+| `start` | Start the iperf2 daemons everywhere and run the tests. |
+| `status` | One line per host: probes, daemons, and live test progress. |
+| `summarize` | Collect results; render CSV, pivot, heatmap; print the summary and what to do next. |
+| `stop` | Stop the daemons (test logs stay on the hosts). |
+| `clean` | Stop, then delete the remote work dir everywhere — verified gone. |
+
+Not sure what to ask for? `./iperf-orchestrator.sh hints` turns a goal into
+the command that gets you there. The classic one-liner still works too:
+`./iperf-orchestrator.sh --servers servers.txt all`.
 
 Each invocation that produces results creates a fresh timestamped run directory under `./results/<run-id>/`, and a `./results/latest` symlink is updated to point at it. Analysis subcommands default to following `latest`; pass `--run-id <id>` to address an older run.
 
@@ -112,6 +133,17 @@ Key-based SSH to every host must already be configured (the orchestrator
 connects non-interactively with `BatchMode=yes`).
 
 ```
+PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
+  gen [MODE]             Write iperf_plan.conf: host list + settings in one file
+  start [MODE]           start-servers + run-tests in one verb
+  status                 Probes, daemons, and a live progress line per host
+  summarize              process + pivot + results-summary (with what-next hints)
+  stop                   stop-servers, plus the next steps spelled out
+  clean                  stop + remove $REMOTE_DIR everywhere, then verify
+  run [MODE] [--for N]   all + results-summary; --for pins total-time (rolling)
+                         or per-test duration (other modes)
+  hints                  What you want to know -> the command that gets you there
+
 SETUP:
   check-iperf            Verify iperf2 + mpstat presence on every host
   check-servers          Check which hosts have iperf -s currently running
@@ -146,29 +178,81 @@ CONVENIENCE:
   help-advanced              Every command, every flag, every env var
 ```
 
-The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt`. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
+The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt` — or carried by the plan file. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
+
+### The plan file
+
+`gen` writes a single plan file (default `./iperf_plan.conf`; `--plan FILE`
+or `$IPERF_PLAN` override) that every other command reads, so a run is
+reproducible from one artifact and no flag needs repeating:
+
+```text
+# iperf-orchestrator plan v1 -- one file drives every command
+# mode=parallel
+# port=5001 duration=10 streams=1 host_flows=1 total_time=300
+# bandwidth= length= window= mss= no_nagle=0
+# bind= server_bind=
+# ssh_user=root remote_dir=/tmp/iperf_orchestrator
+10.0.0.10
+10.0.0.11
+10.0.0.12
+```
+
+Hosts are plain lines (the plan doubles as the server list); settings ride
+in the `key=value` tokens. Edit either by hand and just re-run. Precedence
+is `CLI flag > env var > plan file > built-in default`, so a one-off
+`--duration 60` still wins without touching the plan, and re-running `gen`
+preserves any setting you don't override.
+
+**Partial mesh.** `gen --grid` writes the hosts as an mx-style pair grid
+instead of a plain list — rows send, columns receive, and a non-empty cell
+tests that directed pair:
+
+```text
+src\dst,10.0.0.10,10.0.0.11,10.0.0.12
+10.0.0.10,,x,x
+10.0.0.11,x,,x
+10.0.0.12,,x,
+```
+
+Blank a cell to skip a direction (here `10.0.0.12` never sends to
+`10.0.0.10`); blank both cells to drop the pair entirely. Every mode —
+parallel, sequential, and rolling — honors the grid, `status` shows each
+host's own expected test count, `hints` sizes its estimates from the
+enabled edges, and re-running `gen` on a grid plan keeps your blanked
+cells. A plain host list simply means full mesh, and plain `servers.txt`
+files keep working everywhere.
 
 ### Configuration
 
 Every setting can be supplied either as an environment variable or as a CLI flag. The CLI flag wins when both are set. Flags accept both `--flag value` and `--flag=value` forms, and may appear before the subcommand:
 
 ```bash
-./iperf-orchestrator.sh --duration 60 --jobs 32 all
+./iperf-orchestrator.sh --duration 60 --ssh-jobs 32 all
 ./iperf-orchestrator.sh -d 60 -j 32 all parallel
 IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 ```
 
 | Env var | Flag | Default | Purpose |
 |---|---|---|---|
-| `IPERF_SERVERS` | `--servers`, `-s` | `<script-dir>/servers.txt` | server list path |
+| `IPERF_PLAN` | `--plan` | `./iperf_plan.conf` when it exists | plan file written by `gen` |
+| `IPERF_MODE` | *(plan `mode=` key)* | `parallel` | default run mode when none is passed |
+| `IPERF_SERVERS` | `--servers`, `-s` | plan hosts, else `<script-dir>/servers.txt` | server list path |
 | `RESULTS_BASE` | `--output`, `-o` | `<script-dir>/results` | base directory for run subdirs |
 | `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address |
 | `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
-| `IPERF_PARALLEL` | `--parallel`, `-P` | `1` | parallel streams within each test |
-| `IPERF_JOBS` | `--jobs`, `-j` | `16` | max concurrent SSH/SCP fan-out (capped concurrency) |
+| `IPERF_STREAMS` | `--streams`, `-P` | `1` | parallel TCP streams within each test (iperf2 `-P`) |
+| `IPERF_SSH_JOBS` | `--ssh-jobs`, `-j` | 4×cores, capped at 32 | max concurrent SSH/SCP fan-out (capped concurrency) |
 | `IPERF_TOTAL_TIME` | `--total-time` | `300` | rolling mode wall-time (seconds) |
-| `IPERF_FLOWS` | `--flows` | `1` | rolling mode per-host concurrent flows |
+| `IPERF_HOST_FLOWS` | `--host-flows` | `1` | concurrent iperf processes per directed edge (parallel/sequential) or per-host concurrency cap (rolling) |
+| `IPERF_BANDWIDTH` | `--bandwidth`, `-b` | *(unset)* | cap per-flow target rate, e.g. `100M`, `1G` (iperf2 `-b`) |
+| `IPERF_LENGTH` | `--length`, `-l` | *(unset)* | TCP read/write buffer size, e.g. `128K` (iperf2 `-l`) |
+| `IPERF_WINDOW` | `--window`, `-w` | *(unset)* | TCP window / socket buffer (iperf2 `-w`) |
+| `IPERF_MSS` | `--mss`, `-M` | *(unset)* | TCP maximum segment size (iperf2 `-M`) |
+| `IPERF_NO_NAGLE` | `--no-nagle`, `-N` | `0` | disable Nagle's algorithm (iperf2 `-N`) |
+| `IPERF_BIND` | `--bind`, `-B` | *(unset)* | bind clients to the matching NIC; substring-matched against `ip -o -4 addr show` |
+| `IPERF_SERVER_BIND` | `--server-bind` | mirrors `--bind` | bind the daemon side too; `--server-bind=''` keeps 0.0.0.0 |
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
@@ -176,13 +260,13 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; safe to point at a shared FS (every remote-side file embeds `<host>_<run-id>`) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 
-#### `--jobs` and capped-concurrency parallel SSH
+#### `--ssh-jobs` and capped-concurrency parallel SSH
 
-Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`, `distribute-scripts`, `collect-results`, `stop-servers`, `cleanup`) fan out to all hosts in parallel, capped at `IPERF_JOBS` concurrent SSH/SCP sessions. Per-host output is captured in worker buffers and replayed in server-list order so the screen output stays readable.
+Setup and teardown subcommands (`check-iperf`, `check-servers`, `start-servers`, `distribute-scripts`, `collect-results`, `stop-servers`, `cleanup`) fan out to all hosts in parallel, capped at `IPERF_SSH_JOBS` concurrent SSH/SCP sessions. Per-host output is captured in worker buffers and replayed in server-list order so the screen output stays readable.
 
-The default of `16` keeps the orchestrator host's SSH agent and the per-host sshd happy on most fleets. Bump it (e.g. `--jobs 64`) when you have hundreds of hosts and the orchestrator's CPU/network can absorb it; lower it if `MaxStartups` on your sshds rejects connections.
+The default is derived from the orchestrator host's core count (4× cores, floor 4, capped at 32), which keeps its SSH agent and the per-host sshd happy on most fleets. Bump it (e.g. `--ssh-jobs 64`) when you have hundreds of hosts and the orchestrator's CPU/network can absorb it; lower it if `MaxStartups` on your sshds rejects connections.
 
-The actual `run-tests parallel` mode is *not* throttled by `--jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--jobs` only caps the setup/teardown fan-outs.
+The actual `run-tests parallel` mode is *not* throttled by `--ssh-jobs` — it has to open one SSH session per host simultaneously to hit the synchronized start barrier. `--ssh-jobs` only caps the setup/teardown fan-outs.
 
 #### SSH key setup
 
@@ -215,7 +299,7 @@ Every connection uses `BatchMode=yes`, so any host still requiring a password wi
 | `parallel` (default) | all hosts launch all of their clients at once after a synchronized start | ~1 × DURATION (~50s) | fabric stress testing: load everything at once and see what breaks |
 | `sequential-host` | one host at a time runs all of its clients in parallel | ~N × DURATION (~17 min) | clean numbers per host without inter-host interference |
 | `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
-| `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--flows`, independent of fleet size |
+| `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--host-flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--host-flows`, independent of fleet size |
 
 <!-- docs:end -->
 ---
@@ -392,13 +476,13 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 <!-- docs:limitations -->
 ## Limitations and known gaps
 
-- **No automatic retry on transient SSH failures by default.** If `start-servers` fails on one host, the orchestrator reports it and moves on. Pass `--retries N` to retry each parallel-fan-out worker N extra times with linear back-off, or re-run the subcommand to pick up stragglers.
+- **No automatic retry on transient SSH failures.** If `start-servers` fails on one host, the orchestrator reports it and moves on (`all` aborts unless `--keep-going` is passed). Re-run the subcommand to pick up stragglers.
 - **`sequential-pair` at N=100 takes ~14 hours.** The cleanest mode is also the slowest. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack all `N(N-1)/2` edges into ~N-1 rounds where every host has at most one flow per round). Not implemented; would be moderate complexity.
 - **Heatmap above ~60 hosts loses cell labels.** This is by design — they're unreadable at that density — but it means you have to read the colormap or the CSV for exact values.
 - **Asymmetric NIC speeds aren't auto-handled.** If half your fleet is 1G and half is 10G, the heatmap colormap is dominated by the 10G hosts and the 1G hosts all look very red. Acceptable for our use case ("uniform fleet"); for a heterogeneous fleet you'd want per-pair expected-bandwidth normalization.
 - **No UDP testing.** Fabric stress testing usually wants TCP because that's what real workloads do; if you specifically need UDP loss/jitter measurements, the iperf invocation in the generated run script needs `-u` and the parser needs to read different CSV columns.
 
-> **Resolved**: setup/teardown fan-out is now capped-concurrency parallel SSH (see `--jobs`); workers gain optional retries with linear back-off via `--retries`.
+> **Resolved**: setup/teardown fan-out is now capped-concurrency parallel SSH (see `--ssh-jobs`).
 
 <!-- docs:end -->
 ---

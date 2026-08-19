@@ -7,8 +7,14 @@
 _iperf_orchestrator() {
     local -a subcommands run_modes global_flags
     subcommands=(
-        'init:Load a server list'
-        'status:Show pipeline progress and next step'
+        'gen:Write the plan file (hosts + settings in one artifact)'
+        'start:Start iperf2 daemons everywhere and run the tests'
+        'summarize:Collect results, render CSV/pivot/heatmap, print hints'
+        'stop:Stop the iperf2 daemons (logs stay on the hosts)'
+        'clean:Stop + delete the remote work dir everywhere, verified'
+        'run:start + summarize + stop + clean in one shot'
+        'hints:What you want to know -> the command for it'
+        'status:Probe hosts, list runs, show live progress'
         'check-iperf:Probe iperf2 + mpstat on every host'
         'check-servers:Probe for running iperf daemons'
         'start-servers:Start iperf -s on every host'
@@ -25,27 +31,47 @@ _iperf_orchestrator() {
         'doctor:Probe local prerequisites'
         'results-summary:Print P50/P95/slowest pairs from CSV'
         'all:Run the full pipeline end-to-end'
-        'help:Show full usage'
+        'help:Show the common commands and flags'
+        'help-advanced:Every command, every flag, every env var'
         'version:Print the version and exit'
     )
 
-    run_modes=(parallel sequential-host sequential-pair)
+    run_modes=(parallel sequential-host sequential-pair rolling)
 
     global_flags=(
+        '--plan[plan file written by gen]:file:_files'
+        '--servers[server list file]:file:_files'
+        '-s[server list file]:file:_files'
+        '--output[results base directory]:dir:_files -/'
+        '-o[results base directory]:dir:_files -/'
+        '--run-id[address an existing run]:run-id:'
         '--port[iperf2 listening port]:port:'
         '--duration[seconds per pair]:seconds:'
         '-d[seconds per pair]:seconds:'
-        '--parallel[parallel streams per test]:N:'
-        '-P[parallel streams per test]:N:'
-        '--jobs[max concurrent SSH/SCP fan-out]:N:'
+        '--streams[parallel TCP streams per test]:N:'
+        '-P[parallel TCP streams per test]:N:'
+        '--ssh-jobs[max concurrent SSH/SCP fan-out]:N:'
         '-j[max concurrent SSH/SCP fan-out]:N:'
         '--start-delay[synchronized-start lead time]:seconds:'
+        '--total-time[rolling mode wall-time]:seconds:'
+        '--host-flows[concurrent iperf procs per directed edge]:N:'
+        '--bandwidth[cap per-flow rate (iperf2 -b)]:rate:'
+        '-b[cap per-flow rate (iperf2 -b)]:rate:'
+        '--length[TCP read/write buffer size (iperf2 -l)]:size:'
+        '-l[TCP read/write buffer size (iperf2 -l)]:size:'
+        '--window[TCP window / socket buffer (iperf2 -w)]:size:'
+        '-w[TCP window / socket buffer (iperf2 -w)]:size:'
+        '--mss[TCP maximum segment size (iperf2 -M)]:size:'
+        '-M[TCP maximum segment size (iperf2 -M)]:size:'
+        '--no-nagle[disable Nagle'"'"'s algorithm (iperf2 -N)]'
+        '-N[disable Nagle'"'"'s algorithm (iperf2 -N)]'
+        '--bind[bind clients to matching NIC (substring pattern)]:pattern:'
+        '-B[bind clients to matching NIC (substring pattern)]:pattern:'
+        '--server-bind[bind the daemon side too]:pattern:'
         '--ssh-user[SSH login user]:user:'
         '-u[SSH login user]:user:'
-        '--iperf-dir[local working dir]:dir:_files -/'
         '--remote-dir[remote working dir]:dir:'
         '--python[Python interpreter]:path:_files'
-        '--retries[retry parallel_hosts workers N times]:N:'
         '--dry-run[print SSH/SCP commands without executing]'
         '-n[print SSH/SCP commands without executing]'
         '--verbose[also print every ssh/scp invocation]'
@@ -54,6 +80,7 @@ _iperf_orchestrator() {
         '-q[suppress non-WARN/ERROR log lines]'
         '-h[show help]'
         '--help[show help]'
+        '--help-advanced[show every command, flag, and env var]'
         '--version[print the version and exit]'
     )
 
@@ -72,17 +99,32 @@ _iperf_orchestrator() {
                     _arguments \
                         "1:mode:(${run_modes[*]})" \
                         '--keep-going[continue past per-host failures]' \
-                        '--resume[skip steps already done in state]' \
                         '--help[show help]'
                     ;;
-                init)
-                    _arguments '1:server list:_files'
+                gen)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--grid[write the hosts as a src\\dst pair grid]' \
+                        '--help[show help]'
+                    ;;
+                start)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--keep-going[continue past per-host failures]' \
+                        '--help[show help]'
+                    ;;
+                run)
+                    _arguments \
+                        "1:mode:(${run_modes[*]})" \
+                        '--for[total-time (rolling) or per-test duration]:seconds:' \
+                        '--keep-going[continue past per-host failures]' \
+                        '--help[show help]'
                     ;;
                 cleanup)
                     _arguments '--yes[confirm rm -rf on every host]' '--help[show help]'
                     ;;
                 status)
-                    _arguments '--json[emit JSON for scripting]' '--help[show help]'
+                    _arguments '--watch[redraw every N seconds]:seconds:' '--help[show help]'
                     ;;
                 *)
                     _arguments '--help[show help]'

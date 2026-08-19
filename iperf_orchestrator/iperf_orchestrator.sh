@@ -64,13 +64,120 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.0.0"
+ORCH_VERSION="2.1.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
 # copyright and warranty notice.
 ORCH_COPYRIGHT="Copyright (C) 2026 Martin J. Gallagher"
 ORCH_LICENSE="GPL-3.0-or-later"
+
+#------------------------------------------------------------------------------
+# Plan file
+#
+# `gen` writes a single plan file (default ./iperf_plan.conf) holding the
+# host list plus every knob for a run, so no flag needs repeating on later
+# invocations and a run is reproducible from one artifact -- the same
+# shape as matrix_orchestrator's matrix.csv. The file doubles as a server
+# list: hosts are plain lines, settings ride in '# key=value' comment
+# tokens, and read_servers() ignores comment lines.
+#
+# Precedence: CLI flag > environment variable > plan file > built-in
+# default. That falls out of the load order: the plan is applied here,
+# BEFORE the env-default expansion below (a plan value is only applied
+# when the env var is unset) and before the CLI pre-pass (which
+# overwrites either).
+#
+# The plan path itself: --plan FILE > $IPERF_PLAN > ./iperf_plan.conf
+# (when it exists). --plan is peeked out of argv here, ahead of the main
+# pre-pass, because the plan must be loaded first for its values to lose
+# to the other flags.
+#------------------------------------------------------------------------------
+PLAN_FILE_DEFAULT="iperf_plan.conf"
+PLAN_FILE=""
+_PLAN_EXPLICIT=0
+_PLAN_MISSING=""
+_plan_peek=""
+_plan_args=("$@")
+for ((_pi=0; _pi<${#_plan_args[@]}; _pi++)); do
+    case "${_plan_args[$_pi]}" in
+        --plan)   _plan_peek="${_plan_args[$((_pi+1))]:-}" ;;
+        --plan=*) _plan_peek="${_plan_args[$_pi]#*=}" ;;
+        --)       break ;;
+    esac
+done
+unset _plan_args _pi
+if [ -n "$_plan_peek" ]; then
+    PLAN_FILE="$_plan_peek"; _PLAN_EXPLICIT=1
+elif [ -n "${IPERF_PLAN:-}" ]; then
+    PLAN_FILE="$IPERF_PLAN"; _PLAN_EXPLICIT=1
+elif [ -f "$PLAN_FILE_DEFAULT" ]; then
+    PLAN_FILE="$PLAN_FILE_DEFAULT"
+fi
+unset _plan_peek
+
+# Apply one plan setting to a config env var, but only when that var is
+# unset: an exported env var -- even an empty one -- is an explicit user
+# choice and wins over the plan.
+_plan_default() {
+    local var="$1" val="$2"
+    if [ -z "${!var+x}" ]; then
+        printf -v "$var" '%s' "$val"
+    fi
+}
+
+_load_plan_settings() {
+    local f="$1" line tok key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in '#'*) ;; *) continue ;; esac
+        # Settings tokens are whitespace-separated key=value pairs inside
+        # comment lines. Values are whitespace-free by construction (gen
+        # refuses to write anything else). set -f: a value like 'bind=10.*'
+        # must not glob against the cwd while the line is word-split.
+        set -f
+        for tok in ${line#\#}; do
+            case "$tok" in *=?*) ;; *) continue ;; esac
+            key="${tok%%=*}"; val="${tok#*=}"
+            case "$key" in
+                mode)        _plan_default IPERF_MODE        "$val" ;;
+                port)        _plan_default IPERF_PORT        "$val" ;;
+                duration)    _plan_default IPERF_DURATION    "$val" ;;
+                streams)     _plan_default IPERF_STREAMS     "$val" ;;
+                host_flows)  _plan_default IPERF_HOST_FLOWS  "$val" ;;
+                total_time)  _plan_default IPERF_TOTAL_TIME  "$val" ;;
+                bandwidth)   _plan_default IPERF_BANDWIDTH   "$val" ;;
+                length)      _plan_default IPERF_LENGTH      "$val" ;;
+                window)      _plan_default IPERF_WINDOW      "$val" ;;
+                mss)         _plan_default IPERF_MSS         "$val" ;;
+                no_nagle)    _plan_default IPERF_NO_NAGLE    "$val" ;;
+                bind)        _plan_default IPERF_BIND        "$val" ;;
+                server_bind) _plan_default IPERF_SERVER_BIND "$val" ;;
+                ssh_user)    _plan_default SSH_USER          "$val" ;;
+                remote_dir)  _plan_default REMOTE_DIR        "$val" ;;
+                ssh_jobs)    _plan_default IPERF_SSH_JOBS    "$val" ;;
+                start_delay) _plan_default START_DELAY       "$val" ;;
+                output)      _plan_default RESULTS_BASE      "$val" ;;
+            esac
+        done
+        set +f
+    done < "$f"
+    # The plan doubles as the server list when it carries host lines and
+    # nothing else picked one (--servers / IPERF_SERVERS still win).
+    if grep -qE '^[^#[:space:]]' "$f"; then
+        _plan_default IPERF_SERVERS "$f"
+    fi
+}
+
+if [ -n "$PLAN_FILE" ]; then
+    if [ -f "$PLAN_FILE" ]; then
+        _load_plan_settings "$PLAN_FILE"
+    elif [ "$_PLAN_EXPLICIT" = "1" ]; then
+        # Only `gen` may name a plan that doesn't exist yet; every other
+        # command dies on it. Checked at dispatch, once the subcommand
+        # is known.
+        _PLAN_MISSING="$PLAN_FILE"
+    fi
+fi
 
 #------------------------------------------------------------------------------
 # Configuration (override via env vars; CLI flags below win over env vars)
@@ -86,6 +193,8 @@ IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
 IPERF_TOTAL_TIME="${IPERF_TOTAL_TIME:-300}"  # 'rolling' mode wall-time
 IPERF_HOST_FLOWS="${IPERF_HOST_FLOWS:-1}"              # 'rolling' mode per-host concurrency
+IPERF_MODE="${IPERF_MODE:-}"    # default run-tests mode; usually set by the
+                                # plan file's 'mode=' key. Empty = parallel.
 
 # iperf2 performance knobs forwarded to every iperf -c invocation.
 # Empty = use iperf2's default; otherwise passed through verbatim.
@@ -198,6 +307,10 @@ while [ $# -gt 0 ]; do
         -o=*)            RESULTS_BASE="${1#*=}"; shift ;;
         --run-id)        _flag_need "$1" "${2:-}"; RUN_ID="$2"; _RUN_ID_EXPLICIT=1; shift 2 ;;
         --run-id=*)      RUN_ID="${1#*=}"; _RUN_ID_EXPLICIT=1; shift ;;
+        # --plan was already consumed by the peek above (the plan must load
+        # before the other flags so its values lose to them); just skip it.
+        --plan)          _flag_need "$1" "${2:-}"; shift 2 ;;
+        --plan=*)        shift ;;
         --servers|-s)    _flag_need "$1" "${2:-}"; SERVER_LIST_FILE="$2"; shift 2 ;;
         --servers=*)     SERVER_LIST_FILE="${1#*=}"; shift ;;
         -s=*)            SERVER_LIST_FILE="${1#*=}"; shift ;;
@@ -405,9 +518,88 @@ read_servers() {
         die "no server list. Pass --servers <file> (or set IPERF_SERVERS, or place servers.txt next to the script)"
     fi
     [ -f "$SERVER_LIST_FILE" ] || die "server list not found: $SERVER_LIST_FILE"
-    # Strip blank lines, comments, and surrounding whitespace
-    sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-        "$SERVER_LIST_FILE" | grep -v '^$'
+    # Two accepted shapes. Plain: one host per line ('#' comments). Grid
+    # (written by `gen --grid`, mx matrix.csv shape): a 'src\dst,...'
+    # header row whose columns are the hosts, then one row per source
+    # whose cells mark which directed pairs to test. Hosts here come from
+    # the header; the cells are parsed separately by _load_pair_grid.
+    local first
+    first=$(sed -e 's/^[[:space:]]*//' "$SERVER_LIST_FILE" | grep -v -E '^(#|$)' | head -n1)
+    case "$first" in
+        'src\dst,'*)
+            printf '%s\n' "${first#src\\dst,}" | tr ',' '\n' \
+                | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$'
+            ;;
+        *)
+            # Strip blank lines, comments, and surrounding whitespace
+            sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                "$SERVER_LIST_FILE" | grep -v '^$'
+            ;;
+    esac
+}
+
+#------------------------------------------------------------------------------
+# Pair grid (partial mesh)
+#
+# When the server list is a grid ('src\dst,...' header), a non-empty cell
+# enables that directed (row -> column) pair and a blank cell skips it --
+# exactly matrix.csv's editing model: blank a cell to drop a flow, blank
+# both cells to drop the pair entirely. A plain host list means full mesh.
+#
+# _load_pair_grid parses the grid once (cached per file) into:
+#   _GRID_PRESENT       1 when the file is a grid
+#   PAIR_OK[src|dst]    set when that directed pair is enabled
+#   GRID_TX_COUNT[src]  how many directed pairs src originates
+# pair_enabled() is the single lookup every mode goes through.
+#------------------------------------------------------------------------------
+_GRID_PRESENT=0
+_GRID_LOADED=""
+
+_load_pair_grid() {
+    local f="$1"
+    [ -n "$f" ] && [ -f "$f" ] || return 0
+    [ "$_GRID_LOADED" = "$f" ] && return 0
+    _GRID_LOADED="$f"
+    _GRID_PRESENT=0
+    declare -gA PAIR_OK=() GRID_TX_COUNT=()
+
+    local first
+    first=$(sed -e 's/^[[:space:]]*//' "$f" | grep -v -E '^(#|$)' | head -n1)
+    case "$first" in 'src\dst,'*) ;; *) return 0 ;; esac
+    _GRID_PRESENT=1
+
+    local cols=() line cells=() src cell i cnt
+    IFS=',' read -r -a cols <<< "$first"    # cols[0] is the src\dst label
+    declare -A _col_set=()
+    for ((i=1; i<${#cols[@]}; i++)); do _col_set["${cols[$i]}"]=1; done
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+        case "$line" in ''|'#'*|'src\dst,'*) continue ;; esac
+        IFS=',' read -r -a cells <<< "$line"
+        src="${cells[0]//[[:space:]]/}"     # hosts never contain whitespace
+        if [ -z "${_col_set[$src]:-}" ]; then
+            warn "pair grid: row '$src' is not a header column; row ignored"
+            continue
+        fi
+        cnt=0
+        for ((i=1; i<${#cols[@]}; i++)); do
+            cell="${cells[$i]:-}"
+            cell="${cell//[[:space:]]/}"
+            if [ -n "$cell" ] && [ "${cols[$i]}" != "$src" ]; then
+                PAIR_OK["$src|${cols[$i]}"]=1
+                cnt=$((cnt + 1))
+            fi
+        done
+        GRID_TX_COUNT["$src"]=$cnt
+    done < "$f"
+}
+
+pair_enabled() {
+    # pair_enabled <src> <dst>: true when src should run iperf -c against
+    # dst. Full mesh (no grid) enables everything.
+    _load_pair_grid "$SERVER_LIST_FILE"
+    [ "$_GRID_PRESENT" = "1" ] || return 0
+    [ -n "${PAIR_OK["$1|$2"]:-}" ]
 }
 
 # Validate the server list once, when something needs hosts. Catches
@@ -670,17 +862,21 @@ first_run_banner() {
 iperf-orchestrator.sh - full-mesh iperf2 testing across a server list
 
 Quick start (key-based SSH to every host must already be set up):
-    $PROG --servers servers.txt all
-                                  # run the full pipeline + render heatmap.
+    $PROG gen --servers servers.txt
+                                  # write the plan file once; every later
+                                  # command reads it, so no flags repeat
+    $PROG run                     # run the full pipeline + render heatmap.
                                   # Results land in $RESULTS_BASE/<run-id>/
+    ('$PROG --servers servers.txt all' still works without a plan.)
 
-The script is stateless. Re-running 'all' creates a fresh run-id; the
+The script is stateless. Re-running 'run'/'all' creates a fresh run-id; the
 'latest' symlink under $RESULTS_BASE is updated each time. To re-analyze
 an older run, pass --run-id <id> to parse-csv / make-pivot / make-heatmap.
 
 Other useful commands:
+    $PROG hints              What you want to know -> the command for it
     $PROG doctor             Check that local prerequisites are installed
-    $PROG status             Probe hosts and list available result runs
+    $PROG status             Probe hosts, list runs, show live progress
     $PROG --help             Common commands and flags (also: help, -h)
     $PROG help-advanced      Every command, every flag, every env var
     $PROG --version          Print the version and exit
@@ -695,33 +891,43 @@ iperf-orchestrator.sh - full-mesh iperf2 throughput tests
 USAGE:
     $PROG [flags] <command> [args]
 
-QUICK START:
-    $PROG --servers servers.txt all                        # run + analyze + cleanup
-    (key-based SSH to every host must already be configured)
+QUICK START (key-based SSH to every host must already be configured):
+    $PROG gen --servers servers.txt   # 1. write the plan file (iperf_plan.conf)
+    $PROG run                         # 2. everything end-to-end + summary
 
-COMMON COMMANDS:
-    start-servers          Start iperf2 -s daemons on every host
-    run-tests [MODE]       Run tests. MODE is one of:
-                             parallel         (default) every host pairs up at once
-                             rolling          random rolling probes; scales to any N
-                                              (--total-time SECONDS, --host-flows N)
-    process                Pull results, parse CSV/CPU, render pivot + heatmap
-    stop-servers           Kill iperf2 -s daemons
-    all [MODE]             start-servers + run-tests + process + stop
-    status                 List runs and probe hosts live
+THE SIX COMMANDS (each reads the plan file, so no flags need repeating):
+    gen [MODE]      Build the plan: host list + every setting in one file
+                    (--grid: a src\\dst pair grid; blank a cell to skip it)
+    start [MODE]    Start iperf2 daemons everywhere and run the tests
+    status          One line per host: probes, daemons, live test progress
+                    (--watch SECONDS keeps refreshing until ctrl-c)
+    summarize       Collect results; render CSV, pivot, heatmap; print the
+                    throughput summary and what to do next
+    stop            Stop the iperf2 daemons (test logs stay on the hosts)
+    clean           stop + delete the remote work dir everywhere, verified
 
-COMMON FLAGS:
+AND WHEN YOU WANT THEM:
+    run [MODE] [--for N]   start + summarize + stop + clean in one shot
+    hints                  What you want to know -> the command for it
+    doctor                 Check local prerequisites (ssh, python, plotting)
+    all [MODE]             The original spelling of 'run' (no summary/hints)
+
+MODES:
+    parallel (default)   every host pairs up at once -- fabric stress test
+    sequential-pair      one connection on the wire at a time -- per-link max
+    sequential-host      one host's tests at a time
+    rolling              random rolling probes for --total-time; any fleet size
+
+COMMON FLAGS (all become plan defaults once 'gen' has run):
+    --plan FILE                plan file (default ./$PLAN_FILE_DEFAULT)
     --servers, -s FILE         server list (one host per line; '#' comments)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
-    --host-flows N             concurrent iperf processes per directed edge.
-                               In parallel/sequential modes: each (src, dst) pair
-                               runs N iperf processes simultaneously, so the cell
-                               aggregates N flows' bandwidth. In rolling mode:
-                               caps how many concurrent iperf processes a single
-                               host has in flight at once. (default $IPERF_HOST_FLOWS)
+    --host-flows N             concurrent iperf processes per directed edge
+                               (parallel/sequential) or per-host concurrency
+                               cap (rolling). (default $IPERF_HOST_FLOWS)
     --bandwidth, -b RATE       cap per-flow rate, e.g. 100M, 1G (iperf2 -b)
-    --length, -l SIZE          TCP r/w buffer size, e.g. 128K (iperf2 -l)
+    --streams, -P N            parallel TCP streams within each test
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --output, -o DIR           results directory (default $RESULTS_BASE)
@@ -729,8 +935,10 @@ COMMON FLAGS:
     --help-advanced            show every command, every flag, every env var
     --version                  print the version and exit
 
-Each invocation creates \$RESULTS_BASE/<run-id>/. \$RESULTS_BASE/latest tracks
-the most recent run. Pass --run-id <id> to operate on an older run.
+Each run writes \$RESULTS_BASE/<run-id>/; \$RESULTS_BASE/latest tracks the
+newest. Analysis follows 'latest'; pass --run-id <id> for an older run.
+The step-by-step commands (start-servers, run-tests, parse-csv, ...) all
+still exist: see --help-advanced.
 EOF
 }
 
@@ -749,8 +957,13 @@ USAGE:
     $PROG [global flags] <command> [args]
 
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
+    --plan FILE                Plan file written by 'gen' (default: \$IPERF_PLAN
+                               env, else ./$PLAN_FILE_DEFAULT when it exists).
+                               Holds the host list plus every setting below;
+                               precedence: CLI flag > env var > plan > default.
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
-                               (default: \$IPERF_SERVERS env, else $SCRIPT_DIR/servers.txt)
+                               (default: \$IPERF_SERVERS env, else the plan file's
+                               hosts, else $SCRIPT_DIR/servers.txt)
     --output, -o DIR           Base directory for results (default $RESULTS_BASE)
     --run-id ID                Address an existing run (default: follow 'latest' symlink)
     --port PORT                iperf2 listening port (default $IPERF_PORT)
@@ -798,6 +1011,31 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
 Key-based SSH to every host must be configured before use (e.g. via
 ssh-copy-id); the orchestrator connects non-interactively with BatchMode.
 
+PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
+    gen [MODE] [--grid]    Write the plan file: host list + settings in one
+                           artifact. The plan doubles as the server list;
+                           CLI flags and env vars still beat its values.
+                           Re-running gen preserves settings you don't
+                           override (the old plan is loaded as defaults).
+                           --grid writes the hosts as an mx-style src\dst
+                           pair grid instead of a plain list: blank a cell
+                           to skip that directed pair (partial mesh). All
+                           commands accept either shape, and re-running gen
+                           on a grid plan keeps its blanked cells.
+    start [MODE] [--keep-going]
+                           start-servers + run-tests in one verb.
+    status [--watch SECONDS]
+                           Probes + live per-host progress; --watch redraws
+                           every SECONDS until ctrl-c (like mx status).
+    summarize              process + pivot + results-summary (with hints).
+    stop                   stop-servers, plus what-to-do-next breadcrumbs.
+    clean                  stop-servers + remove \$REMOTE_DIR on every host,
+                           then VERIFY nothing is left (no --yes needed).
+    run [MODE] [--for N] [--keep-going]
+                           all + results-summary. --for N pins total-time
+                           (rolling mode) or per-test duration (others).
+    hints                  Goal -> command cheatsheet, sized to your fleet.
+
 SETUP:
     check-iperf            Check which hosts have iperf2 installed
     check-servers          Check which hosts have iperf -s currently running
@@ -842,7 +1080,9 @@ CONVENIENCE:
     help-advanced              Show this message.
     version                    Print the version and exit (same as --version).
 
-CONFIG (env vars; CLI flags above take precedence):
+CONFIG (env vars; CLI flags above take precedence, plan values yield):
+    IPERF_PLAN=${IPERF_PLAN:-}             # plan file path (--plan)
+    IPERF_MODE=${IPERF_MODE:-}             # default run mode (plan 'mode=' key)
     IPERF_PORT=$IPERF_PORT
     IPERF_DURATION=$IPERF_DURATION
     IPERF_STREAMS=$IPERF_STREAMS
@@ -866,6 +1106,7 @@ CONFIG (env vars; CLI flags above take precedence):
     REMOTE_DIR=$REMOTE_DIR
 
 FILES:
+    Plan file:    ${PLAN_FILE:-(none; 'gen' writes ./$PLAN_FILE_DEFAULT)}
     Server list:  ${SERVER_LIST_FILE:-(unset)}
     Results base: $RESULTS_BASE
     Latest run:   $RESULTS_BASE/latest -> ...
@@ -873,11 +1114,89 @@ EOF
 }
 
 #------------------------------------------------------------------------------
+# One live-progress line per host for the run named in $_PROGRESS_RUN_ID
+# (mx-style status ticker). Reads the host's own status file -- written by
+# the generated run script -- plus its per-test log count, so it works from
+# a second terminal while run-tests blocks in the first. NOT-STARTED covers
+# hosts the run never reached; the expected total (per-host directed edges
+# x host-flows) only holds for parallel/sequential modes, so it is shown
+# only when a status file exists (rolling mode has none and its log count
+# just grows).
+_worker_run_progress() {
+    local host="$1" run="$_PROGRESS_RUN_ID" expected="${_PROGRESS_EXPECTED:-}"
+    # Pair grids give each host its own expected count (see _status_once).
+    if [ -n "${_PROGRESS_EXPECTED_MAP[$host]:-}" ]; then
+        expected="${_PROGRESS_EXPECTED_MAP[$host]}"
+    fi
+    local safe; safe=$(_sanitize_host "$host")
+    local out
+    if ! out=$(ssh_run "$host" "
+            cd '$REMOTE_DIR' 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
+            st='iperf_run_${safe}_${run}.status'
+            logs=\$(ls iperf_test_${safe}_to_*_${run}.log 2>/dev/null | wc -l | tr -d ' ')
+            if [ -f \"\$st\" ]; then
+                printf '%s|%s\n' \"\$logs\" \"\$(tail -n 1 \"\$st\")\"
+            elif [ \"\$logs\" -gt 0 ]; then
+                printf '%s|\n' \"\$logs\"
+            else
+                echo 'NOT-STARTED'
+            fi
+        " 2>/dev/null); then
+        printf '%-30s UNREACHABLE\n' "$host"
+        return 0
+    fi
+    case "$out" in
+        NOT-STARTED)
+            printf '%-30s NOT-STARTED\n' "$host" ;;
+        *'|'*)
+            local logs="${out%%|*}" last="${out#*|}"
+            local total=""
+            [ -n "$expected" ] && [ -n "$last" ] && total="/$expected"
+            case "$last" in
+                *DONE*) printf '%-30s DONE      %s%s tests\n' "$host" "$logs" "$total" ;;
+                '')     printf '%-30s RUNNING   %s tests so far\n' "$host" "$logs" ;;
+                *)      printf '%-30s RUNNING   %s%s tests   %s\n' "$host" "$logs" "$total" "$last" ;;
+            esac ;;
+        '')
+            printf '%-30s (no data)\n' "$host" ;;
+        *)
+            printf '%-30s %s\n' "$host" "$out" ;;
+    esac
+}
+
+#------------------------------------------------------------------------------
 # Probe hosts and list local run directories. No state file is read or
-# written; everything is derived live.
+# written; everything is derived live. cmd_status parses --watch and loops
+# over _status_once, mirroring `mx status --watch`.
 cmd_status() {
+    local watch=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --watch)   _flag_need "$1" "${2:-}"; watch="$2"; shift 2 ;;
+            --watch=*) watch="${1#*=}"; shift ;;
+            *) die "status: unknown argument: $1 (expected --watch SECONDS)" ;;
+        esac
+    done
+    if [ "$watch" != "0" ]; then
+        _validate_uint "--watch" "$watch" 1
+    fi
+    while :; do
+        if [ "$watch" != "0" ]; then
+            # Clear + home, like watch(1) / mx status --watch.
+            printf '\033[2J\033[H'
+            echo "status -- $(date '+%H:%M:%S') (every ${watch}s, ctrl-c to stop)"
+            echo
+        fi
+        _status_once
+        [ "$watch" != "0" ] || break
+        sleep "$watch"
+    done
+}
+
+_status_once() {
     echo "Results base: $RESULTS_BASE"
     echo "Server list:  ${SERVER_LIST_FILE:-(none; pass --servers)}"
+    echo "Plan file:    ${PLAN_FILE:-(none; '$PROG gen' writes one)}"
     echo
     echo "Runs:"
     if [ -d "$RESULTS_BASE" ]; then
@@ -904,6 +1223,34 @@ cmd_status() {
         echo
         echo "Daemons:"
         parallel_hosts _worker_check_servers | sed 's/^/  /'
+
+        # Live per-host ticker for the active run (or --run-id): what each
+        # host's remote status file and log count say right now.
+        local prun=""
+        if [ "${_RUN_ID_EXPLICIT:-0}" = "1" ] && [ -n "$RUN_ID" ]; then
+            prun="$RUN_ID"
+        elif [ -L "$RESULTS_BASE/latest" ]; then
+            prun=$(readlink "$RESULTS_BASE/latest" 2>/dev/null)
+        fi
+        if [ -n "$prun" ]; then
+            local nh; nh=$(read_servers | wc -l)
+            _PROGRESS_RUN_ID="$prun"
+            _PROGRESS_EXPECTED=$(( (nh - 1) * IPERF_HOST_FLOWS ))
+            # With a pair grid, each host owes its own directed-edge
+            # count rather than N-1; the worker prefers this map.
+            declare -gA _PROGRESS_EXPECTED_MAP=()
+            _load_pair_grid "$SERVER_LIST_FILE"
+            if [ "$_GRID_PRESENT" = "1" ]; then
+                local ph
+                while IFS= read -r ph; do
+                    [ -n "$ph" ] || continue
+                    _PROGRESS_EXPECTED_MAP[$ph]=$(( ${GRID_TX_COUNT[$ph]:-0} * IPERF_HOST_FLOWS ))
+                done < <(read_servers)
+            fi
+            echo
+            echo "Progress (run $prun):"
+            parallel_hosts _worker_run_progress | sed 's/^/  /'
+        fi
     fi
 }
 
@@ -1024,23 +1371,31 @@ cmd_create_scripts() {
         local src_safe; src_safe=$(_sanitize_host "$src")
         local script="$SCRIPTS_DIR/run_${src_safe}_${RUN_ID}.sh"
 
-        # Every host is a client against every other host. Each directed
-        # edge (src -> dst) is its own iperf2 invocation, producing a
-        # log with exactly one direction's data. This sidesteps the
-        # iperf2 --full-duplex CSV reporting quirks (per-direction row
-        # vs SUM-of-both-directions row) that made cell values
-        # unreliable across -P values and iperf2 builds.
+        # Every host is a client against every other host -- unless the
+        # server list is a pair grid, in which case only the enabled
+        # directed edges get a client invocation. Each directed edge
+        # (src -> dst) is its own iperf2 invocation, producing a log
+        # with exactly one direction's data. This sidesteps the iperf2
+        # --full-duplex CSV reporting quirks (per-direction row vs
+        # SUM-of-both-directions row) that made cell values unreliable
+        # across -P values and iperf2 builds.
         local targets=() t
         for t in "${hosts_arr[@]}"; do
             [ "$t" = "$src" ] && continue
+            pair_enabled "$src" "$t" || continue
             targets+=("$t")
         done
 
-        # Hard guard: every host must have N-1 targets. An empty list
-        # means the run script will silently no-op for that source, and
-        # the pivot will show '-(1)' for everything in that row -- the
-        # exact failure mode we saw before this guard was added.
+        # Hard guard: every host must end up with the target count the
+        # input calls for -- N-1 in full mesh, the grid row's count when
+        # a pair grid restricts the mesh. An unexpected shortfall means
+        # the run script would silently no-op for that source, and the
+        # pivot would show '-(1)' for everything in that row -- the
+        # exact failure mode we saw before this guard was added. (A grid
+        # row that legitimately enables 0 pairs is fine: the host still
+        # runs its CPU sampler and receives traffic.)
         local expected_targets=$(( ${#hosts_arr[@]} - 1 ))
+        [ "$_GRID_PRESENT" = "1" ] && expected_targets="${GRID_TX_COUNT[$src]:-0}"
         if [ "${#targets[@]}" -ne "$expected_targets" ]; then
             die "create-scripts: $src ended up with ${#targets[@]} target(s), expected $expected_targets. Server list: ${hosts_arr[*]}"
         fi
@@ -1333,7 +1688,7 @@ _orchestrator_signal_cleanup() {
 }
 
 cmd_run_tests() {
-    local mode="${1:-parallel}"
+    local mode="${1:-${IPERF_MODE:-parallel}}"
     case "$mode" in
         parallel|sequential-host|sequential-pair|rolling) ;;
         *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair|rolling)" ;;
@@ -1370,6 +1725,7 @@ cmd_run_tests() {
             for s in "${hosts[@]}"; do
                 for d in "${hosts[@]}"; do
                     [ "$s" = "$d" ] && continue
+                    pair_enabled "$s" "$d" || continue
                     _run_one_round 0 "$d" "$s"
                 done
             done
@@ -1395,6 +1751,7 @@ _run_rolling() {
         local peers="" peer_conn_ips_decl="declare -A PEER_CONN_IPS=( " p
         for p in "${hosts[@]}"; do
             [ "$p" = "$src" ] && continue
+            pair_enabled "$src" "$p" || continue
             peers+="\"$p\" "
             # Embed an associative-array entry per peer so the rolling
             # loop can look up the data-plane IP by name. Empty value
@@ -1448,6 +1805,15 @@ _run_rolling() {
             # The rolling loop picks targets by name (for fair-share
             # counting) but connects via the resolved conn IP.
             $peer_conn_ips_decl
+            # A pair grid can leave this host with no outbound pairs at
+            # all (receive-only). Keep the CPU sampler running for the
+            # window, but skip the probe loop -- an empty PEERS array
+            # would divide by zero at target-pick time.
+            if [ \${#PEERS[@]} -eq 0 ]; then
+                echo \"[rolling] $src: no enabled outbound pairs; sampling CPU only\"
+                wait
+                exit 0
+            fi
             END_TIME=\$(( \$(date +%s) + $IPERF_TOTAL_TIME ))
             declare -A counts
             for t in \"\${PEERS[@]}\"; do counts[\"\$t\"]=0; done
@@ -2891,13 +3257,16 @@ _doctor_check_python_module() {
 cmd_results_summary() {
     _resolve_existing_run
     local csv="$RESULTS_DIR/iperf_results.csv"
+    local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
     [ -f "$csv" ] || die "No CSV at $csv; run: $PROG parse-csv"
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
 
-    "$PYTHON_BIN" - "$csv" <<'PYEOF'
-import csv, sys, statistics
+    "$PYTHON_BIN" - "$csv" "$cpu_csv" "$PROG" <<'PYEOF'
+import csv, sys, os, statistics, textwrap
 
 in_csv = sys.argv[1]
+cpu_csv = sys.argv[2] if len(sys.argv) > 2 else ""
+prog = sys.argv[3] if len(sys.argv) > 3 else "iperf-orchestrator"
 
 vals = []        # (mbps, source, target)
 errors = 0
@@ -2935,6 +3304,65 @@ print("Slowest 5 (source -> target):")
 slowest = sorted(vals)[:5]
 for v, s, t in slowest:
     print(f"  {v:>10.2f}  {s} -> {t}")
+
+# ---- What next -------------------------------------------------------------
+# mx-style guidance: turn what the numbers say into the next command to
+# run. Only patterns the data actually supports; nothing speculative.
+hints = []
+p50 = pct(50)
+
+if errors:
+    hints.append(
+        f"{errors} direction(s) produced no measurement -- they show as -(N) "
+        f"cells in the pivot. `{prog} status` probes daemons, iperf2 and live "
+        f"progress on every host; `{prog} check-iperf` verifies the installs.")
+
+if p50 > 0 and mbps[0] < 0.5 * p50:
+    w_v, w_s, w_t = slowest[0]
+    hints.append(
+        f"the slowest direction ({w_s} -> {w_t} at {w_v:.0f} Mbps) runs below "
+        f"half the median ({p50:.0f} Mbps) -- typically a bad link, duplex "
+        f"mismatch, or negotiated speed. Isolate it: put just those two hosts "
+        f"in the list and `{prog} run sequential-pair`.")
+elif p50 > 0 and (pct(95) - mbps[0]) < 0.15 * p50:
+    hints.append(
+        f"throughput is uniform across the mesh (spread under 15% of the "
+        f"median) -- the fabric is clean at this load. Raise the load: "
+        f"`{prog} run --host-flows 4` (concurrent flows per link) or "
+        f"`--streams 4` (TCP streams inside each test).")
+
+# Peak-CPU join: a host pinned near 100% during the test is measuring its
+# own CPU, not the network. cpu_summary.csv is written by parse-cpu; when
+# it is absent (parse-cpu skipped) this section just stays quiet.
+hot = []
+if cpu_csv and os.path.exists(cpu_csv):
+    try:
+        with open(cpu_csv) as f:
+            for row in csv.DictReader(f):
+                try:
+                    peak = float(row.get("peak_total_pct") or "")
+                except ValueError:
+                    continue
+                if peak >= 85.0:
+                    hot.append((peak, row.get("host", "?")))
+    except OSError:
+        pass
+if hot:
+    hot.sort(reverse=True)
+    peak, host = hot[0]
+    more = f" (and {len(hot) - 1} more host(s) over 85%)" if len(hot) > 1 else ""
+    hints.append(
+        f"{host} peaked at {peak:.0f}% CPU during the test{more} -- its numbers "
+        f"may be CPU-bound, not network-bound. Check cpu_summary.csv for "
+        f"per-core softirq peaks (single-core saturation from unspread NIC "
+        f"IRQs is the usual culprit).")
+
+if hints:
+    print()
+    print("What next:")
+    for h in hints:
+        print(textwrap.fill(h, width=78, initial_indent="  - ",
+                            subsequent_indent="    "))
 PYEOF
 }
 
@@ -2984,7 +3412,7 @@ cmd_process() {
 
 #------------------------------------------------------------------------------
 cmd_all() {
-    local mode="parallel"
+    local mode="${IPERF_MODE:-parallel}"
     local keep_going=0
     local arg
     for arg in "$@"; do
@@ -3066,6 +3494,277 @@ cmd_all() {
     trap - INT TERM
 }
 
+#==============================================================================
+# Plan-driven verbs (the mx-style surface)
+#
+# gen -> start -> status -> summarize -> stop -> clean, plus run/hints.
+# Thin orchestration over the step commands above: the plan file carries
+# the configuration, each verb prints what to do next.
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# gen: write the plan file -- the single artifact that drives every other
+# command. Hosts one per line, settings in '# key=value' header tokens.
+# Later invocations load it automatically (./iperf_plan.conf or --plan
+# FILE), so flags never need repeating and a run is reproducible from the
+# one file. Because an existing plan was already loaded as defaults before
+# this runs, re-running gen preserves settings you don't override.
+cmd_gen() {
+    local mode="${IPERF_MODE:-parallel}" grid=0 a
+    for a in "$@"; do
+        case "$a" in
+            --grid) grid=1 ;;
+            parallel|sequential-host|sequential-pair|rolling) mode="$a" ;;
+            *) die "gen: unknown argument: $a (expected a mode and/or --grid)" ;;
+        esac
+    done
+    _validate_server_list
+
+    # If the input is already a grid (re-gen from a hand-edited plan),
+    # stay a grid and keep its blanked cells; --servers with a plain list
+    # resets to full mesh unless --grid asks for an explicit grid.
+    _load_pair_grid "$SERVER_LIST_FILE"
+    [ "$_GRID_PRESENT" = "1" ] && grid=1
+
+    # The plan's settings tokens are whitespace-split at load time, so a
+    # value containing whitespace can't round-trip. Catch it at write time.
+    case "$SSH_USER$REMOTE_DIR$IPERF_BANDWIDTH$IPERF_LENGTH$IPERF_WINDOW$IPERF_MSS$IPERF_BIND$IPERF_SERVER_BIND" in
+        *[[:space:]]*) die "gen: plan values cannot contain whitespace; keep using the flag/env var for that setting" ;;
+    esac
+
+    local out="${PLAN_FILE:-$PLAN_FILE_DEFAULT}"
+    local hosts
+    hosts=$(read_servers)
+    [ -n "$hosts" ] || die "gen: server list $SERVER_LIST_FILE has no hosts"
+    local n; n=$(printf '%s\n' "$hosts" | wc -l)
+    if [ "$grid" = "1" ]; then
+        # Grid rows are comma-separated, so a comma inside a hostname
+        # would corrupt the format.
+        case "$hosts" in
+            *,*) die "gen: --grid needs comma-free hostnames" ;;
+        esac
+    fi
+
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/iperf-plan-XXXXXX") || die "mktemp failed"
+    {
+        echo "# iperf-orchestrator plan v1 -- one file drives every command"
+        echo "#"
+        echo "# Hosts live below: one per line, or a src\\dst pair grid ('#'"
+        echo "# comments OK). Settings ride in the key=value tokens; edit either"
+        echo "# and just re-run. Every command reads this file (./iperf_plan.conf,"
+        echo "# or --plan FILE / \$IPERF_PLAN), so no flag needs repeating. CLI"
+        echo "# flags and env vars still win over the plan."
+        echo "#"
+        echo "# mode=$mode"
+        echo "# port=$IPERF_PORT duration=$IPERF_DURATION streams=$IPERF_STREAMS host_flows=$IPERF_HOST_FLOWS total_time=$IPERF_TOTAL_TIME"
+        echo "# bandwidth=$IPERF_BANDWIDTH length=$IPERF_LENGTH window=$IPERF_WINDOW mss=$IPERF_MSS no_nagle=$IPERF_NO_NAGLE"
+        echo "# bind=$IPERF_BIND server_bind=$IPERF_SERVER_BIND"
+        echo "# ssh_user=$SSH_USER remote_dir=$REMOTE_DIR"
+        if [ "$grid" = "1" ]; then
+            # mx matrix.csv shape: rows send, columns receive, a non-empty
+            # cell enables that directed pair. Blank a cell to skip it.
+            echo "#"
+            echo "# Rows send, columns receive; 'x' tests that directed pair."
+            echo "# Blank a cell to skip a direction; blank both to drop the pair."
+            local hosts_arr=() gh s d
+            while IFS= read -r gh; do [ -n "$gh" ] && hosts_arr+=("$gh"); done <<< "$hosts"
+            printf 'src\\dst'
+            for d in "${hosts_arr[@]}"; do printf ',%s' "$d"; done
+            printf '\n'
+            for s in "${hosts_arr[@]}"; do
+                printf '%s' "$s"
+                for d in "${hosts_arr[@]}"; do
+                    if [ "$s" = "$d" ]; then
+                        printf ','
+                    elif [ "$_GRID_PRESENT" = "1" ] && [ -z "${PAIR_OK["$s|$d"]:-}" ]; then
+                        printf ','
+                    else
+                        printf ',x'
+                    fi
+                done
+                printf '\n'
+            done
+        else
+            printf '%s\n' "$hosts"
+        fi
+    } > "$tmp"
+    [ -f "$out" ] && log "gen: overwriting existing plan $out (its settings were this invocation's defaults)"
+    mv "$tmp" "$out" || die "gen: could not write $out"
+    local shape="full mesh"
+    if [ "$grid" = "1" ]; then
+        local edges=$(( n * (n - 1) )) gh2
+        if [ "$_GRID_PRESENT" = "1" ]; then
+            edges=0
+            for gh2 in "${!GRID_TX_COUNT[@]}"; do
+                edges=$(( edges + GRID_TX_COUNT[$gh2] ))
+            done
+        fi
+        shape="grid, $edges enabled pair(s)"
+    fi
+    log "gen: wrote $out ($n hosts, $shape, mode=$mode, port=$IPERF_PORT, duration=${IPERF_DURATION}s)"
+    log "Next: $PROG start          # daemons up + run the tests"
+    log "      (or '$PROG run' for the whole pipeline in one shot)"
+}
+
+#------------------------------------------------------------------------------
+# start: daemons up, then run the tests -- one verb for the whole launch,
+# mirroring `mx start`. MODE defaults to the plan's mode= line.
+cmd_start() {
+    local mode="" keep_going=0 a
+    for a in "$@"; do
+        case "$a" in
+            --keep-going) keep_going=1 ;;
+            parallel|sequential-host|sequential-pair|rolling) mode="$a" ;;
+            *) die "start: unknown argument: $a (expected a mode and/or --keep-going)" ;;
+        esac
+    done
+    [ -n "$mode" ] || mode="${IPERF_MODE:-parallel}"
+    cmd_start_servers
+    if [ ${#PARALLEL_FAILED[@]} -gt 0 ] && [ "$keep_going" != "1" ]; then
+        die "start-servers had ${#PARALLEL_FAILED[@]} failure(s); fix the hosts or pass --keep-going"
+    fi
+    cmd_run_tests "$mode"
+    log "Tests done. The iperf2 daemons are still running."
+    log "Next: $PROG summarize      # collect + parse + pivot + heatmap + hints"
+    log "      $PROG stop           # stop the daemons ('$PROG clean' removes every trace)"
+}
+
+#------------------------------------------------------------------------------
+# summarize: everything between "the tests ran" and "here is what it
+# means": collect + parse + pivot + heatmap, then the pivot itself, the
+# throughput summary, and what to do next.
+cmd_summarize() {
+    cmd_process
+    local pivot="$RESULTS_DIR/iperf_pivot.txt"
+    if [ -f "$pivot" ]; then
+        echo
+        cat "$pivot"
+        echo
+    fi
+    cmd_results_summary
+}
+
+#------------------------------------------------------------------------------
+# stop: stop-servers under its mx name, with the next steps spelled out.
+cmd_stop() {
+    cmd_stop_servers
+    log "Test logs are still on the hosts:"
+    log "  $PROG summarize   # collect + analyze them"
+    log "  $PROG clean       # stop + delete every trace"
+}
+
+#------------------------------------------------------------------------------
+# clean: stop the daemons, remove $REMOTE_DIR on every host, and VERIFY
+# the directory is actually gone -- like `mx clean`, it refuses to report
+# success unless nothing is left.
+_worker_clean_verify() {
+    local host="$1"
+    if ssh_run "$host" "rm -rf '$REMOTE_DIR' && [ ! -e '$REMOTE_DIR' ]"; then
+        printf '%-30s CLEAN\n' "$host"
+    else
+        printf '%-30s LEFTOVER (%s still exists or could not be removed)\n' "$host" "$REMOTE_DIR"
+        return 1
+    fi
+}
+
+cmd_clean() {
+    _validate_server_list
+    log "Stopping daemons and removing $REMOTE_DIR on every host..."
+    cmd_stop_servers
+    parallel_hosts _worker_clean_verify
+    if [ ${#PARALLEL_FAILED[@]} -gt 0 ]; then
+        die "clean: ${#PARALLEL_FAILED[@]} host(s) still have leftovers; see the lines above"
+    fi
+    log "clean: no trace left on any host"
+}
+
+#------------------------------------------------------------------------------
+# run: the whole pipeline in one shot -- `all` under its mx name, plus the
+# post-run summary and hints. --for N pins the run's wall-time knob:
+# total-time in rolling mode, per-test duration in the other modes.
+cmd_run() {
+    local pass=() mode="${IPERF_MODE:-parallel}" for_secs=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --for)   _flag_need "$1" "${2:-}"; for_secs="$2"; shift 2 ;;
+            --for=*) for_secs="${1#*=}"; shift ;;
+            --keep-going) pass+=("$1"); shift ;;
+            parallel|sequential-host|sequential-pair|rolling) mode="$1"; shift ;;
+            *) die "run: unknown argument: $1 (expected a mode, --for SECONDS, and/or --keep-going)" ;;
+        esac
+    done
+    if [ -n "$for_secs" ]; then
+        _validate_uint "--for" "$for_secs" 1
+        if [ "$mode" = "rolling" ]; then
+            IPERF_TOTAL_TIME="$for_secs"
+        else
+            IPERF_DURATION="$for_secs"
+        fi
+    fi
+    cmd_all "$mode" ${pass[@]+"${pass[@]}"}
+    cmd_results_summary
+}
+
+#------------------------------------------------------------------------------
+# hints: what you want to know -> the command that gets you there, sized
+# to the fleet when a server list (or plan) is at hand.
+cmd_hints() {
+    cat <<EOF
+What do you want to know?            ->  run this
+
+  Is the network healthy? (fastest full survey)
+      $PROG gen --servers servers.txt
+      $PROG run                          # parallel: every host pairs up at once
+
+  What is each link's true maximum? (nothing else on the wire)
+      $PROG run sequential-pair          # one connection at a time; slow but clean
+
+  Does the fabric degrade under sustained load, or on a big fleet?
+      $PROG run rolling --for 600        # random rolling probes; scales to any N
+      $PROG run --host-flows 4           # 4 concurrent flows per link: stress it
+
+  Can one link carry more than one stream?
+      $PROG run --streams 4              # 4 TCP streams inside each test
+
+  Is a slow host CPU-bound or network-bound?
+      $PROG summarize                    # bar chart annotates peak %CPU per host;
+                                         # cpu_summary.csv has per-core softirq peaks
+
+  What is happening right now?
+      $PROG status                       # probes + one live progress line per host
+
+  Done, or need to bail out mid-run?
+      $PROG stop                         # stop the daemons (logs stay)
+      $PROG clean                        # stop + delete every trace, verified
+EOF
+
+    local n=0
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        n=$(read_servers | wc -l)
+    fi
+    if [ "$n" -ge 2 ]; then
+        local edges=$(( n * (n - 1) ))
+        # A pair grid tests only the enabled directed edges.
+        _load_pair_grid "$SERVER_LIST_FILE"
+        if [ "$_GRID_PRESENT" = "1" ]; then
+            edges=0
+            local gh
+            for gh in "${!GRID_TX_COUNT[@]}"; do
+                edges=$(( edges + GRID_TX_COUNT[$gh] ))
+            done
+        fi
+        local seq_secs=$(( edges * IPERF_DURATION ))
+        local par_secs=$(( START_DELAY + IPERF_DURATION ))
+        echo
+        echo "Sized for your fleet ($n hosts from ${SERVER_LIST_FILE##*/}):"
+        echo "  parallel:        $edges directed tests at once; about ${par_secs}s wall"
+        echo "                   (start-delay $START_DELAY + duration $IPERF_DURATION)"
+        echo "  sequential-pair: $edges tests one at a time; about $(( seq_secs / 60 ))m$(( seq_secs % 60 ))s wall at duration=${IPERF_DURATION}s"
+        echo "  rolling:         runs for total-time=${IPERF_TOTAL_TIME}s; each host keeps"
+        echo "                   <= host-flows=$IPERF_HOST_FLOWS probe(s) in flight"
+    fi
+}
 
 #==============================================================================
 # Dispatcher
@@ -3073,8 +3772,21 @@ cmd_all() {
 cmd="${1:-}"
 shift || true
 
+# A plan named explicitly (--plan / $IPERF_PLAN) that doesn't exist is an
+# error for every command except `gen`, which is how the file gets created.
+if [ -n "${_PLAN_MISSING:-}" ] && [ "$cmd" != "gen" ]; then
+    die "plan file not found: $_PLAN_MISSING (run '$PROG gen' to create it)"
+fi
+
 case "$cmd" in
     "")                 first_run_banner ;;
+    gen)                cmd_gen "$@" ;;
+    start)              cmd_start "$@" ;;
+    summarize)          cmd_summarize ;;
+    stop)               cmd_stop ;;
+    clean)              cmd_clean ;;
+    run)                cmd_run "$@" ;;
+    hints)              cmd_hints ;;
     status)             cmd_status "$@" ;;
     check-iperf)        cmd_check_iperf ;;
     check-servers)      cmd_check_servers ;;
