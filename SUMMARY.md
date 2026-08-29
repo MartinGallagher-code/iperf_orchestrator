@@ -337,7 +337,7 @@ caught immediately rather than at end-to-end runtime.
 | Add an iperf2 client flag | `_iperf_extra_args` (line ~245), then update help text and `tests/test_run_tests_modes.sh` for the rolling case + `tests/test_create_scripts.sh` for parallel/sequential |
 | Add a new subcommand | new `cmd_<name>` function, then add to the dispatcher and `usage_advanced` |
 | Change an output column | the relevant Python heredoc (`cmd_parse_csv` for raw rows, `cmd_make_pivot` for the report) |
-| Change what the layout overlay carries | `cmd_export_overlay`'s `TESTS` / `CPU_COLUMNS` tables, then `tests/test_export_overlay.sh` |
+| Change what the layout overlay carries | `cmd_export_overlay`'s `ORDER` / `TESTS` / `CPU_COLUMNS` tables (metadata included), then `tests/test_export_overlay.sh` |
 | Add a new fleet-wide operation | new `_worker_<name>` one-liner + `cmd_<name>` that calls `parallel_hosts _worker_<name>` |
 | Change pair assignment | `build_host_idx` + `is_client_for` (parity rule) |
 | Change rolling mode behavior | `_run_rolling` (line ~1356); the entire probe lives in one inline SSH heredoc |
@@ -357,8 +357,8 @@ caught immediately rather than at end-to-end runtime.
 - A missing measurement is never a zero. Blank `mbps` and blank CPU
   columns mean "not measured" and are skipped by `results-summary` and
   `export-overlay` alike; the overlay keeps the failed direction visible
-  as an `iperf_status=FAIL` sample instead of averaging a zero into the
-  host's throughput.
+  as an `iperf_status=FAIL` sample -- counted against that host's
+  `iperf_ok_pct` -- instead of averaging a zero into its throughput.
 - Server-list filtering happens at parse time — commenting out a host
   in `servers.txt` retroactively excludes it from new pivots / heatmaps
   without re-running the test.
