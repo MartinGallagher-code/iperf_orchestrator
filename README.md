@@ -100,6 +100,7 @@ Results in `./results/<run-id>/`:
 - `cpu_summary.csv` — per-host CPU peaks during the run
 - `iperf_pivot.txt` — text pivot table of throughput
 - `iperf_heatmap.png` — heatmap + sorted bar chart with CPU annotations
+- `iperf_overlay.tsv` — datacenter layout overlay samples (`export-overlay`, or `--overlay`)
 
 <!-- docs:end -->
 ---
@@ -164,6 +165,8 @@ ANALYSIS:
   make-heatmap           Heatmap + bar chart at iperf_heatmap.png
   process                = collect-results + parse-csv + parse-cpu + make-pivot + make-heatmap
   results-summary        P50/P95/min/mean/max throughput + 5 slowest pairs
+  export-overlay         Write the run as datacenter layout viewer overlay
+                         samples (.dc floor plan + results file)
 
 INTERNAL (run-tests calls these for you; available standalone if needed):
   create-scripts         Generate per-host client run scripts locally
@@ -400,10 +403,94 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 <!-- docs:end -->
 ---
 
+<!-- docs:overlays -->
+## Datacenter layout overlays
+
+A mesh test answers "which host is slow"; a floor plan answers "which rack".
+`export-overlay` converts a run into the results format the
+[datacenter layout viewer](https://github.com/MartinGallagher-code/datacenter_visualization)
+paints over a `.dc` floor plan, so the numbers land on the racks that produced
+them.
+
+```bash
+./iperf-orchestrator.sh export-overlay          # -> results/latest/iperf_overlay.tsv
+./iperf-orchestrator.sh run --overlay           # write it as part of the pipeline
+```
+
+Then open the viewer with the layout and the samples:
+
+```
+http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
+```
+
+### What gets exported
+
+| Test | Per | From |
+|---|---|---|
+| `mbps_out` / `mbps_in` | direction | every `status=OK` row of `iperf_results.csv`, credited to both of its ends |
+| `iperf_status` | direction | `OK`, or `FAIL` carrying the status that explains it |
+| `cpu_peak`, `cpu_softirq`, `cpu_idle_floor` | host | `cpu_summary.csv` |
+
+One measured row becomes one sample: nothing is averaged on the way out, so
+the viewer's own aggregation menu does the reducing (`mean` reads as "across
+peers", `max` as "the best peer", `min` as "the worst"). `--overlay-reduce`
+collapses to one median sample per host per test when the raw row count
+matters.
+
+**A direction that produced no number is never exported as 0 Mb/s.** Zero is a
+measurement, and averaging it in makes a broken link read as a slow one. Those
+directions leave as `iperf_status=FAIL` instead — visible on the rack, absent
+from the throughput math. The same holds for blank cells in `cpu_summary.csv`
+(a `/proc/stat` host has no per-core columns): skipped, not zeroed.
+
+### Matching hosts to the layout
+
+Targets are the names this orchestrator tested with, and the viewer resolves
+any unique suffix of an element path — so a hostname-shaped layout
+(`wr12r06u15`) matches with no mapping at all, and generating `servers.txt`
+from the `.dc` file is the way to keep it that way. When the two disagree
+(an IP list against a hostname floor plan), map them:
+
+```bash
+cat > hosts.map <<'MAP'
+10.0.0.10   wr01r01u01      # <host as tested>  <layout element>
+10.0.0.11   wr01r01u02
+MAP
+./iperf-orchestrator.sh export-overlay --overlay-map hosts.map
+```
+
+`--overlay-prefix DH1/A/` prepends a path instead, for addressing one row of a
+bigger floor plan. Hosts missing from a map file keep their own name and are
+reported on stderr rather than dropped.
+
+### Appending runs
+
+The viewer's results format is append-only: every sample carries `run=<run-id>`,
+and a nightly export into one file accumulates history the viewer can aggregate
+(`last` for right now, `min` for the worst night).
+
+```bash
+./iperf-orchestrator.sh export-overlay --overlay-out nightly.tsv --overlay-append
+```
+
+`--overlay-format ndjson` writes one JSON object per line instead — the same
+overlays, for anything that would rather generate JSON than columns (the
+extension picks it automatically, so `--overlay-out nightly.ndjson` is enough).
+`--overlay-out -` writes to stdout, and `--overlay-no-meta` omits the `!test`
+lines that carry units, palette direction and short names.
+
+The viewer's own `dcimport --iperf results/latest/` reads the CSVs directly and
+produces the same throughput samples; this command exists so the export needs
+nothing but the orchestrator, and so the failed directions `dcimport` can only
+count show up on the floor plan.
+
+<!-- docs:end -->
+---
+
 <!-- docs:run-directories -->
 ## Stateless mode and run directories
 
-There is no state file. Each invocation that produces results creates a fresh `./results/<run-id>/` directory (run-id = timestamp), and `./results/latest` is updated to point at it. Read-side commands (`parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`, `results-summary`) follow `latest` by default, or take `--run-id <id>` to address a specific run. `status` derives state by probing hosts live (running `iperf -v` and `pgrep iperf` on each).
+There is no state file. Each invocation that produces results creates a fresh `./results/<run-id>/` directory (run-id = timestamp), and `./results/latest` is updated to point at it. Read-side commands (`parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`, `results-summary`, `export-overlay`) follow `latest` by default, or take `--run-id <id>` to address a specific run. `status` derives state by probing hosts live (running `iperf -v` and `pgrep iperf` on each).
 
 Every subcommand is safe to re-run individually. Common workflows:
 
@@ -533,6 +620,8 @@ results/
     cpu_summary.csv                            # parsed CPU data
     iperf_pivot.txt                            # text pivot
     iperf_heatmap.png                          # heatmap + bar chart
+    iperf_overlay.tsv                          # layout-viewer overlay samples
+                                               # (export-overlay / --overlay only)
 ```
 
 ### Remote: `$REMOTE_DIR/` (default `/tmp/iperf_orchestrator/`)

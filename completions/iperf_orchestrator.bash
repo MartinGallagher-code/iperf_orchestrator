@@ -18,14 +18,16 @@ _iperf_orchestrator() {
         status check-iperf check-servers \
         start-servers create-scripts distribute-scripts run-tests \
         collect-results stop-servers cleanup parse-csv parse-cpu \
-        make-pivot make-heatmap doctor results-summary all help \
-        help-advanced version"
+        make-pivot make-heatmap doctor results-summary export-overlay \
+        all help help-advanced version"
 
     local global_flags="--plan --servers -s --output -o --run-id \
         --port --duration -d --streams -P --ssh-jobs -j --start-delay \
         --total-time --host-flows --bandwidth -b --length -l --window -w \
         --mss -M --no-nagle -N --bind -B --server-bind \
         --ssh-user -u --remote-dir --python \
+        --overlay --overlay-out --overlay-format --overlay-map \
+        --overlay-prefix --overlay-append --overlay-reduce --overlay-no-meta \
         --dry-run -n --verbose -v --quiet -q \
         -h --help --help-advanced --version"
 
@@ -42,12 +44,16 @@ _iperf_orchestrator() {
 
     # Value-taking flags: complete the value, not another flag.
     case "$prev" in
-        --plan|--servers|-s|--output|-o|--python)
+        --plan|--servers|-s|--output|-o|--python|--overlay-out|--overlay-map)
             _filedir
+            return ;;
+        --overlay-format)
+            COMPREPLY=( $(compgen -W "tsv ndjson" -- "$cur") )
             return ;;
         --run-id|--port|--duration|-d|--streams|-P|--ssh-jobs|-j|--start-delay|\
         --total-time|--host-flows|--bandwidth|-b|--length|-l|--window|-w|\
-        --mss|-M|--bind|-B|--server-bind|--remote-dir|--ssh-user|-u|--for|--watch)
+        --mss|-M|--bind|-B|--server-bind|--remote-dir|--ssh-user|-u|--for|--watch|\
+        --overlay-prefix)
             return ;;  # numeric/text values, no completion
     esac
 
@@ -80,6 +86,11 @@ _iperf_orchestrator() {
             ;;
         status)
             COMPREPLY=( $(compgen -W "--watch --help" -- "$cur") )
+            ;;
+        export-overlay)
+            COMPREPLY=( $(compgen -W "--overlay-out --overlay-format --overlay-map \
+                --overlay-prefix --overlay-append --overlay-reduce --overlay-no-meta \
+                --run-id --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-29
+
+### Added
+- **`export-overlay`.** Converts a run into the results format the
+  [datacenter layout viewer](https://github.com/MartinGallagher-code/datacenter_visualization)
+  paints over a `.dc` floor plan, so throughput lands on the racks that
+  produced it: `mbps_out` / `mbps_in` per direction, `cpu_peak` /
+  `cpu_softirq` / `cpu_idle_floor` per host, and `iperf_status` OK/FAIL.
+  Writes `<run-dir>/iperf_overlay.tsv` by default. A direction that
+  produced no number is exported as a `FAIL` verdict, never as 0 Mb/s —
+  zero is a measurement, and averaging it in makes a broken link read as
+  a slow one. Blank `cpu_summary.csv` cells are skipped for the same
+  reason.
+- **`--overlay` and friends.** `--overlay` also writes the overlay as part
+  of `process` / `summarize` / `run` / `all`; `--overlay-out FILE` picks
+  the destination (`-` for stdout, and the extension picks the format);
+  `--overlay-format tsv|ndjson`; `--overlay-append` for the format's
+  append-only workflow (every sample carries `run=<run-id>`);
+  `--overlay-map FILE` and `--overlay-prefix STR` for when the server
+  list and the floor plan name hosts differently; `--overlay-reduce` for
+  one median sample per host per test; `--overlay-no-meta`.
+
 ## [2.1.0] - 2026-08-19
 
 ### Added
