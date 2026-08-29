@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-29
+
+### Added
+- **`export-overlay`.** Renders a run as overlays for the
+  [datacenter layout viewer](https://github.com/MartinGallagher-code/datacenter_visualization),
+  which paints them over a `.dc` floor plan, so the numbers land on the
+  hardware that produced them. Thirteen overlays, each arriving with its
+  unit, ramp direction, display range and short name: `iperf_mbps_out` /
+  `_in` per direction and `iperf_mbps_duplex` per host; `iperf_status`
+  per direction and `iperf_ok_pct` per host; and `iperf_cpu_peak`,
+  `_mean`, `_softirq`, `_sys`, `_user`, `_idle_floor` per host. Writes
+  `<run-dir>/iperf_overlay.tsv` by default.
+- **Three overlays the raw numbers cannot give you.** `iperf_rel_median`
+  scores every direction against the median of its own run, so a bad link
+  stands out at any fabric speed (diverging palette pinned at 0–200%,
+  aggregating with `min` so a collapsed rack shows its worst direction).
+  `iperf_asymmetry` is the gap between a pair's two directions — the shape
+  a duplex mismatch or a one-way policer makes — credited to both ends.
+  `iperf_ok_pct` keeps a mostly-broken host from hiding behind its one
+  good link.
+- **Nothing measured is ever exported as a zero.** A direction that
+  produced no number leaves as `iperf_status=FAIL`, carrying the status
+  that explains it and counted against its host's `iperf_ok_pct`, never as
+  0 Mb/s — zero is a measurement, and averaging it in makes a broken link
+  read as a slow one. Blank `cpu_summary.csv` cells are skipped for the
+  same reason, and both are counted on stderr.
+- **Metadata worth having in the inspector.** Peer, test timestamp, which
+  parser produced a CPU row and how many cores it saw, and which core
+  saturated for a softirq peak. The run's duration/streams/protocol ride
+  in the file header, so only a row that departs from them pays for saying
+  so.
+- **`--overlay` and friends.** `--overlay` also writes the overlay as part
+  of `process` / `summarize` / `run` / `all`; `--overlay-out FILE` picks
+  the destination (`-` for stdout, and the extension picks the format);
+  `--overlay-format tsv|ndjson`; `--overlay-append` for the format's
+  append-only workflow (every sample carries `run=<run-id>`);
+  `--overlay-map FILE` and `--overlay-prefix STR` for when the server
+  list and the floor plan name hosts differently; `--overlay-reduce` for
+  one median sample per host per overlay; `--overlay-no-meta`.
+
 ## [2.1.0] - 2026-08-19
 
 ### Added

@@ -9,6 +9,11 @@
 ```
 
 ```{include} ../README.md
+:start-after: <!-- docs:overlays -->
+:end-before: <!-- docs:end -->
+```
+
+```{include} ../README.md
 :start-after: <!-- docs:run-directories -->
 :end-before: <!-- docs:end -->
 ```

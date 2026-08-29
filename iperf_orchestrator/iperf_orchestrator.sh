@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.1.0"
+ORCH_VERSION="2.2.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -252,6 +252,24 @@ START_DELAY="${START_DELAY:-30}"           # seconds in future for synchronized 
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+# Overlay export (`export-overlay`): the datacenter layout viewer's results
+# format -- one `test  target  value` sample per line, painted over a .dc
+# floor plan. Nothing is exported unless asked for: `export-overlay` writes
+# it on demand, and --overlay (or naming a destination with --overlay-out)
+# also writes it as part of `process` / `summarize` / `run` / `all`.
+IPERF_OVERLAY="${IPERF_OVERLAY:-0}"               # 1 = also export during process
+IPERF_OVERLAY_OUT="${IPERF_OVERLAY_OUT:-}"        # destination; '-' is stdout
+                                                  # (default <run-dir>/iperf_overlay.tsv)
+IPERF_OVERLAY_FORMAT="${IPERF_OVERLAY_FORMAT:-}"  # tsv | ndjson (default: from the
+                                                  # filename extension, else tsv)
+IPERF_OVERLAY_MAP="${IPERF_OVERLAY_MAP:-}"        # '<host> <element>' lines: rename each
+                                                  # test host to its layout element
+IPERF_OVERLAY_PREFIX="${IPERF_OVERLAY_PREFIX:-}"  # prepended to every target
+IPERF_OVERLAY_APPEND="${IPERF_OVERLAY_APPEND:-0}" # 1 = append (the results file is
+                                                  # append-only by design)
+IPERF_OVERLAY_REDUCE="${IPERF_OVERLAY_REDUCE:-0}" # 1 = one sample per host per test
+IPERF_OVERLAY_META="${IPERF_OVERLAY_META:-1}"     # 0 = omit the !test metadata lines
+
 #------------------------------------------------------------------------------
 # CLI flag pre-pass
 #
@@ -318,6 +336,21 @@ while [ $# -gt 0 ]; do
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
         --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
+        --overlay)         IPERF_OVERLAY=1; shift ;;
+        # Naming a destination, a format, a map or a prefix is itself a
+        # request for the overlay, so `process --overlay-out x.tsv` needs
+        # no second flag to turn the export on.
+        --overlay-out)     _flag_need "$1" "${2:-}"; IPERF_OVERLAY_OUT="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-out=*)   IPERF_OVERLAY_OUT="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-format)  _flag_need "$1" "${2:-}"; IPERF_OVERLAY_FORMAT="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-format=*) IPERF_OVERLAY_FORMAT="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-map)     _flag_need "$1" "${2:-}"; IPERF_OVERLAY_MAP="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-map=*)   IPERF_OVERLAY_MAP="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-prefix)  _flag_need "$1" "${2:-}"; IPERF_OVERLAY_PREFIX="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-prefix=*) IPERF_OVERLAY_PREFIX="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-append)  IPERF_OVERLAY_APPEND=1; shift ;;
+        --overlay-reduce)  IPERF_OVERLAY_REDUCE=1; shift ;;
+        --overlay-no-meta) IPERF_OVERLAY_META=0; shift ;;
         --dry-run|-n)      IPERF_DRY_RUN=1; shift ;;
         --verbose|-v)      IPERF_VERBOSITY=2; shift ;;
         --quiet|-q)        IPERF_VERBOSITY=0; shift ;;
@@ -937,6 +970,9 @@ COMMON FLAGS (all become plan defaults once 'gen' has run):
 
 Each run writes \$RESULTS_BASE/<run-id>/; \$RESULTS_BASE/latest tracks the
 newest. Analysis follows 'latest'; pass --run-id <id> for an older run.
+'export-overlay' (or 'run --overlay') also renders the run as datacenter
+layout viewer overlays -- throughput, each direction against the run median,
+pair asymmetry, per-host success rate and CPU -- painted onto a .dc floor plan.
 The step-by-step commands (start-servers, run-tests, parse-csv, ...) all
 still exist: see --help-advanced.
 EOF
@@ -1004,6 +1040,24 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
                                Safe to point at a shared FS: filenames embed <host>_<run-id>.
     --python PATH              Python interpreter (default $PYTHON_BIN)
+    --overlay                  Also write the datacenter-layout overlay during
+                               'process' (so 'summarize', 'run' and 'all' too).
+                               'export-overlay' writes it on its own.
+    --overlay-out FILE         Overlay destination ('-' = stdout; default
+                               <run-dir>/iperf_overlay.tsv). Implies --overlay.
+    --overlay-format FMT       'tsv' or 'ndjson' (default: from the destination's
+                               extension, else tsv).
+    --overlay-map FILE         '<host> <element>' lines renaming each test host to
+                               its layout element, for when the server list and
+                               the .dc file disagree (IPs vs hostnames).
+    --overlay-prefix STR       String prepended to every target, e.g. DH1/A/ to
+                               address one row of a bigger floor plan.
+    --overlay-append           Append to the destination instead of replacing it
+                               (the viewer's results format is append-only).
+    --overlay-reduce           One sample per host per test (median) instead of
+                               one per measured direction.
+    --overlay-no-meta          Omit the '!test' metadata lines (units, palette
+                               direction, short names).
     -h, --help                 show the simple help
     --help-advanced            show this help
     --version                  print the version and exit
@@ -1067,6 +1121,22 @@ ANALYSIS:
                              + make-heatmap.
     results-summary        Print P50/P95/min/mean/max + 5 slowest pairs from
                            iperf_results.csv.
+    export-overlay         Render this run as overlay samples for the
+                           datacenter layout viewer (.dc floor plan + results
+                           file), painted onto the racks that produced them:
+                             throughput  iperf_mbps_out / _in per direction,
+                                         iperf_mbps_duplex per host
+                             relative    iperf_rel_median (each direction vs
+                                         the run's own median) and
+                                         iperf_asymmetry (the gap between a
+                                         pair's two directions)
+                             reliability iperf_status OK/FAIL per direction,
+                                         iperf_ok_pct per host
+                             cpu         iperf_cpu_peak / _mean / _softirq /
+                                         _sys / _user / _idle_floor per host
+                           Writes <run-dir>/iperf_overlay.tsv unless
+                           --overlay-out says otherwise; see the --overlay-*
+                           flags above.
 
 CONVENIENCE:
     all [MODE] [--keep-going]  Run the full pipeline (doctor + start-servers +
@@ -1101,6 +1171,8 @@ CONFIG (env vars; CLI flags above take precedence, plan values yield):
     SSH_USER=$SSH_USER
     SSH_OPTS=$SSH_OPTS
     START_DELAY=$START_DELAY
+    IPERF_OVERLAY=$IPERF_OVERLAY             # 1 = export the overlay during 'process'
+    IPERF_OVERLAY_OUT=${IPERF_OVERLAY_OUT:-}      # overlay destination ('-' = stdout)
     IPERF_SERVERS=${IPERF_SERVERS:-}
     RESULTS_BASE=$RESULTS_BASE
     REMOTE_DIR=$REMOTE_DIR
@@ -3400,6 +3472,571 @@ cmd_doctor() {
 }
 
 #------------------------------------------------------------------------------
+# export-overlay: render this run as overlay samples for the datacenter layout
+# viewer (a .dc floor plan plus a results file it paints over the racks). The
+# format is one sample per line -- `<test> <target> <value> [key=value ...]`,
+# with `!test` lines carrying units, palette direction and display ranges --
+# and it is append-only by design, so a nightly `--overlay-append` into one
+# file accumulates runs rather than replacing them.
+#
+# This is the authoritative rendering of a run: everything the orchestrator
+# actually measured, named and scaled so the first render is already readable.
+# Three of the overlays answer questions the raw numbers cannot on their own:
+#
+#   iperf_rel_median  each direction against the run's own median, so a bad
+#                     link stands out whatever the fabric's absolute speed is
+#   iperf_asymmetry   the gap between a pair's two directions -- the shape a
+#                     duplex mismatch or one-way congestion makes
+#   iperf_ok_pct      how much of a host's mesh actually measured, so a host
+#                     that mostly failed cannot hide behind its one good link
+#
+# Targets are the host names this orchestrator tested with, which is what makes
+# the layout match without a mapping step: generate the server list from the .dc
+# file and the names already agree. When they don't (an IP list against a
+# hostname layout), --overlay-map renames them.
+#
+# A direction that produced no number is never exported as 0 Mb/s -- that would
+# paint a dead link as merely slow. It lands as iperf_status=FAIL, carrying the
+# status that explains it, and is counted against its host's iperf_ok_pct.
+cmd_export_overlay() {
+    _resolve_existing_run
+    local csv="$RESULTS_DIR/iperf_results.csv"
+    local cpu_csv="$RESULTS_DIR/cpu_summary.csv"
+    [ -f "$csv" ] || die "No CSV at $csv; run: $PROG parse-csv"
+    command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
+
+    local out="$IPERF_OVERLAY_OUT"
+    [ -n "$out" ] || out="$RESULTS_DIR/iperf_overlay.tsv"
+
+    # Format follows the destination's extension unless pinned, so
+    # `--overlay-out nightly.ndjson` needs no second flag.
+    local fmt="$IPERF_OVERLAY_FORMAT"
+    if [ -z "$fmt" ]; then
+        case "$out" in
+            *.ndjson|*.json) fmt="ndjson" ;;
+            *)               fmt="tsv" ;;
+        esac
+    fi
+    case "$fmt" in
+        tsv|ndjson) ;;
+        *) die "--overlay-format: expected 'tsv' or 'ndjson', got '$fmt'" ;;
+    esac
+
+    if [ -n "$IPERF_OVERLAY_MAP" ] && [ ! -f "$IPERF_OVERLAY_MAP" ]; then
+        die "--overlay-map: no such file: $IPERF_OVERLAY_MAP"
+    fi
+
+    # Progress lines would corrupt the samples when the destination is
+    # stdout, so they only go out when it isn't; the python half reports
+    # its counts on stderr either way.
+    [ "$out" = "-" ] || log "Exporting overlay samples -> $out"
+
+    "$PYTHON_BIN" - "$csv" "$cpu_csv" "$out" "$fmt" \
+        "$IPERF_OVERLAY_APPEND" "$IPERF_OVERLAY_META" "$IPERF_OVERLAY_REDUCE" \
+        "$IPERF_OVERLAY_PREFIX" "$IPERF_OVERLAY_MAP" "$RUN_ID" \
+        "$ORCH_VERSION" <<'PYEOF'
+import csv, io, json, os, sys
+from collections import Counter
+
+results_csv = sys.argv[1]
+cpu_csv     = sys.argv[2]
+out_path    = sys.argv[3]
+fmt         = sys.argv[4]
+append      = sys.argv[5] == "1"
+want_meta   = sys.argv[6] == "1"
+want_reduce = sys.argv[7] == "1"
+prefix      = sys.argv[8]
+map_path    = sys.argv[9]
+run_id      = sys.argv[10]
+version     = sys.argv[11]
+
+# Every overlay this run can produce, in the order they are declared.
+#
+# The metadata is what makes the first render readable rather than a puzzle:
+# `higher=` picks the ramp direction, `min`/`max` pin percentages to their real
+# 0-100 scale (auto-scaling makes a 30% CPU peak look alarming just for being
+# the highest), `agg=` presets the reduction that answers the overlay's own
+# question when a rack or room is collapsed, and `short=` is what gets printed
+# on an element's slice when several overlays are shown at once.
+ORDER = [
+    "iperf_mbps_out", "iperf_mbps_in", "iperf_mbps_duplex",
+    "iperf_rel_median", "iperf_asymmetry",
+    "iperf_status", "iperf_ok_pct",
+    "iperf_cpu_peak", "iperf_cpu_mean", "iperf_cpu_softirq",
+    "iperf_cpu_sys", "iperf_cpu_user", "iperf_cpu_idle_floor",
+]
+TESTS = {
+    "iperf_mbps_out": [
+        ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
+        ("short", "OUT"), ("label", "Outbound Mb/s per direction")],
+    "iperf_mbps_in": [
+        ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
+        ("short", "IN"), ("label", "Inbound Mb/s per direction")],
+    "iperf_mbps_duplex": [
+        ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
+        ("short", "DUP"), ("label", "Total duplex Mb/s carried")],
+    # Diverging palette around 100%: blue is faster than the run's median,
+    # red is slower, and the midpoint is "normal for this fabric".
+    "iperf_rel_median": [
+        ("unit", "%"), ("higher", "good"), ("palette", "rdbu"),
+        ("min", "0"), ("max", "200"), ("agg", "min"), ("decimals", "0"),
+        ("short", "REL"), ("label", "Throughput vs run median")],
+    # agg=max so a collapsed rack shows its most lopsided pair, not an
+    # average that hides it.
+    "iperf_asymmetry": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("agg", "max"), ("decimals", "0"),
+        ("short", "ASYM"), ("label", "Direction asymmetry within a pair")],
+    "iperf_status": [
+        ("short", "STAT"), ("label", "Directed test outcome")],
+    "iperf_ok_pct": [
+        ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
+        ("agg", "min"), ("decimals", "0"),
+        ("short", "OK%"), ("label", "Directions that measured")],
+    "iperf_cpu_peak": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("decimals", "0"), ("short", "CPU"), ("label", "Peak host CPU")],
+    "iperf_cpu_mean": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("decimals", "0"), ("short", "AVG"), ("label", "Mean host CPU")],
+    "iperf_cpu_softirq": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("decimals", "0"), ("short", "SIRQ"),
+        ("label", "Peak softirq on one core")],
+    "iperf_cpu_sys": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("decimals", "0"), ("short", "SYS"), ("label", "Peak system CPU")],
+    "iperf_cpu_user": [
+        ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
+        ("decimals", "0"), ("short", "USR"), ("label", "Peak user CPU")],
+    # The floor, not the average: one saturated core caps a flow even while
+    # the box looks idle.
+    "iperf_cpu_idle_floor": [
+        ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
+        ("agg", "min"), ("decimals", "1"), ("short", "IDLE"),
+        ("label", "Lowest idle on one core")],
+}
+CPU_COLUMNS = [
+    ("iperf_cpu_peak", "peak_total_pct"),
+    ("iperf_cpu_mean", "mean_total_pct"),
+    ("iperf_cpu_softirq", "peak_softirq_pct"),
+    ("iperf_cpu_sys", "peak_sys_pct"),
+    ("iperf_cpu_user", "peak_user_pct"),
+    ("iperf_cpu_idle_floor", "peak_idle_floor_pct"),
+]
+
+WHITESPACE = set(" \t\r\n")
+
+
+def fail(message):
+    sys.exit("export-overlay: " + message)
+
+
+def number(cell):
+    """A finite float, or None for a blank/absent/unparseable cell.
+
+    Blank means "not measured" everywhere in these CSVs, and is deliberately
+    not zero: a zero here would be averaged in by the viewer and flatter the
+    result.
+    """
+    if cell is None:
+        return None
+    text = str(cell).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def trim(value):
+    """Format a float without trailing zero noise."""
+    return "%.6g" % value
+
+
+def median(values):
+    ordered = sorted(values)
+    n = len(ordered)
+    if not n:
+        return None
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def load_map(path):
+    """host -> layout element, from '<host> <element>' lines."""
+    mapping = {}
+    if not path:
+        return mapping
+    with io.open(path, "r", encoding="utf-8") as handle:
+        for lineno, raw in enumerate(handle, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.replace(",", " ").split()
+            if len(parts) != 2:
+                fail("%s:%d: expected '<host> <element>', got: %s"
+                     % (path, lineno, line))
+            mapping[parts[0]] = parts[1]
+    return mapping
+
+
+HOST_MAP = load_map(map_path)
+unmapped = set()
+samples = []        # (test, target, value, [key=value, ...])
+_seen = set()       # tests that actually got a sample
+
+
+def declared():
+    """The overlays this run produced, in ORDER: the viewer lists them in the
+    order it meets them, and throughput-then-verdict-then-CPU is the order an
+    operator reads them in, whatever order the emitting code ran."""
+    return [test for test in ORDER if test in _seen]
+
+
+def target_for(host):
+    name = HOST_MAP.get(host)
+    if name is None:
+        name = host
+        if HOST_MAP:
+            unmapped.add(host)
+    name = prefix + name
+    # Fields are whitespace-separated, so a target carrying whitespace would
+    # silently split into a wrong target and a stray value.
+    if any(c in WHITESPACE for c in name):
+        fail("target may not contain whitespace: %r" % name)
+    return name
+
+
+def meta_value(text):
+    """Metadata rides on the same whitespace-separated line as the sample, so
+    a value carrying whitespace would split off into a stray token."""
+    return "_".join(str(text).split()) or "?"
+
+
+def emit(test, host, value, extras=()):
+    _seen.add(test)
+    samples.append((test, target_for(host), value, list(extras)))
+
+
+# ---- iperf_results.csv: one row per direction ------------------------------
+#
+# Read once into memory first: the derived overlays each need the whole run
+# (the median to compare against, both directions of a pair, every one of a
+# host's directions) before a single sample can be written.
+rows = []
+with io.open(results_csv, "r", encoding="utf-8-sig", newline="") as handle:
+    reader = csv.DictReader(handle)
+    fields = reader.fieldnames or []
+    if "source" not in fields or "target" not in fields:
+        fail("%s has no source/target columns; is it an iperf_results.csv?"
+             % results_csv)
+    # Pre-2.0 CSVs (and hand-made ones) have no status column; there, a row
+    # that carries a number is a row that succeeded.
+    has_status = "status" in fields
+    for row in reader:
+        source = (row.get("source") or "").strip()
+        target = (row.get("target") or "").strip()
+        if not source or not target:
+            continue
+        status = (row.get("status") or "").strip()
+        mbps = number(row.get("mbps"))
+        ok = (status == "OK") if has_status else (mbps is not None)
+        rows.append({
+            "source": source, "target": target, "status": status,
+            "mbps": mbps if ok else None,
+            "ok": ok and mbps is not None,
+            "duration": (row.get("duration_s") or "").strip(),
+            "streams": (row.get("parallel_streams") or "").strip(),
+            "proto": (row.get("protocol") or "").strip(),
+            "at": (row.get("timestamp") or "").strip(),
+        })
+
+measured = [r for r in rows if r["ok"]]
+failed = len(rows) - len(measured)
+run_median = median([r["mbps"] for r in measured])
+
+
+def modal(key):
+    counted = Counter(r[key] for r in measured if r[key])
+    return counted.most_common(1)[0][0] if counted else ""
+
+
+# The run's shape goes in the header once; a row that departs from it says so
+# on its own samples, so a mixed-duration file stays honest without paying for
+# four repeated tokens on every line.
+mode_duration, mode_streams, mode_proto = modal("duration"), modal("streams"), modal("proto")
+
+
+def direction_meta(row):
+    extras = ["peer=" + target_for(row["target"])]
+    if row["at"]:
+        extras.append("at=" + meta_value(row["at"]))
+    for key, common, label in (("duration", mode_duration, "dur"),
+                               ("streams", mode_streams, "streams"),
+                               ("proto", mode_proto, "proto")):
+        if row[key] and row[key] != common:
+            extras.append("%s=%s" % (label, meta_value(row[key])))
+    return extras
+
+
+hosts = []          # every host seen, in first-seen order
+host_seen = set()
+out_total = {}
+in_total = {}
+ok_count = {}
+attempts = {}
+
+
+def note_host(host):
+    if host not in host_seen:
+        host_seen.add(host)
+        hosts.append(host)
+        out_total[host] = 0.0
+        in_total[host] = 0.0
+        ok_count[host] = 0
+        attempts[host] = 0
+
+
+for row in rows:
+    note_host(row["source"])
+    note_host(row["target"])
+    attempts[row["source"]] += 1
+    if row["ok"]:
+        ok_count[row["source"]] += 1
+        out_total[row["source"]] += row["mbps"]
+        in_total[row["target"]] += row["mbps"]
+
+# Per-direction overlays, in row order so `last` means "the most recent test".
+for row in rows:
+    if not row["ok"]:
+        continue
+    extras = direction_meta(row)
+    emit("iperf_mbps_out", row["source"], trim(row["mbps"]), extras)
+    emit("iperf_mbps_in", row["target"], trim(row["mbps"]),
+         ["peer=" + target_for(row["source"])] + extras[1:])
+    if run_median:
+        emit("iperf_rel_median", row["source"],
+             trim(row["mbps"] / run_median * 100.0), extras[:1])
+
+# Asymmetry: how far apart a pair's two directions are, as a percentage of the
+# faster one. A clean link is a few percent; a duplex mismatch or a congested
+# one-way path is tens. Credited to both ends, since either NIC can be the
+# cause and the floor plan is where you notice which rack they share.
+pair_mbps = {}
+for row in measured:
+    pair_mbps[(row["source"], row["target"])] = row["mbps"]
+for (a, b), forward in sorted(pair_mbps.items()):
+    if a >= b:
+        continue
+    back = pair_mbps.get((b, a))
+    if back is None:
+        continue
+    top = max(forward, back)
+    if top <= 0:
+        continue
+    gap = trim(abs(forward - back) / top * 100.0)
+    emit("iperf_asymmetry", a, gap, ["peer=" + target_for(b)])
+    emit("iperf_asymmetry", b, gap, ["peer=" + target_for(a)])
+
+# Verdicts. A failed direction is a fact about the sender's mesh, so it is
+# credited there; the status that explains it rides along for the inspector.
+for row in rows:
+    extras = ["peer=" + target_for(row["target"])]
+    if row["ok"]:
+        emit("iperf_status", row["source"], "OK", extras)
+    else:
+        if row["status"]:
+            extras.append("status=" + meta_value(row["status"]))
+        emit("iperf_status", row["source"], "FAIL", extras)
+
+# What fraction of a host's own directions produced a number. A host whose
+# mesh half failed reads 50% here even when its one good link is fast.
+for host in hosts:
+    if attempts[host]:
+        emit("iperf_ok_pct", host,
+             trim(ok_count[host] * 100.0 / attempts[host]),
+             ["ok=%d" % ok_count[host], "of=%d" % attempts[host]])
+    total = out_total[host] + in_total[host]
+    if total > 0:
+        emit("iperf_mbps_duplex", host, trim(total),
+             ["out=%s" % trim(out_total[host]), "in=%s" % trim(in_total[host])])
+
+# ---- cpu_summary.csv: one row per host ------------------------------------
+cpu_hosts = 0
+if cpu_csv and os.path.isfile(cpu_csv):
+    with io.open(cpu_csv, "r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            host = (row.get("host") or "").strip()
+            if not host:
+                continue
+            cpu_hosts += 1
+            # Which parser produced these numbers, and how many cores they
+            # cover: a /proc/stat host has no per-core columns at all, and
+            # that is worth seeing in the inspector rather than guessing.
+            shared = []
+            source = (row.get("source") or "").strip()
+            if source:
+                shared.append("src=" + meta_value(source))
+            cores = (row.get("n_cpus") or "").strip()
+            if cores:
+                shared.append("cores=" + meta_value(cores))
+            for test, column in CPU_COLUMNS:
+                value = number(row.get(column))
+                if value is None:
+                    continue
+                extras = list(shared)
+                if test == "iperf_cpu_softirq":
+                    core = (row.get("peak_softirq_cpu") or "").strip()
+                    if core:
+                        extras.append("core=" + meta_value(core))
+                emit(test, host, trim(value), extras)
+
+
+# ---- optional reduction ----------------------------------------------------
+def reduce_samples(sample_rows):
+    """One sample per (test, target): median of the numbers.
+
+    Median rather than mean so a single blackholed peer does not drag a
+    host's whole row down, which is the failure this data is usually
+    hunting. Verdicts reduce to their worst value instead -- one failed
+    direction is what you want to see on the rack.
+    """
+    groups = {}
+    order = []
+    for test, target, value, _extras in sample_rows:
+        key = (test, target)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(value)
+    out = []
+    for key in order:
+        values = groups[key]
+        numbers = [number(v) for v in values]
+        numbers = [n for n in numbers if n is not None]
+        if len(numbers) == len(values) and numbers:
+            out.append((key[0], key[1], trim(median(numbers)), []))
+        elif "FAIL" in values:
+            out.append((key[0], key[1], "FAIL", []))
+        else:
+            out.append((key[0], key[1], values[-1], []))
+    return out
+
+
+if want_reduce:
+    samples = reduce_samples(samples)
+
+# Every sample carries its run, so appending run after run into one results
+# file keeps them distinguishable in the viewer's inspector.
+if run_id and not any(c in WHITESPACE for c in run_id):
+    for _test, _target, _value, extras in samples:
+        extras.append("run=" + run_id)
+
+
+# ---- rendering -------------------------------------------------------------
+def meta_token(key, value):
+    return '%s="%s"' % (key, value) if " " in value else "%s=%s" % (key, value)
+
+
+def header_lines():
+    shape = []
+    if mode_duration:
+        shape.append("duration=%ss" % mode_duration)
+    if mode_streams:
+        shape.append("streams=%s" % mode_streams)
+    if mode_proto:
+        shape.append("proto=%s" % mode_proto)
+    lines = [
+        "# iperf-orchestrator %s -- overlay samples for the datacenter layout "
+        "viewer" % version,
+        "# run %s: %d direction(s) measured, %d with no measurement, %d host(s) "
+        "with CPU data" % (run_id or "?", len(measured), failed, cpu_hosts),
+    ]
+    if shape:
+        lines.append("# run shape: %s (samples say so when they differ)"
+                     % "  ".join(shape))
+    return lines
+
+
+def tsv_lines():
+    lines = []
+    if want_meta:
+        for test in declared():
+            tokens = [meta_token(k, v) for k, v in TESTS[test]]
+            lines.append("\t".join(["!test", test] + tokens))
+    for test, target, value, extras in samples:
+        lines.append("\t".join([test, target, value] + extras))
+    return lines
+
+
+def ndjson_lines():
+    lines = []
+    if want_meta:
+        for test in declared():
+            record = [("!test", test)] + TESTS[test]
+            lines.append(json.dumps(dict(record), sort_keys=True))
+    for test, target, value, extras in samples:
+        number_value = number(value)
+        record = {"test": test, "target": target,
+                  "value": value if number_value is None else number_value}
+        if extras:
+            record["meta"] = dict(e.split("=", 1) for e in extras)
+        lines.append(json.dumps(record, sort_keys=True))
+    return lines
+
+
+lines = ndjson_lines() if fmt == "ndjson" else tsv_lines()
+
+if out_path == "-":
+    for line in header_lines() + lines:
+        sys.stdout.write(line + "\n")
+else:
+    existing = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    # A file that does not end in a newline would otherwise glue its last
+    # line to our first one.
+    needs_newline = False
+    if append and existing:
+        with open(out_path, "rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            needs_newline = handle.read(1) != b"\n"
+    with io.open(out_path, "a" if append else "w", encoding="utf-8") as handle:
+        if needs_newline:
+            handle.write(u"\n")
+        # A '#' header is fine in the text format and the viewer explicitly
+        # ignores one above JSON -- but not between NDJSON records, so an
+        # appended ndjson gets none.
+        if fmt != "ndjson" or not (append and existing):
+            for line in header_lines():
+                handle.write(line + u"\n")
+        for line in lines:
+            handle.write(line + u"\n")
+
+targets = len(set(target for _t, target, _v, _e in samples))
+sys.stderr.write("export-overlay: %d sample(s) across %d overlay(s) on %d "
+                 "target(s), from %d measured direction(s)\n"
+                 % (len(samples), len(declared()), targets, len(measured)))
+if failed:
+    sys.stderr.write("export-overlay: %d direction(s) had no measurement; "
+                     "exported as iperf_status=FAIL and counted against "
+                     "iperf_ok_pct, never as 0 Mb/s\n" % failed)
+if unmapped:
+    listed = ", ".join(sorted(unmapped)[:5])
+    more = " (+%d more)" % (len(unmapped) - 5) if len(unmapped) > 5 else ""
+    sys.stderr.write("export-overlay: %d host(s) not in the map file, left "
+                     "as-is: %s%s\n" % (len(unmapped), listed, more))
+PYEOF
+    local rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+}
+
+#------------------------------------------------------------------------------
 # process: pull results from the fleet and render the analysis artifacts.
 #   collect-results -> parse-csv -> parse-cpu -> make-pivot -> make-heatmap
 cmd_process() {
@@ -3408,6 +4045,11 @@ cmd_process() {
     cmd_parse_cpu
     cmd_make_pivot
     cmd_make_heatmap
+    # Opt-in: only when --overlay (or one of the --overlay-* flags, or
+    # $IPERF_OVERLAY) asked for it. `export-overlay` writes it on demand.
+    if [ "$IPERF_OVERLAY" = "1" ]; then
+        cmd_export_overlay
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -3804,6 +4446,7 @@ case "$cmd" in
     process)            cmd_process ;;
     doctor)             cmd_doctor ;;
     results-summary)    cmd_results_summary ;;
+    export-overlay)     cmd_export_overlay ;;
     all)                cmd_all "$@" ;;
     help|-h|--help)     usage ;;
     help-advanced|--help-advanced) usage_advanced ;;
