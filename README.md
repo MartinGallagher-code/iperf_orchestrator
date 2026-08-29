@@ -432,9 +432,12 @@ http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
 | `iperf_mbps_duplex` | host | everything that host carried, both directions summed |
 | `iperf_rel_median` | direction | that direction against the run's own median, in % |
 | `iperf_asymmetry` | pair | the gap between a pair's two directions, in % of the faster one |
-| `iperf_status` | direction | `OK`, or `FAIL` carrying the status that explains it |
+| `iperf_status` | direction | `OK`, or `FAIL` carrying the status, the error text and the log to open |
+| `iperf_fail_kind` | direction | the failures only, coloured by why (`NO_SUMMARY`, `DIRECTION_MISSING`, …) |
 | `iperf_ok_pct` | host | how much of that host's mesh actually measured |
+| `iperf_peers` | host | how many distinct peers it exchanged data with |
 | `iperf_cpu_peak`, `_mean`, `_softirq`, `_sys`, `_user`, `_idle_floor` | host | from `cpu_summary.csv` |
+| `iperf_bind_iface` | direction | which NIC the traffic rode, when `--bind` was used |
 
 The three derived overlays are the ones worth opening first, because they say
 things the raw Mb/s cannot:
@@ -452,21 +455,40 @@ things the raw Mb/s cannot:
   `max`.
 - **`iperf_ok_pct`** keeps a mostly-broken host from hiding behind its one good
   link: a host whose mesh half failed reads 50% here even while its surviving
-  direction paints a healthy green.
+  direction paints a healthy green. It counts every direction a host is an end
+  of, not only the ones it sent, so a receive-only host in a partial-mesh grid
+  still gets a reading.
 
 Every overlay arrives with units, ramp direction and a short name, and each
 percentage states its real `0–100` range — an auto-scaled CPU overlay makes a
 30% peak look alarming purely for being the highest number present. Sample
 metadata carries the peer, the test's timestamp, which parser produced a CPU
-row (`src=mpstat`), how many cores it saw, and which core saturated
-(`core=7`); the run's duration/streams/protocol ride in the file header, and
-only a row that departs from them says so on its own line.
+row (`src=mpstat`), how many cores it saw, which core saturated (`core=7`),
+and — on a failure — the error text and the log file to open (`err=`, `log=`).
+The file header records the run id, its **mode** (a `parallel` run is the whole
+fleet under load at once; `sequential-pair` is one link's uncontended maximum;
+they are not comparable) and the duration/streams/protocol every sample shared,
+so only a row that departs from them pays for saying so.
 
 One measured row becomes one sample: nothing is averaged on the way out, so
 the viewer's own aggregation menu does the reducing (`mean` reads as "across
-peers", `max` as "the best peer", `min` as "the worst"). `--overlay-reduce`
-collapses to one median sample per host per overlay when the raw row count
-matters.
+peers", `max` as "the best peer", `min` as "the worst", `stdev` and `range` as
+"how steady was it"). `--overlay-reduce` collapses to one median sample per
+host per overlay when the raw row count matters.
+
+### Rolling runs, and what "carried at once" means
+
+`iperf_mbps_duplex` is the one figure that cannot be a plain sum. Parallel and
+sequential modes fire a round's flows together, so those rates genuinely add;
+rolling mode probes the same pair over and over, and adding those reports more
+than the NIC can carry. So rows are clustered by overlapping test window,
+summed inside a cluster and averaged across clusters — the same rule
+`make-pivot` uses on its cells, for the same reason. A CSV with no
+`test_start` cannot say what was in flight together, and there the overlay is
+left out with a note on stderr rather than guessed at. `iperf_asymmetry`
+compares each direction's *median* for the same reason: on a rolling run,
+comparing one arbitrary probe against another turns ordinary variance into an
+apparent duplex fault.
 
 **A direction that produced no number is never exported as 0 Mb/s.** Zero is a
 measurement, and averaging it in makes a broken link read as a slow one. Those

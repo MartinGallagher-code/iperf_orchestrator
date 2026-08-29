@@ -4,6 +4,44 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-08-29
+
+### Fixed
+- **`iperf_mbps_duplex` no longer sums repeated probes.** Rolling mode
+  tests the same pair over and over; adding those samples reports more
+  than the NIC can carry — the same mistake that once produced
+  above-line-rate cells in the pivot. Rows are now clustered by
+  overlapping test window (from `test_start` + `duration_s`), summed
+  inside a cluster and averaged across clusters, which is what
+  `make-pivot` does to its cells. A CSV with no `test_start` cannot say
+  what was in flight together, so the overlay is left out for those hosts
+  with a note on stderr rather than guessed at.
+- **`iperf_asymmetry` compares medians, not arbitrary probes.** On a
+  rolling run each direction is reduced to its median first, so ordinary
+  probe-to-probe variance is not read as a duplex fault.
+- **`iperf_ok_pct` counts every direction a host is an end of**, not only
+  the ones it sent — a receive-only host in a partial-mesh grid had no
+  coverage reading at all before.
+
+### Added
+- **`iperf_fail_kind`.** The failures only, valued by *why*
+  (`NO_SUMMARY`, `DIRECTION_MISSING`, `READ_ERROR`, …), so a rack full of
+  one kind reads differently from a rack full of another. The
+  `iperf_status` sample now also carries the error text and the log file
+  to open (`err=`, `log=`).
+- **`iperf_peers`.** How many distinct peers a host actually exchanged
+  data with — a partial-mesh grid and a rolling run both leave hosts with
+  far fewer peers than the fleet has, which a healthy-looking throughput
+  number hides.
+- **`iperf_bind_iface`.** Which NIC the traffic rode, from the CSV's
+  `bind_iface`/`bind_ip`, when `--bind` was used. Half a floor testing
+  over a different interface than the other half explains an asymmetry
+  you would otherwise chase in the fabric.
+- **The run's mode in the file header.** A `parallel` run is the whole
+  fleet under load at once and `sequential-pair` is one link's
+  uncontended maximum; the numbers are not comparable, and the file now
+  says which it was, alongside the host count.
+
 ## [2.2.0] - 2026-08-29
 
 ### Added

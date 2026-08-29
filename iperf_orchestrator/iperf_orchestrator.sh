@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.2.0"
+ORCH_VERSION="2.3.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -1130,10 +1130,12 @@ ANALYSIS:
                                          the run's own median) and
                                          iperf_asymmetry (the gap between a
                                          pair's two directions)
-                             reliability iperf_status OK/FAIL per direction,
-                                         iperf_ok_pct per host
+                             reliability iperf_status OK/FAIL and
+                                         iperf_fail_kind per direction,
+                                         iperf_ok_pct and iperf_peers per host
                              cpu         iperf_cpu_peak / _mean / _softirq /
                                          _sys / _user / _idle_floor per host
+                             wiring      iperf_bind_iface, when --bind was used
                            Writes <run-dir>/iperf_overlay.tsv unless
                            --overlay-out says otherwise; see the --overlay-*
                            flags above.
@@ -3531,10 +3533,17 @@ cmd_export_overlay() {
     # its counts on stderr either way.
     [ "$out" = "-" ] || log "Exporting overlay samples -> $out"
 
+    # The mode is the first thing to know when reading these numbers: a
+    # parallel run is every host under load at once, a sequential-pair run is
+    # one link's uncontended maximum. They are not comparable, and the file
+    # says which it was.
+    local mode="(unknown)"
+    [ -f "$RESULTS_DIR/.run_mode" ] && mode=$(cat "$RESULTS_DIR/.run_mode")
+
     "$PYTHON_BIN" - "$csv" "$cpu_csv" "$out" "$fmt" \
         "$IPERF_OVERLAY_APPEND" "$IPERF_OVERLAY_META" "$IPERF_OVERLAY_REDUCE" \
         "$IPERF_OVERLAY_PREFIX" "$IPERF_OVERLAY_MAP" "$RUN_ID" \
-        "$ORCH_VERSION" <<'PYEOF'
+        "$ORCH_VERSION" "$mode" <<'PYEOF'
 import csv, io, json, os, sys
 from collections import Counter
 
@@ -3549,6 +3558,7 @@ prefix      = sys.argv[8]
 map_path    = sys.argv[9]
 run_id      = sys.argv[10]
 version     = sys.argv[11]
+run_mode    = sys.argv[12]
 
 # Every overlay this run can produce, in the order they are declared.
 #
@@ -3561,9 +3571,10 @@ version     = sys.argv[11]
 ORDER = [
     "iperf_mbps_out", "iperf_mbps_in", "iperf_mbps_duplex",
     "iperf_rel_median", "iperf_asymmetry",
-    "iperf_status", "iperf_ok_pct",
+    "iperf_status", "iperf_fail_kind", "iperf_ok_pct", "iperf_peers",
     "iperf_cpu_peak", "iperf_cpu_mean", "iperf_cpu_softirq",
     "iperf_cpu_sys", "iperf_cpu_user", "iperf_cpu_idle_floor",
+    "iperf_bind_iface",
 ]
 TESTS = {
     "iperf_mbps_out": [
@@ -3589,10 +3600,22 @@ TESTS = {
         ("short", "ASYM"), ("label", "Direction asymmetry within a pair")],
     "iperf_status": [
         ("short", "STAT"), ("label", "Directed test outcome")],
+    # Only the failures, coloured by *why*: the viewer gives each distinct
+    # word its own stable colour, so a rack full of DIRECTION_MISSING reads
+    # differently from one full of READ_ERROR, which is the difference
+    # between a host that never ran and a host whose logs did not come back.
+    "iperf_fail_kind": [
+        ("short", "WHY"), ("label", "How a direction failed")],
     "iperf_ok_pct": [
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "min"), ("decimals", "0"),
         ("short", "OK%"), ("label", "Directions that measured")],
+    # How wide a host's mesh actually got. A partial-mesh grid and a rolling
+    # run both leave hosts with far fewer peers than the fleet has, and that
+    # is invisible in a throughput number that looks fine.
+    "iperf_peers": [
+        ("higher", "good"), ("agg", "min"), ("decimals", "0"),
+        ("short", "PEER"), ("label", "Distinct peers measured")],
     "iperf_cpu_peak": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "CPU"), ("label", "Peak host CPU")],
@@ -3615,6 +3638,12 @@ TESTS = {
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "min"), ("decimals", "1"), ("short", "IDLE"),
         ("label", "Lowest idle on one core")],
+    # Only present when --bind was used: which NIC the traffic actually rode.
+    # Half a floor testing over a different interface than the other half is
+    # the explanation for an asymmetry you would otherwise chase in the
+    # fabric.
+    "iperf_bind_iface": [
+        ("short", "NIC"), ("label", "Interface the test bound to")],
 }
 CPU_COLUMNS = [
     ("iperf_cpu_peak", "peak_total_pct"),
@@ -3756,6 +3785,14 @@ with io.open(results_csv, "r", encoding="utf-8-sig", newline="") as handle:
             "streams": (row.get("parallel_streams") or "").strip(),
             "proto": (row.get("protocol") or "").strip(),
             "at": (row.get("timestamp") or "").strip(),
+            # test_start is the epoch the generated run script stamped just
+            # before invoking iperf, which is what tells concurrent flows
+            # apart from repeated probes below.
+            "start": number(row.get("test_start")),
+            "iface": (row.get("bind_iface") or "").strip(),
+            "ip": (row.get("bind_ip") or "").strip(),
+            "error": (row.get("error") or "").strip(),
+            "log": (row.get("filename") or "").strip(),
         })
 
 measured = [r for r in rows if r["ok"]]
@@ -3788,30 +3825,77 @@ def direction_meta(row):
 
 hosts = []          # every host seen, in first-seen order
 host_seen = set()
-out_total = {}
-in_total = {}
+untimed = 0         # hosts whose rows carry no usable test window
 ok_count = {}
 attempts = {}
+peers = {}
+carried = {}        # rows this host was either end of
 
 
 def note_host(host):
     if host not in host_seen:
         host_seen.add(host)
         hosts.append(host)
-        out_total[host] = 0.0
-        in_total[host] = 0.0
         ok_count[host] = 0
         attempts[host] = 0
+        peers[host] = set()
+        carried[host] = []
 
 
+# A direction is a fact about both of its ends: counting it only for the
+# sender leaves a receive-only host (a partial-mesh grid column) with no
+# coverage reading at all, which is the host you most want to see.
 for row in rows:
     note_host(row["source"])
     note_host(row["target"])
-    attempts[row["source"]] += 1
+    for host in (row["source"], row["target"]):
+        attempts[host] += 1
+        if row["ok"]:
+            ok_count[host] += 1
     if row["ok"]:
-        ok_count[row["source"]] += 1
-        out_total[row["source"]] += row["mbps"]
-        in_total[row["target"]] += row["mbps"]
+        peers[row["source"]].add(row["target"])
+        peers[row["target"]].add(row["source"])
+        carried[row["source"]].append(row)
+        carried[row["target"]].append(row)
+
+
+def concurrent_load(host_rows):
+    """Mb/s this host was carrying at once, averaged over the run.
+
+    Rows are either CONCURRENT -- parallel and sequential modes fire a
+    round's flows together, and those rates genuinely add on the wire -- or
+    REPEATED, which is what rolling mode does to the same pair all run long.
+    Summing repeated samples reports more than the NIC can carry, so cluster
+    rows by overlapping test window, sum inside a cluster and average across
+    clusters. (make-pivot decides its cells the same way, and for the same
+    reason.)
+
+    Returns None when no row carries a usable test window: what a host had in
+    flight at once is exactly the thing that cannot be known without them,
+    and a mean of unrelated flows dressed up as a duplex total would be a
+    made-up number on a floor plan.
+    """
+    timed = []
+    for row in host_rows:
+        duration = number(row["duration"])
+        if row["start"] is not None and duration and duration > 0:
+            timed.append((row["start"], duration, row["mbps"]))
+    if not timed:
+        return None
+    timed.sort()
+    clusters = []
+    current = []
+    current_end = None
+    for start, duration, mbps in timed:
+        if current and current_end is not None and start >= current_end:
+            clusters.append(current)
+            current, current_end = [], None
+        current.append(mbps)
+        end = start + duration
+        current_end = end if current_end is None else max(current_end, end)
+    if current:
+        clusters.append(current)
+    return sum(sum(c) for c in clusters) / float(len(clusters))
 
 # Per-direction overlays, in row order so `last` means "the most recent test".
 for row in rows:
@@ -3829,9 +3913,13 @@ for row in rows:
 # faster one. A clean link is a few percent; a duplex mismatch or a congested
 # one-way path is tens. Credited to both ends, since either NIC can be the
 # cause and the floor plan is where you notice which rack they share.
-pair_mbps = {}
+# Rolling mode probes a pair over and over, so each direction is reduced to
+# its median first: comparing one arbitrary probe against another would make
+# ordinary run-to-run variance look like a duplex fault.
+pair_samples = {}
 for row in measured:
-    pair_mbps[(row["source"], row["target"])] = row["mbps"]
+    pair_samples.setdefault((row["source"], row["target"]), []).append(row["mbps"])
+pair_mbps = dict((key, median(values)) for key, values in pair_samples.items())
 for (a, b), forward in sorted(pair_mbps.items()):
     if a >= b:
         continue
@@ -3854,7 +3942,27 @@ for row in rows:
     else:
         if row["status"]:
             extras.append("status=" + meta_value(row["status"]))
+        # What went wrong and which log says so, because the next question
+        # after "which rack is red" is always "what happened there".
+        if row["error"]:
+            extras.append("err=" + meta_value(row["error"])[:80])
+        if row["log"]:
+            extras.append("log=" + meta_value(row["log"]))
         emit("iperf_status", row["source"], "FAIL", extras)
+        # A second overlay carrying only the failures, coloured by kind.
+        emit("iperf_fail_kind", row["source"],
+             meta_value(row["status"]) if row["status"] else "UNKNOWN",
+             extras[:1])
+
+# Which interface the traffic actually rode, when --bind was used. One sample
+# per direction, so a host that tested over two NICs shows both in the
+# inspector and the viewer picks the one it saw most.
+for row in measured:
+    if row["iface"]:
+        extras = ["peer=" + target_for(row["target"])]
+        if row["ip"]:
+            extras.append("ip=" + meta_value(row["ip"]))
+        emit("iperf_bind_iface", row["source"], meta_value(row["iface"]), extras)
 
 # What fraction of a host's own directions produced a number. A host whose
 # mesh half failed reads 50% here even when its one good link is fast.
@@ -3863,10 +3971,15 @@ for host in hosts:
         emit("iperf_ok_pct", host,
              trim(ok_count[host] * 100.0 / attempts[host]),
              ["ok=%d" % ok_count[host], "of=%d" % attempts[host]])
-    total = out_total[host] + in_total[host]
-    if total > 0:
-        emit("iperf_mbps_duplex", host, trim(total),
-             ["out=%s" % trim(out_total[host]), "in=%s" % trim(in_total[host])])
+    if peers[host]:
+        emit("iperf_peers", host, "%d" % len(peers[host]))
+    if carried[host]:
+        load = concurrent_load(carried[host])
+        if load is None:
+            untimed += 1
+        else:
+            emit("iperf_mbps_duplex", host, trim(load),
+                 ["flows=%d" % len(carried[host])])
 
 # ---- cpu_summary.csv: one row per host ------------------------------------
 cpu_hosts = 0
@@ -3956,8 +4069,13 @@ def header_lines():
     lines = [
         "# iperf-orchestrator %s -- overlay samples for the datacenter layout "
         "viewer" % version,
-        "# run %s: %d direction(s) measured, %d with no measurement, %d host(s) "
-        "with CPU data" % (run_id or "?", len(measured), failed, cpu_hosts),
+        # The mode decides what these numbers even mean: 'parallel' is the
+        # whole fleet under load at once, 'sequential-pair' is one link's
+        # uncontended maximum, 'rolling' is repeated sampling over time.
+        "# run %s, mode %s: %d host(s), %d direction(s) measured, %d with no "
+        "measurement, %d host(s) with CPU data"
+        % (run_id or "?", run_mode or "?", len(hosts), len(measured), failed,
+           cpu_hosts),
     ]
     if shape:
         lines.append("# run shape: %s (samples say so when they differ)"
@@ -4026,6 +4144,11 @@ if failed:
     sys.stderr.write("export-overlay: %d direction(s) had no measurement; "
                      "exported as iperf_status=FAIL and counted against "
                      "iperf_ok_pct, never as 0 Mb/s\n" % failed)
+if untimed:
+    sys.stderr.write("export-overlay: %d host(s) have no test_start/duration "
+                     "in the csv, so iperf_mbps_duplex is left out for them "
+                     "rather than guessed at (re-run parse-csv on a newer "
+                     "results set to get it)\n" % untimed)
 if unmapped:
     listed = ", ".join(sorted(unmapped)[:5])
     more = " (+%d more)" % (len(unmapped) - 5) if len(unmapped) > 5 else ""
