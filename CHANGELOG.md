@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-08-30
+
+### Added
+- **Hosts that never reported are now visible.** A host in the server list
+  that produced no rows at all — SSH failed, iperf2 missing, box down —
+  used to be simply absent from the results file, and an absent element on
+  a floor plan reads as "not part of this test", which is the one reading
+  that is certainly wrong. Those hosts are exported as
+  `iperf_status=NO-DATA` with 0% coverage, putting them on the same
+  overlay as every other broken host, and counted on stderr.
+- **`--overlay-line-rate MBPS`.** Scales the throughput overlays
+  absolutely (`0..MBPS`, and `0..2×MBPS` for duplex) instead of to
+  whatever this run happened to produce, and adds `iperf_line_util`. This
+  is the one failure `iperf_rel_median` cannot see: when the *whole*
+  fabric is at half speed, every direction sits at 100% of a median that
+  is itself wrong, and only an absolute reference shows it. Never
+  guessed — the overlay is absent unless you say what the NIC is.
+- **`iperf_gbytes`.** Total data carried per host. Bytes add over time in
+  a way rates do not, so this total is exact in every mode, including
+  rolling.
+- **The run's wall-clock span in the file header**, spelled for a person
+  rather than as iperf2's `YYYYMMDDHHMMSS`.
+
+## [2.3.1] - 2026-08-30
+
+### Fixed
+- **`iperf_rel_median` now aggregates by median, not minimum.** Found by
+  running a 64-host mesh through the viewer: on a full mesh every host
+  talks to the slow host, so every host's *worst* direction is the one to
+  it. Aggregating with `min` painted the whole floor 10–47% and left the
+  genuinely slow host (42%) indistinguishable from a healthy one (42.5%).
+  With the median, a host that is itself slow reads 45% while healthy
+  hosts sit at ~100% — the difference between "I am slow" and "I have a
+  slow peer", which is the question the overlay exists to answer. Switch
+  it to `min` in the viewer when you do want the worst link anywhere.
+- **`iperf_ok_pct` reports the worse of a host's two sides.** Sent and
+  received directions are now tallied separately and the lower percentage
+  is the value, with `sent=`/`recv=` metadata naming which side failed. A
+  host that receives fine and cannot send anything read 50% before —
+  mid-scale, and the least alarming thing on the rack — where it now
+  reads 0%.
+
 ## [2.3.0] - 2026-08-29
 
 ### Fixed

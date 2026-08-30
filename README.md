@@ -429,10 +429,12 @@ http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
 | Overlay | Per | What it is |
 |---|---|---|
 | `iperf_mbps_out` / `iperf_mbps_in` | direction | throughput, credited to the sender and to the receiver |
-| `iperf_mbps_duplex` | host | everything that host carried, both directions summed |
+| `iperf_mbps_duplex` | host | everything that host carried at once, both directions |
+| `iperf_gbytes` | host | total data carried; bytes add over time, so this is exact in every mode |
+| `iperf_line_util` | direction | throughput as a % of the NIC's line rate (with `--overlay-line-rate`) |
 | `iperf_rel_median` | direction | that direction against the run's own median, in % |
 | `iperf_asymmetry` | pair | the gap between a pair's two directions, in % of the faster one |
-| `iperf_status` | direction | `OK`, or `FAIL` carrying the status, the error text and the log to open |
+| `iperf_status` | direction | `OK`, `FAIL` (with the status, error text and log to open), or `NO-DATA` |
 | `iperf_fail_kind` | direction | the failures only, coloured by why (`NO_SUMMARY`, `DIRECTION_MISSING`, …) |
 | `iperf_ok_pct` | host | how much of that host's mesh actually measured |
 | `iperf_peers` | host | how many distinct peers it exchanged data with |
@@ -447,17 +449,22 @@ things the raw Mb/s cannot:
   here, 45% is half speed, and you do not have to know what "good" is for this
   hardware. It ships with a diverging palette pinned at 0–200%, so slower-than-
   normal and faster-than-normal read differently rather than as one ramp, and
-  aggregates with `min`: a collapsed rack shows its worst direction, not an
-  average that buries it.
+  aggregates with `median`. That last choice matters on a mesh: every host
+  talks to the slow host, so every host's *worst* direction is the one to it,
+  and a `min` aggregation paints the whole floor red while hiding the host that
+  is actually slow. The median distinguishes "I am slow" (all my directions
+  are) from "I have a slow peer" (one is). Switch it to `min` in the viewer
+  when you do want the worst link anywhere.
 - **`iperf_asymmetry`** is the shape a duplex mismatch, a one-way policer or a
   congested return path makes — a pair whose two directions disagree. It is
   credited to both ends (either NIC can be the cause) and aggregates with
   `max`.
 - **`iperf_ok_pct`** keeps a mostly-broken host from hiding behind its one good
-  link: a host whose mesh half failed reads 50% here even while its surviving
-  direction paints a healthy green. It counts every direction a host is an end
-  of, not only the ones it sent, so a receive-only host in a partial-mesh grid
-  still gets a reading.
+  link. Sent and received directions are tallied separately and the **worse**
+  side is the value, with `sent=`/`recv=` metadata naming which one failed: a
+  host that receives fine and cannot send anything reads 0%, not the 50% an
+  average of its two halves would suggest. Tallying both sides also means a
+  receive-only host in a partial-mesh grid still gets a reading.
 
 Every overlay arrives with units, ramp direction and a short name, and each
 percentage states its real `0–100` range — an auto-scaled CPU overlay makes a
@@ -496,6 +503,31 @@ directions leave as `iperf_status=FAIL` and pull their host's `iperf_ok_pct`
 down — visible on the rack, absent from the throughput math. The same holds for
 blank cells in `cpu_summary.csv` (a `/proc/stat` host has no per-core columns):
 skipped, not zeroed.
+
+### Two blind spots this closes
+
+**A host that never reported.** If a host in the server list produced no rows
+at all — SSH refused, iperf2 missing, box down — it has nothing to paint, and
+an element with no data on a floor plan reads as "not part of this test". That
+is the one reading that is certainly wrong. Those hosts are exported as
+`iperf_status=NO-DATA` with 0% coverage, so they sit on the same overlay as
+every other broken host instead of disappearing.
+
+**A fabric that is uniformly slow.** `iperf_rel_median` compares each direction
+against the run's own median, which is exactly what you want when one link is
+sick — and useless when *everything* is at half speed, because the median is
+half speed too and every direction reads a comfortable 100%. The viewer's
+auto-scaled colours hide it for the same reason. Tell the export what the NIC
+is and both problems go away:
+
+```bash
+./iperf-orchestrator.sh export-overlay --overlay-line-rate 25000   # 25 GbE
+```
+
+Throughput overlays are then scaled `0..25000` (and duplex `0..50000`) instead
+of to whatever this run produced, and `iperf_line_util` gives each direction as
+a percentage of line rate. It is never guessed: without the flag the overlay is
+absent, because a run cannot tell you what the hardware was capable of.
 
 ### Matching hosts to the layout
 

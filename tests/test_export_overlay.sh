@@ -248,13 +248,14 @@ test_export_overlay_reports_how_much_of_each_host_measured() {
     write_csvs
     local samples
     samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
-    # Coverage counts every direction a host is an end of, not only the ones
-    # it sent: hostA is part of 4 and 3 measured.
-    assert_contains "$samples" "iperf_ok_pct	hostA	75	ok=3	of=4" "a host whose mesh mostly worked" || return 1
-    # hostC received fine and failed to send, which is half its mesh -- and
-    # is why counting participation matters: sender-only counting leaves a
-    # receive-only host with no coverage reading at all.
-    assert_contains "$samples" "iperf_ok_pct	hostC	50	ok=1	of=2" "a host that failed one way" || return 1
+    # Send and receive are tallied separately and the worse one is reported.
+    # hostA sent both its directions fine but only half of what was aimed at
+    # it arrived, because hostC could not send.
+    assert_contains "$samples" "iperf_ok_pct	hostA	50	sent=2/2	recv=1/2" "the worse of a host's two sides" || return 1
+    # hostC receives fine and sends nothing: averaging those halves would
+    # report a dead sender as half-well, so the worse side wins.
+    assert_contains "$samples" "iperf_ok_pct	hostC	0	sent=0/1	recv=1/1" "a host that cannot send reads zero" || return 1
+    assert_contains "$samples" "iperf_ok_pct	hostB	100	sent=1/1	recv=1/1" "a host with nothing wrong reads 100" || return 1
     assert_contains "$samples" "iperf_peers	hostA	2" "and how wide its mesh reached" || return 1
 }
 
@@ -361,6 +362,13 @@ test_export_overlay_metadata_pins_percentages_to_a_real_scale() {
     # whatever it is; every % overlay states its own 0-100.
     assert_contains "$meta" "iperf_cpu_peak	unit=%	higher=bad	min=0	max=100" "CPU is 0-100" || return 1
     assert_contains "$meta" "iperf_ok_pct	unit=%	higher=good	min=0	max=100" "so is coverage" || return 1
+    # On a mesh every host's *worst* direction is the one to the sick host,
+    # so aggregating relative throughput with min paints the whole floor red
+    # and hides the host that is actually slow. The median separates them.
+    assert_contains "$meta" "iperf_rel_median" "relative throughput is declared" || return 1
+    local rel_agg
+    rel_agg=$(printf '%s\n' "$meta" | awk -F'\t' '$2=="iperf_rel_median"' | grep -o 'agg=[a-z]*')
+    assert_eq "agg=median" "$rel_agg" "relative throughput aggregates by median" || return 1
     # The relative overlay diverges around 100%: faster and slower read
     # differently, not just "more is bluer".
     assert_contains "$meta" "palette=rdbu	min=0	max=200" "relative throughput diverges at 100" || return 1
@@ -386,6 +394,57 @@ test_export_overlay_header_records_the_run_shape() {
     assert_not_contains "$sample" "dur=10" "an unremarkable duration is not repeated per sample" || return 1
 }
 
+test_export_overlay_shows_hosts_that_never_reported() {
+    write_csvs
+    # hostD is in the server list and appears nowhere in the results: SSH
+    # failed, iperf was missing, the host was down. With nothing exported
+    # for it the viewer draws it exactly like a host that was never part of
+    # the test, which is the one reading that is certainly wrong.
+    write_server_list hostA hostB hostC hostD >/dev/null
+    local samples err
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>"$TEST_TMPDIR/err" | samples_of)"
+    err="$(cat "$TEST_TMPDIR/err")"
+    assert_contains "$samples" "iperf_status	hostD	NO-DATA" "the silent host says so" || return 1
+    assert_contains "$samples" "iperf_ok_pct	hostD	0	sent=0/0	recv=0/0" \
+        "and reads zero coverage, like every other broken host" || return 1
+    assert_contains "$err" "produced no rows at all" "counted on stderr" || return 1
+    # It is not invented as a measurement anywhere else.
+    local ghost
+    ghost=$(printf '%s\n' "$samples" | grep -c '^iperf_mbps.*hostD' || true)
+    assert_eq "0" "$ghost" "a silent host gets no throughput samples" || return 1
+}
+
+test_export_overlay_scales_absolutely_against_a_line_rate() {
+    write_csvs
+    local samples meta
+    samples="$(bash "$ORCH" export-overlay --overlay-out - --overlay-line-rate 10000 2>/dev/null)"
+    meta="$(printf '%s\n' "$samples" | grep '^!test')"
+    # Without a line rate the viewer fits its colour ramp to whatever the run
+    # produced, so a floor running uniformly at half speed still paints
+    # green. A known line rate makes the throughput overlays absolute...
+    assert_contains "$meta" "iperf_mbps_out" "throughput overlay is declared" || return 1
+    local out_meta
+    out_meta=$(printf '%s\n' "$meta" | awk -F'\t' '$2=="iperf_mbps_out"')
+    assert_contains "$out_meta" "min=0	max=10000" "throughput is scaled to line rate" || return 1
+    out_meta=$(printf '%s\n' "$meta" | awk -F'\t' '$2=="iperf_mbps_duplex"')
+    assert_contains "$out_meta" "max=20000" "duplex is scaled to both directions" || return 1
+    # ...and adds the utilisation overlay: 1000 of 10000 Mb/s is 10%.
+    assert_contains "$(printf '%s\n' "$samples" | samples_of)" "iperf_line_util	hostA	10	peer=hostB" \
+        "utilisation against the line rate" || return 1
+    # Absent by default: an unknown line rate must not be guessed at.
+    assert_not_contains "$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null)" \
+        "iperf_line_util" "no utilisation overlay without a line rate" || return 1
+}
+
+test_export_overlay_totals_the_data_carried() {
+    write_csvs
+    local samples
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # Bytes add over time in a way rates do not, so this total is exact in
+    # every mode. hostA carried 1.25 + 1.1 + 1.0 GB across its three flows.
+    assert_contains "$samples" "iperf_gbytes	hostA	3.35	flows=3" "total data carried" || return 1
+}
+
 run_test test_export_overlay_writes_the_run_directory_file
 run_test test_export_overlay_writes_stdout_without_log_noise
 run_test test_export_overlay_never_invents_zero_for_a_failed_direction
@@ -397,6 +456,9 @@ run_test test_export_overlay_never_sums_repeated_probes
 run_test test_export_overlay_omits_duplex_it_cannot_know
 run_test test_export_overlay_colours_failures_by_kind
 run_test test_export_overlay_records_the_bound_interface
+run_test test_export_overlay_shows_hosts_that_never_reported
+run_test test_export_overlay_scales_absolutely_against_a_line_rate
+run_test test_export_overlay_totals_the_data_carried
 run_test test_export_overlay_keeps_the_cpu_detail_the_csv_carries
 run_test test_export_overlay_metadata_pins_percentages_to_a_real_scale
 run_test test_export_overlay_header_records_the_run_shape
