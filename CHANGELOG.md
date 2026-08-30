@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-08-30
+
+### Fixed
+- **`iperf_rel_median` now aggregates by median, not minimum.** Found by
+  running a 64-host mesh through the viewer: on a full mesh every host
+  talks to the slow host, so every host's *worst* direction is the one to
+  it. Aggregating with `min` painted the whole floor 10–47% and left the
+  genuinely slow host (42%) indistinguishable from a healthy one (42.5%).
+  With the median, a host that is itself slow reads 45% while healthy
+  hosts sit at ~100% — the difference between "I am slow" and "I have a
+  slow peer", which is the question the overlay exists to answer. Switch
+  it to `min` in the viewer when you do want the worst link anywhere.
+- **`iperf_ok_pct` reports the worse of a host's two sides.** Sent and
+  received directions are now tallied separately and the lower percentage
+  is the value, with `sent=`/`recv=` metadata naming which side failed. A
+  host that receives fine and cannot send anything read 50% before —
+  mid-scale, and the least alarming thing on the rack — where it now
+  reads 0%.
+
 ## [2.3.0] - 2026-08-29
 
 ### Fixed

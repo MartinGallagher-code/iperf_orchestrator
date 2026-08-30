@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.3.0"
+ORCH_VERSION="2.3.1"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -3588,9 +3588,19 @@ TESTS = {
         ("short", "DUP"), ("label", "Total duplex Mb/s carried")],
     # Diverging palette around 100%: blue is faster than the run's median,
     # red is slower, and the midpoint is "normal for this fabric".
+    #
+    # agg=median, and the choice matters more than it looks. On a full mesh
+    # every host talks to the slow host, so every host's *worst* direction is
+    # the one to it -- aggregating with min paints the whole floor red and
+    # leaves the sick host indistinguishable from its neighbours. A host that
+    # is itself slow has all of its directions slow, so its median drops while
+    # a healthy host with one bad peer stays near 100%. That is the difference
+    # between "I am slow" and "I have a slow peer", which is the question this
+    # overlay exists to answer. (Switch it to min in the viewer when you do
+    # want the worst link anywhere.)
     "iperf_rel_median": [
         ("unit", "%"), ("higher", "good"), ("palette", "rdbu"),
-        ("min", "0"), ("max", "200"), ("agg", "min"), ("decimals", "0"),
+        ("min", "0"), ("max", "200"), ("agg", "median"), ("decimals", "0"),
         ("short", "REL"), ("label", "Throughput vs run median")],
     # agg=max so a collapsed rack shows its most lopsided pair, not an
     # average that hides it.
@@ -3606,10 +3616,14 @@ TESTS = {
     # between a host that never ran and a host whose logs did not come back.
     "iperf_fail_kind": [
         ("short", "WHY"), ("label", "How a direction failed")],
+    # The worse of the two directions, not their average: a host that receives
+    # fine and cannot send anything is broken, and averaging the two halves
+    # would report it as half-well. The sent=/recv= metadata says which side
+    # failed.
     "iperf_ok_pct": [
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "min"), ("decimals", "0"),
-        ("short", "OK%"), ("label", "Directions that measured")],
+        ("short", "OK%"), ("label", "Success rate, worst of send and receive")],
     # How wide a host's mesh actually got. A partial-mesh grid and a rolling
     # run both leave hosts with far fewer peers than the fleet has, and that
     # is invisible in a throughput number that looks fine.
@@ -3826,8 +3840,10 @@ def direction_meta(row):
 hosts = []          # every host seen, in first-seen order
 host_seen = set()
 untimed = 0         # hosts whose rows carry no usable test window
-ok_count = {}
-attempts = {}
+sent_ok = {}
+sent_total = {}
+recv_ok = {}
+recv_total = {}
 peers = {}
 carried = {}        # rows this host was either end of
 
@@ -3836,22 +3852,26 @@ def note_host(host):
     if host not in host_seen:
         host_seen.add(host)
         hosts.append(host)
-        ok_count[host] = 0
-        attempts[host] = 0
+        sent_ok[host] = 0
+        sent_total[host] = 0
+        recv_ok[host] = 0
+        recv_total[host] = 0
         peers[host] = set()
         carried[host] = []
 
 
-# A direction is a fact about both of its ends: counting it only for the
-# sender leaves a receive-only host (a partial-mesh grid column) with no
-# coverage reading at all, which is the host you most want to see.
+# A direction is a fact about both of its ends, tallied separately: counting
+# only what a host sent leaves a receive-only host (a partial-mesh grid
+# column) with no coverage reading at all, and merging the two hides the
+# host that receives fine but cannot send.
 for row in rows:
     note_host(row["source"])
     note_host(row["target"])
-    for host in (row["source"], row["target"]):
-        attempts[host] += 1
-        if row["ok"]:
-            ok_count[host] += 1
+    sent_total[row["source"]] += 1
+    recv_total[row["target"]] += 1
+    if row["ok"]:
+        sent_ok[row["source"]] += 1
+        recv_ok[row["target"]] += 1
     if row["ok"]:
         peers[row["source"]].add(row["target"])
         peers[row["target"]].add(row["source"])
@@ -3967,10 +3987,15 @@ for row in measured:
 # What fraction of a host's own directions produced a number. A host whose
 # mesh half failed reads 50% here even when its one good link is fast.
 for host in hosts:
-    if attempts[host]:
-        emit("iperf_ok_pct", host,
-             trim(ok_count[host] * 100.0 / attempts[host]),
-             ["ok=%d" % ok_count[host], "of=%d" % attempts[host]])
+    halves = []
+    if sent_total[host]:
+        halves.append(sent_ok[host] * 100.0 / sent_total[host])
+    if recv_total[host]:
+        halves.append(recv_ok[host] * 100.0 / recv_total[host])
+    if halves:
+        emit("iperf_ok_pct", host, trim(min(halves)),
+             ["sent=%d/%d" % (sent_ok[host], sent_total[host]),
+              "recv=%d/%d" % (recv_ok[host], recv_total[host])])
     if peers[host]:
         emit("iperf_peers", host, "%d" % len(peers[host]))
     if carried[host]:

@@ -447,17 +447,22 @@ things the raw Mb/s cannot:
   here, 45% is half speed, and you do not have to know what "good" is for this
   hardware. It ships with a diverging palette pinned at 0–200%, so slower-than-
   normal and faster-than-normal read differently rather than as one ramp, and
-  aggregates with `min`: a collapsed rack shows its worst direction, not an
-  average that buries it.
+  aggregates with `median`. That last choice matters on a mesh: every host
+  talks to the slow host, so every host's *worst* direction is the one to it,
+  and a `min` aggregation paints the whole floor red while hiding the host that
+  is actually slow. The median distinguishes "I am slow" (all my directions
+  are) from "I have a slow peer" (one is). Switch it to `min` in the viewer
+  when you do want the worst link anywhere.
 - **`iperf_asymmetry`** is the shape a duplex mismatch, a one-way policer or a
   congested return path makes — a pair whose two directions disagree. It is
   credited to both ends (either NIC can be the cause) and aggregates with
   `max`.
 - **`iperf_ok_pct`** keeps a mostly-broken host from hiding behind its one good
-  link: a host whose mesh half failed reads 50% here even while its surviving
-  direction paints a healthy green. It counts every direction a host is an end
-  of, not only the ones it sent, so a receive-only host in a partial-mesh grid
-  still gets a reading.
+  link. Sent and received directions are tallied separately and the **worse**
+  side is the value, with `sent=`/`recv=` metadata naming which one failed: a
+  host that receives fine and cannot send anything reads 0%, not the 50% an
+  average of its two halves would suggest. Tallying both sides also means a
+  receive-only host in a partial-mesh grid still gets a reading.
 
 Every overlay arrives with units, ramp direction and a short name, and each
 percentage states its real `0–100` range — an auto-scaled CPU overlay makes a
