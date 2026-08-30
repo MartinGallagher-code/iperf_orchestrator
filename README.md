@@ -429,10 +429,12 @@ http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
 | Overlay | Per | What it is |
 |---|---|---|
 | `iperf_mbps_out` / `iperf_mbps_in` | direction | throughput, credited to the sender and to the receiver |
-| `iperf_mbps_duplex` | host | everything that host carried, both directions summed |
+| `iperf_mbps_duplex` | host | everything that host carried at once, both directions |
+| `iperf_gbytes` | host | total data carried; bytes add over time, so this is exact in every mode |
+| `iperf_line_util` | direction | throughput as a % of the NIC's line rate (with `--overlay-line-rate`) |
 | `iperf_rel_median` | direction | that direction against the run's own median, in % |
 | `iperf_asymmetry` | pair | the gap between a pair's two directions, in % of the faster one |
-| `iperf_status` | direction | `OK`, or `FAIL` carrying the status, the error text and the log to open |
+| `iperf_status` | direction | `OK`, `FAIL` (with the status, error text and log to open), or `NO-DATA` |
 | `iperf_fail_kind` | direction | the failures only, coloured by why (`NO_SUMMARY`, `DIRECTION_MISSING`, …) |
 | `iperf_ok_pct` | host | how much of that host's mesh actually measured |
 | `iperf_peers` | host | how many distinct peers it exchanged data with |
@@ -501,6 +503,31 @@ directions leave as `iperf_status=FAIL` and pull their host's `iperf_ok_pct`
 down — visible on the rack, absent from the throughput math. The same holds for
 blank cells in `cpu_summary.csv` (a `/proc/stat` host has no per-core columns):
 skipped, not zeroed.
+
+### Two blind spots this closes
+
+**A host that never reported.** If a host in the server list produced no rows
+at all — SSH refused, iperf2 missing, box down — it has nothing to paint, and
+an element with no data on a floor plan reads as "not part of this test". That
+is the one reading that is certainly wrong. Those hosts are exported as
+`iperf_status=NO-DATA` with 0% coverage, so they sit on the same overlay as
+every other broken host instead of disappearing.
+
+**A fabric that is uniformly slow.** `iperf_rel_median` compares each direction
+against the run's own median, which is exactly what you want when one link is
+sick — and useless when *everything* is at half speed, because the median is
+half speed too and every direction reads a comfortable 100%. The viewer's
+auto-scaled colours hide it for the same reason. Tell the export what the NIC
+is and both problems go away:
+
+```bash
+./iperf-orchestrator.sh export-overlay --overlay-line-rate 25000   # 25 GbE
+```
+
+Throughput overlays are then scaled `0..25000` (and duplex `0..50000`) instead
+of to whatever this run produced, and `iperf_line_util` gives each direction as
+a percentage of line rate. It is never guessed: without the flag the overlay is
+absent, because a run cannot tell you what the hardware was capable of.
 
 ### Matching hosts to the layout
 

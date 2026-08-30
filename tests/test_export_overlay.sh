@@ -394,6 +394,57 @@ test_export_overlay_header_records_the_run_shape() {
     assert_not_contains "$sample" "dur=10" "an unremarkable duration is not repeated per sample" || return 1
 }
 
+test_export_overlay_shows_hosts_that_never_reported() {
+    write_csvs
+    # hostD is in the server list and appears nowhere in the results: SSH
+    # failed, iperf was missing, the host was down. With nothing exported
+    # for it the viewer draws it exactly like a host that was never part of
+    # the test, which is the one reading that is certainly wrong.
+    write_server_list hostA hostB hostC hostD >/dev/null
+    local samples err
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>"$TEST_TMPDIR/err" | samples_of)"
+    err="$(cat "$TEST_TMPDIR/err")"
+    assert_contains "$samples" "iperf_status	hostD	NO-DATA" "the silent host says so" || return 1
+    assert_contains "$samples" "iperf_ok_pct	hostD	0	sent=0/0	recv=0/0" \
+        "and reads zero coverage, like every other broken host" || return 1
+    assert_contains "$err" "produced no rows at all" "counted on stderr" || return 1
+    # It is not invented as a measurement anywhere else.
+    local ghost
+    ghost=$(printf '%s\n' "$samples" | grep -c '^iperf_mbps.*hostD' || true)
+    assert_eq "0" "$ghost" "a silent host gets no throughput samples" || return 1
+}
+
+test_export_overlay_scales_absolutely_against_a_line_rate() {
+    write_csvs
+    local samples meta
+    samples="$(bash "$ORCH" export-overlay --overlay-out - --overlay-line-rate 10000 2>/dev/null)"
+    meta="$(printf '%s\n' "$samples" | grep '^!test')"
+    # Without a line rate the viewer fits its colour ramp to whatever the run
+    # produced, so a floor running uniformly at half speed still paints
+    # green. A known line rate makes the throughput overlays absolute...
+    assert_contains "$meta" "iperf_mbps_out" "throughput overlay is declared" || return 1
+    local out_meta
+    out_meta=$(printf '%s\n' "$meta" | awk -F'\t' '$2=="iperf_mbps_out"')
+    assert_contains "$out_meta" "min=0	max=10000" "throughput is scaled to line rate" || return 1
+    out_meta=$(printf '%s\n' "$meta" | awk -F'\t' '$2=="iperf_mbps_duplex"')
+    assert_contains "$out_meta" "max=20000" "duplex is scaled to both directions" || return 1
+    # ...and adds the utilisation overlay: 1000 of 10000 Mb/s is 10%.
+    assert_contains "$(printf '%s\n' "$samples" | samples_of)" "iperf_line_util	hostA	10	peer=hostB" \
+        "utilisation against the line rate" || return 1
+    # Absent by default: an unknown line rate must not be guessed at.
+    assert_not_contains "$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null)" \
+        "iperf_line_util" "no utilisation overlay without a line rate" || return 1
+}
+
+test_export_overlay_totals_the_data_carried() {
+    write_csvs
+    local samples
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # Bytes add over time in a way rates do not, so this total is exact in
+    # every mode. hostA carried 1.25 + 1.1 + 1.0 GB across its three flows.
+    assert_contains "$samples" "iperf_gbytes	hostA	3.35	flows=3" "total data carried" || return 1
+}
+
 run_test test_export_overlay_writes_the_run_directory_file
 run_test test_export_overlay_writes_stdout_without_log_noise
 run_test test_export_overlay_never_invents_zero_for_a_failed_direction
@@ -405,6 +456,9 @@ run_test test_export_overlay_never_sums_repeated_probes
 run_test test_export_overlay_omits_duplex_it_cannot_know
 run_test test_export_overlay_colours_failures_by_kind
 run_test test_export_overlay_records_the_bound_interface
+run_test test_export_overlay_shows_hosts_that_never_reported
+run_test test_export_overlay_scales_absolutely_against_a_line_rate
+run_test test_export_overlay_totals_the_data_carried
 run_test test_export_overlay_keeps_the_cpu_detail_the_csv_carries
 run_test test_export_overlay_metadata_pins_percentages_to_a_real_scale
 run_test test_export_overlay_header_records_the_run_shape
