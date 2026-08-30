@@ -26,11 +26,11 @@ write_csvs() {
     mkdir -p "$run_dir"
     ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
     cat > "$run_dir/iperf_results.csv" <<'CSV'
-timestamp,source,target,status,protocol,duration_s,parallel_streams,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error
-20260101120000,hostA,hostB,OK,TCP,10,1,1250000000,1000000000,1000.0,54321,5001,hostA,hostB,a_to_b.log,
-20260101120000,hostB,hostA,OK,TCP,10,1,1100000000,880000000,880.0,5001,54321,hostA,hostB,a_to_b.log,
-20260101120000,hostA,hostC,OK,TCP,10,1,1000000000,800000000,800.0,54322,5001,hostA,hostC,a_to_c.log,
-20260101120000,hostC,hostA,NO_SUMMARY,TCP,10,1,,,,5001,54322,hostA,hostC,a_to_c.log,no summary line
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bind_iface,bind_ip,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error,test_start
+20260101120000,hostA,hostB,OK,TCP,10,1,eth0,10.0.0.1,1250000000,1000000000,1000.0,54321,5001,hostA,hostB,a_to_b.log,,1767268800
+20260101120000,hostB,hostA,OK,TCP,10,1,eth0,10.0.0.2,1100000000,880000000,880.0,5001,54321,hostA,hostB,a_to_b.log,,1767268800
+20260101120000,hostA,hostC,OK,TCP,10,1,eth0,10.0.0.1,1000000000,800000000,800.0,54322,5001,hostA,hostC,a_to_c.log,,1767268800
+20260101120000,hostC,hostA,NO_SUMMARY,TCP,10,1,,,,,,5001,54322,hostA,hostC,a_to_c.log,no summary line,1767268800
 CSV
     cat > "$run_dir/cpu_summary.csv" <<'CSV'
 host,source,n_cpus,peak_total_pct,mean_total_pct,peak_softirq_pct,peak_softirq_cpu,peak_sys_pct,peak_user_pct,peak_idle_floor_pct
@@ -248,20 +248,95 @@ test_export_overlay_reports_how_much_of_each_host_measured() {
     write_csvs
     local samples
     samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
-    assert_contains "$samples" "iperf_ok_pct	hostA	100	ok=2	of=2" "a host whose mesh worked" || return 1
-    # The point of the overlay: hostC's only direction failed, so it reads 0
-    # rather than vanishing from the throughput overlays unnoticed.
-    assert_contains "$samples" "iperf_ok_pct	hostC	0	ok=0	of=1" "a host whose mesh did not" || return 1
+    # Coverage counts every direction a host is an end of, not only the ones
+    # it sent: hostA is part of 4 and 3 measured.
+    assert_contains "$samples" "iperf_ok_pct	hostA	75	ok=3	of=4" "a host whose mesh mostly worked" || return 1
+    # hostC received fine and failed to send, which is half its mesh -- and
+    # is why counting participation matters: sender-only counting leaves a
+    # receive-only host with no coverage reading at all.
+    assert_contains "$samples" "iperf_ok_pct	hostC	50	ok=1	of=2" "a host that failed one way" || return 1
+    assert_contains "$samples" "iperf_peers	hostA	2" "and how wide its mesh reached" || return 1
+}
+
+test_export_overlay_colours_failures_by_kind() {
+    write_csvs
+    local samples
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # A second overlay carrying only the failures, valued by why: a rack full
+    # of DIRECTION_MISSING is a different problem from one full of READ_ERROR.
+    assert_contains "$samples" "iperf_fail_kind	hostC	NO_SUMMARY" "failures carry their kind" || return 1
+    local ok_rows
+    ok_rows=$(printf '%s\n' "$samples" | grep -c '^iperf_fail_kind.*hostB' || true)
+    assert_eq "0" "$ok_rows" "a host with no failures gets no fail_kind sample" || return 1
+    # And the verdict sample says what happened and which log to open.
+    assert_contains "$samples" "err=no_summary_line" "the error text rides along" || return 1
+    assert_contains "$samples" "log=a_to_c.log" "so does the log to open" || return 1
+}
+
+test_export_overlay_records_the_bound_interface() {
+    write_csvs
+    local samples
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # With --bind, half a floor testing over a different NIC than the other
+    # half explains an asymmetry you would otherwise chase in the fabric.
+    assert_contains "$samples" "iperf_bind_iface	hostA	eth0	peer=hostB	ip=10.0.0.1" \
+        "the interface the traffic actually rode" || return 1
 }
 
 test_export_overlay_totals_the_duplex_load_per_host() {
     write_csvs
     local samples
     samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
-    # hostA sent 1000 + 800 and received 880.
-    assert_contains "$samples" "iperf_mbps_duplex	hostA	2680	out=1800	in=880" "sum of both directions" || return 1
+    # All four flows share a test window, so they were on the wire together
+    # and their rates add: hostA sent 1000 + 800 and received 880.
+    assert_contains "$samples" "iperf_mbps_duplex	hostA	2680	flows=3" "concurrent flows add" || return 1
     # hostC only ever received, and that still counts as carried traffic.
-    assert_contains "$samples" "iperf_mbps_duplex	hostC	800	out=0	in=800" "receive-only host" || return 1
+    assert_contains "$samples" "iperf_mbps_duplex	hostC	800	flows=1" "receive-only host" || return 1
+}
+
+# Rolling mode probes the same pair over and over. Those samples are not
+# concurrent, and summing them reports more than the NIC can carry -- the
+# mistake that once produced above-line-rate cells in the pivot.
+write_rolling_csv() {
+    local run_dir; run_dir="$(RUN_DIR)"
+    mkdir -p "$run_dir"
+    ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
+    {
+        echo "timestamp,source,target,status,protocol,duration_s,parallel_streams,bind_iface,bind_ip,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error,test_start"
+        # Three back-to-back probes of one pair: 10s windows at t, t+20, t+40.
+        echo "20260101120000,hostA,hostB,OK,TCP,10,1,,,,,900.0,54321,5001,hostA,hostB,r1.log,,1767268800"
+        echo "20260101120020,hostA,hostB,OK,TCP,10,1,,,,,1000.0,54321,5001,hostA,hostB,r2.log,,1767268820"
+        echo "20260101120040,hostA,hostB,OK,TCP,10,1,,,,,1100.0,54321,5001,hostA,hostB,r3.log,,1767268840"
+    } > "$run_dir/iperf_results.csv"
+}
+
+test_export_overlay_never_sums_repeated_probes() {
+    write_rolling_csv
+    local samples value
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    value=$(printf '%s\n' "$samples" | awk -F'\t' '$1=="iperf_mbps_duplex" && $2=="hostA" {print $3}')
+    # Each probe ran alone, so the host carried ~1000 Mb/s at a time -- the
+    # average across the three windows, never their 3000 Mb/s sum.
+    assert_eq "1000" "$value" "repeated probes average, they do not add" || return 1
+    # And the pair's two directions are compared as medians, so ordinary
+    # probe-to-probe variance is not read as a duplex fault.
+    local asym
+    asym=$(printf '%s\n' "$samples" | grep -c '^iperf_asymmetry' || true)
+    assert_eq "0" "$asym" "one-way pair still reports no asymmetry" || return 1
+}
+
+test_export_overlay_omits_duplex_it_cannot_know() {
+    # A CSV with no test_start cannot say what was in flight at once, so the
+    # overlay is left out rather than guessed at.
+    local run_dir; run_dir="$(RUN_DIR)"
+    mkdir -p "$run_dir"
+    ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
+    printf 'source,target,status,mbps,filename\nhostA,hostB,OK,900,a.log\nhostB,hostA,OK,1000,a.log\n' \
+        > "$run_dir/iperf_results.csv"
+    RUN_OUT="$(bash "$ORCH" export-overlay --overlay-out - 2>"$TEST_TMPDIR/err")"
+    assert_not_contains "$RUN_OUT" "iperf_mbps_duplex" "no duplex without test windows" || return 1
+    assert_contains "$(cat "$TEST_TMPDIR/err")" "no test_start/duration" "and it says why" || return 1
+    assert_contains "$RUN_OUT" "iperf_mbps_out	hostA	900" "the throughput samples still land" || return 1
 }
 
 test_export_overlay_keeps_the_cpu_detail_the_csv_carries() {
@@ -318,6 +393,10 @@ run_test test_export_overlay_scores_each_direction_against_the_run_median
 run_test test_export_overlay_measures_pair_asymmetry_both_ways
 run_test test_export_overlay_reports_how_much_of_each_host_measured
 run_test test_export_overlay_totals_the_duplex_load_per_host
+run_test test_export_overlay_never_sums_repeated_probes
+run_test test_export_overlay_omits_duplex_it_cannot_know
+run_test test_export_overlay_colours_failures_by_kind
+run_test test_export_overlay_records_the_bound_interface
 run_test test_export_overlay_keeps_the_cpu_detail_the_csv_carries
 run_test test_export_overlay_metadata_pins_percentages_to_a_real_scale
 run_test test_export_overlay_header_records_the_run_shape
