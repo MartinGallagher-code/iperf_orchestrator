@@ -64,7 +64,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.4.0"
+ORCH_VERSION="2.5.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -269,6 +269,12 @@ IPERF_OVERLAY_APPEND="${IPERF_OVERLAY_APPEND:-0}" # 1 = append (the results file
                                                   # append-only by design)
 IPERF_OVERLAY_REDUCE="${IPERF_OVERLAY_REDUCE:-0}" # 1 = one sample per host per test
 IPERF_OVERLAY_META="${IPERF_OVERLAY_META:-1}"     # 0 = omit the !test metadata lines
+IPERF_OVERLAY_TEST_PREFIX="${IPERF_OVERLAY_TEST_PREFIX:-iperf_}"  # prefix on every
+                                                  # overlay name; change it to load two
+                                                  # runs side by side for comparison
+IPERF_OVERLAY_RUN="${IPERF_OVERLAY_RUN:-}"        # run= label (default: the run id)
+IPERF_OVERLAY_WINDOW="${IPERF_OVERLAY_WINDOW:-0}" # only tests started in the last N
+                                                  # seconds of the run; 0 = all of it
 IPERF_OVERLAY_LINE_RATE="${IPERF_OVERLAY_LINE_RATE:-}"  # NIC line rate in Mb/s: turns the
                                                   # throughput overlays into absolute
                                                   # scales and adds iperf_line_util
@@ -351,6 +357,12 @@ while [ $# -gt 0 ]; do
         --overlay-map=*)   IPERF_OVERLAY_MAP="${1#*=}"; IPERF_OVERLAY=1; shift ;;
         --overlay-prefix)  _flag_need "$1" "${2:-}"; IPERF_OVERLAY_PREFIX="$2"; IPERF_OVERLAY=1; shift 2 ;;
         --overlay-prefix=*) IPERF_OVERLAY_PREFIX="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-test-prefix)   _flag_need "$1" "${2:-}"; IPERF_OVERLAY_TEST_PREFIX="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-test-prefix=*) IPERF_OVERLAY_TEST_PREFIX="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-run)         _flag_need "$1" "${2:-}"; IPERF_OVERLAY_RUN="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-run=*)       IPERF_OVERLAY_RUN="${1#*=}"; IPERF_OVERLAY=1; shift ;;
+        --overlay-window)      _flag_need "$1" "${2:-}"; IPERF_OVERLAY_WINDOW="$2"; IPERF_OVERLAY=1; shift 2 ;;
+        --overlay-window=*)    IPERF_OVERLAY_WINDOW="${1#*=}"; IPERF_OVERLAY=1; shift ;;
         --overlay-line-rate)   _flag_need "$1" "${2:-}"; IPERF_OVERLAY_LINE_RATE="$2"; IPERF_OVERLAY=1; shift 2 ;;
         --overlay-line-rate=*) IPERF_OVERLAY_LINE_RATE="${1#*=}"; IPERF_OVERLAY=1; shift ;;
         --overlay-append)  IPERF_OVERLAY_APPEND=1; shift ;;
@@ -1057,6 +1069,14 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
                                the .dc file disagree (IPs vs hostnames).
     --overlay-prefix STR       String prepended to every target, e.g. DH1/A/ to
                                address one row of a bigger floor plan.
+    --overlay-test-prefix STR  Prefix on every overlay name (default iperf_).
+                               Export two runs with different prefixes to load
+                               them side by side and compare, rather than
+                               averaging them into one overlay.
+    --overlay-run LABEL        run= tag on every sample (default: the run id).
+    --overlay-window SECONDS   Only tests started in the last SECONDS of the
+                               run; 0 (default) is all of it. For a long
+                               rolling run whose first minutes are ramp-up.
     --overlay-line-rate MBPS   NIC line rate. Scales the throughput overlays
                                absolutely (0..MBPS) instead of to whatever this
                                run produced, and adds iperf_line_util. Without
@@ -1145,8 +1165,12 @@ ANALYSIS:
                                          iperf_ok_pct and iperf_peers per host
                              cpu         iperf_cpu_peak / _mean / _softirq /
                                          _sys / _user / _idle_floor per host
-                             volume      iperf_gbytes per host, and
-                                         iperf_line_util with --overlay-line-rate
+                             volume      iperf_gbytes per host,
+                                         iperf_line_util with --overlay-line-rate,
+                                         iperf_achieved against a -b target
+                             coverage    iperf_state (TESTED / NO-DATA),
+                                         iperf_coverage against the planned
+                                         peers, iperf_tests per host
                              wiring      iperf_bind_iface, when --bind was used
                            Hosts in the server list that produced no rows at
                            all are exported as iperf_status=NO-DATA with 0%
@@ -3564,15 +3588,38 @@ cmd_export_overlay() {
     # all is the silent hole in every results file: with nothing to paint,
     # the viewer draws it exactly like a host that was never part of the
     # test. Reading the list lets those hosts say so instead.
-    local expected=""
+    local expected="" peer_counts=""
     if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
         expected=$(read_servers | tr '\n' ',')
+        # How many peers each host was *meant* to exchange with, which is
+        # what turns a peer count into a coverage percentage. A pair grid
+        # says so exactly; a plain list means full mesh.
+        local -a _hosts=()
+        while IFS= read -r _h; do [ -n "$_h" ] && _hosts+=("$_h"); done < <(read_servers)
+        _load_pair_grid "$SERVER_LIST_FILE"
+        local _a _b _n
+        for _a in ${_hosts[@]+"${_hosts[@]}"}; do
+            _n=0
+            for _b in ${_hosts[@]+"${_hosts[@]}"}; do
+                [ "$_a" = "$_b" ] && continue
+                if [ "$_GRID_PRESENT" = "1" ]; then
+                    if [ -n "${PAIR_OK["$_a|$_b"]:-}" ] || [ -n "${PAIR_OK["$_b|$_a"]:-}" ]; then
+                        _n=$((_n + 1))
+                    fi
+                else
+                    _n=$((_n + 1))
+                fi
+            done
+            peer_counts="${peer_counts}${_a}:${_n},"
+        done
     fi
 
     "$PYTHON_BIN" - "$csv" "$cpu_csv" "$out" "$fmt" \
         "$IPERF_OVERLAY_APPEND" "$IPERF_OVERLAY_META" "$IPERF_OVERLAY_REDUCE" \
         "$IPERF_OVERLAY_PREFIX" "$IPERF_OVERLAY_MAP" "$RUN_ID" \
-        "$ORCH_VERSION" "$mode" "$expected" "$IPERF_OVERLAY_LINE_RATE" <<'PYEOF'
+        "$ORCH_VERSION" "$mode" "$expected" "$IPERF_OVERLAY_LINE_RATE" \
+        "$IPERF_OVERLAY_TEST_PREFIX" "$IPERF_OVERLAY_RUN" "$IPERF_OVERLAY_WINDOW" \
+        "$peer_counts" "$IPERF_BANDWIDTH" <<'PYEOF'
 import csv, io, json, os, sys
 from collections import Counter
 
@@ -3590,6 +3637,11 @@ version     = sys.argv[11]
 run_mode    = sys.argv[12]
 expected    = [h for h in sys.argv[13].split(",") if h.strip()]
 line_rate   = float(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip() else None
+test_prefix = sys.argv[15]
+run_label   = sys.argv[16].strip()
+window      = int(sys.argv[17]) if sys.argv[17].strip() else 0
+peer_counts = sys.argv[18]
+bandwidth   = sys.argv[19].strip()
 
 # Every overlay this run can produce, in the order they are declared.
 #
@@ -3600,34 +3652,35 @@ line_rate   = float(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14].strip()
 # question when a rack or room is collapsed, and `short=` is what gets printed
 # on an element's slice when several overlays are shown at once.
 ORDER = [
-    "iperf_mbps_out", "iperf_mbps_in", "iperf_mbps_duplex", "iperf_gbytes",
-    "iperf_line_util", "iperf_rel_median", "iperf_asymmetry",
-    "iperf_status", "iperf_fail_kind", "iperf_ok_pct", "iperf_peers",
-    "iperf_cpu_peak", "iperf_cpu_mean", "iperf_cpu_softirq",
-    "iperf_cpu_sys", "iperf_cpu_user", "iperf_cpu_idle_floor",
-    "iperf_bind_iface",
+    "mbps_out", "mbps_in", "mbps_duplex", "gbytes",
+    "line_util", "rel_median", "asymmetry",
+    "achieved", "state", "status", "fail_kind", "ok_pct", "peers",
+    "coverage", "tests",
+    "cpu_peak", "cpu_mean", "cpu_softirq",
+    "cpu_sys", "cpu_user", "cpu_idle_floor",
+    "bind_iface",
 ]
 TESTS = {
-    "iperf_mbps_out": [
+    "mbps_out": [
         ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
         ("short", "OUT"), ("label", "Outbound Mb/s per direction")],
-    "iperf_mbps_in": [
+    "mbps_in": [
         ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
         ("short", "IN"), ("label", "Inbound Mb/s per direction")],
-    "iperf_mbps_duplex": [
+    "mbps_duplex": [
         ("unit", "Mb/s"), ("higher", "good"), ("decimals", "0"),
         ("short", "DUP"), ("label", "Total duplex Mb/s carried")],
     # Bytes are additive over time in a way rates are not, so this total is
     # exact in every mode -- the honest answer to "how much did this rack
     # actually move", and the number a burn-in report quotes.
-    "iperf_gbytes": [
+    "gbytes": [
         ("unit", "GB"), ("higher", "good"), ("decimals", "1"),
         ("short", "DATA"), ("label", "Total data carried")],
     # Only with --overlay-line-rate. This is the overlay that catches the
     # failure iperf_rel_median cannot see: when the *whole* fabric is at half
     # speed, every direction sits at 100% of a median that is itself wrong,
     # and only an absolute reference shows it.
-    "iperf_line_util": [
+    "line_util": [
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "median"), ("decimals", "0"),
         ("short", "UTIL"), ("label", "Throughput vs line rate")],
@@ -3643,57 +3696,82 @@ TESTS = {
     # between "I am slow" and "I have a slow peer", which is the question this
     # overlay exists to answer. (Switch it to min in the viewer when you do
     # want the worst link anywhere.)
-    "iperf_rel_median": [
+    "rel_median": [
         ("unit", "%"), ("higher", "good"), ("palette", "rdbu"),
         ("min", "0"), ("max", "200"), ("agg", "median"), ("decimals", "0"),
         ("short", "REL"), ("label", "Throughput vs run median")],
     # agg=max so a collapsed rack shows its most lopsided pair, not an
     # average that hides it.
-    "iperf_asymmetry": [
+    "asymmetry": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("agg", "max"), ("decimals", "0"),
         ("short", "ASYM"), ("label", "Direction asymmetry within a pair")],
-    "iperf_status": [
+    # What was asked for versus what arrived: with --bandwidth, iperf2 was
+    # told to aim at a rate, and falling short of it is a finding whatever
+    # the NIC could have done. (matrix_orchestrator exports the same idea as
+    # mx_achieved, against its target pps.)
+    "achieved": [
+        ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
+        ("agg", "median"), ("decimals", "0"),
+        ("short", "ACHV"), ("label", "Rate achieved vs the -b target")],
+    # The roll call, one sample per host, kept apart from the per-direction
+    # verdict so the two granularities can never reduce into each other.
+    "state": [
+        ("agg", "last"), ("short", "STATE"), ("label", "Did this host test?")],
+    "status": [
         ("short", "STAT"), ("label", "Directed test outcome")],
     # Only the failures, coloured by *why*: the viewer gives each distinct
     # word its own stable colour, so a rack full of DIRECTION_MISSING reads
     # differently from one full of READ_ERROR, which is the difference
     # between a host that never ran and a host whose logs did not come back.
-    "iperf_fail_kind": [
+    "fail_kind": [
         ("short", "WHY"), ("label", "How a direction failed")],
     # The worse of the two directions, not their average: a host that receives
     # fine and cannot send anything is broken, and averaging the two halves
     # would report it as half-well. The sent=/recv= metadata says which side
     # failed.
-    "iperf_ok_pct": [
+    "ok_pct": [
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "min"), ("decimals", "0"),
         ("short", "OK%"), ("label", "Success rate, worst of send and receive")],
     # How wide a host's mesh actually got. A partial-mesh grid and a rolling
     # run both leave hosts with far fewer peers than the fleet has, and that
     # is invisible in a throughput number that looks fine.
-    "iperf_peers": [
+    "peers": [
         ("higher", "good"), ("agg", "min"), ("decimals", "0"),
         ("short", "PEER"), ("label", "Distinct peers measured")],
-    "iperf_cpu_peak": [
+    # The same count against the peers this host was *meant* to reach, which
+    # is the readable form: a rolling run cut short leaves hosts at 40% here
+    # while `peers` just says 8. A pair grid narrows what "meant to" means,
+    # so a partial mesh still reads 100% when it is complete.
+    "coverage": [
+        ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
+        ("agg", "min"), ("decimals", "0"),
+        ("short", "COV"), ("label", "Peers measured, of those planned")],
+    # How many directed tests this host took part in: sample count is
+    # confidence, and in rolling mode it is wildly uneven between hosts.
+    "tests": [
+        ("higher", "good"), ("agg", "min"), ("decimals", "0"),
+        ("short", "N"), ("label", "Directed tests this host was in")],
+    "cpu_peak": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "CPU"), ("label", "Peak host CPU")],
-    "iperf_cpu_mean": [
+    "cpu_mean": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "AVG"), ("label", "Mean host CPU")],
-    "iperf_cpu_softirq": [
+    "cpu_softirq": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "SIRQ"),
         ("label", "Peak softirq on one core")],
-    "iperf_cpu_sys": [
+    "cpu_sys": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "SYS"), ("label", "Peak system CPU")],
-    "iperf_cpu_user": [
+    "cpu_user": [
         ("unit", "%"), ("higher", "bad"), ("min", "0"), ("max", "100"),
         ("decimals", "0"), ("short", "USR"), ("label", "Peak user CPU")],
     # The floor, not the average: one saturated core caps a flow even while
     # the box looks idle.
-    "iperf_cpu_idle_floor": [
+    "cpu_idle_floor": [
         ("unit", "%"), ("higher", "good"), ("min", "0"), ("max", "100"),
         ("agg", "min"), ("decimals", "1"), ("short", "IDLE"),
         ("label", "Lowest idle on one core")],
@@ -3701,7 +3779,7 @@ TESTS = {
     # Half a floor testing over a different interface than the other half is
     # the explanation for an asymmetry you would otherwise chase in the
     # fabric.
-    "iperf_bind_iface": [
+    "bind_iface": [
         ("short", "NIC"), ("label", "Interface the test bound to")],
 }
 # A known line rate turns the throughput overlays from relative shading into
@@ -3709,20 +3787,23 @@ TESTS = {
 # the run happened to produce, so a floor running uniformly at half speed
 # still paints a comfortable green.
 if line_rate:
-    for name, top in (("iperf_mbps_out", line_rate), ("iperf_mbps_in", line_rate),
-                      ("iperf_mbps_duplex", line_rate * 2)):
+    for name, top in (("mbps_out", line_rate), ("mbps_in", line_rate),
+                      ("mbps_duplex", line_rate * 2)):
         TESTS[name] = TESTS[name] + [("min", "0"), ("max", "%g" % top)]
 
 CPU_COLUMNS = [
-    ("iperf_cpu_peak", "peak_total_pct"),
-    ("iperf_cpu_mean", "mean_total_pct"),
-    ("iperf_cpu_softirq", "peak_softirq_pct"),
-    ("iperf_cpu_sys", "peak_sys_pct"),
-    ("iperf_cpu_user", "peak_user_pct"),
-    ("iperf_cpu_idle_floor", "peak_idle_floor_pct"),
+    ("cpu_peak", "peak_total_pct"),
+    ("cpu_mean", "mean_total_pct"),
+    ("cpu_softirq", "peak_softirq_pct"),
+    ("cpu_sys", "peak_sys_pct"),
+    ("cpu_user", "peak_user_pct"),
+    ("cpu_idle_floor", "peak_idle_floor_pct"),
 ]
 
+# A results line is whitespace separated and quote aware, so a field can hold
+# neither: a quote would swallow the rest of the line into one token.
 WHITESPACE = set(" \t\r\n")
+BAD_IN_FIELD = set(' \t\r\n"')
 
 
 def fail(message):
@@ -3751,8 +3832,17 @@ def number(cell):
 
 
 def trim(value):
-    """Format a float without trailing zero noise."""
-    return "%.6g" % value
+    """A number for a results file: four significant digits, fixed notation.
+
+    %g would write a host's aggregate throughput as 1.163e+06 -- correct, and
+    unreadable in a file people grep. matrix_orchestrator's export settled on
+    this rule; the two tools write into the same results file, so they format
+    numbers the same way.
+    """
+    text = "%.4g" % value
+    if "e" in text or "E" in text:
+        text = "%.0f" % value
+    return text
 
 
 def median(values):
@@ -3784,6 +3874,41 @@ def load_map(path):
     return mapping
 
 
+if run_label and any(c in BAD_IN_FIELD for c in run_label):
+    fail("--overlay-run %r: the label is written onto every sample line, so "
+         "it can hold no whitespace or quotes" % run_label)
+run_tag = run_label or run_id
+
+
+def target_mbps(spec):
+    """iperf2's -b rate as Mb/s: 1G -> 1000, 100M -> 100, plain bits/s scaled."""
+    text = spec.strip()
+    if not text:
+        return None
+    scale = 1.0
+    if text[-1:] in ("k", "K"):
+        scale, text = 1e3, text[:-1]
+    elif text[-1:] in ("m", "M"):
+        scale, text = 1e6, text[:-1]
+    elif text[-1:] in ("g", "G"):
+        scale, text = 1e9, text[:-1]
+    try:
+        return float(text) * scale / 1e6
+    except ValueError:
+        return None
+
+
+target_rate = target_mbps(bandwidth)
+
+EXPECTED_PEERS = {}
+for item in peer_counts.split(","):
+    if ":" in item:
+        host, _, count = item.partition(":")
+        try:
+            EXPECTED_PEERS[host] = int(count)
+        except ValueError:
+            pass
+
 HOST_MAP = load_map(map_path)
 unmapped = set()
 samples = []        # (test, target, value, [key=value, ...])
@@ -3797,6 +3922,10 @@ def declared():
     return [test for test in ORDER if test in _seen]
 
 
+def declared_names():
+    return [(test_prefix + test, TESTS[test]) for test in declared()]
+
+
 def target_for(host):
     name = HOST_MAP.get(host)
     if name is None:
@@ -3804,22 +3933,25 @@ def target_for(host):
         if HOST_MAP:
             unmapped.add(host)
     name = prefix + name
-    # Fields are whitespace-separated, so a target carrying whitespace would
-    # silently split into a wrong target and a stray value.
-    if any(c in WHITESPACE for c in name):
-        fail("target may not contain whitespace: %r" % name)
+    if not name or any(c in BAD_IN_FIELD for c in name):
+        fail("target %r: a results file is whitespace separated and quote "
+             "aware, so a target can hold neither (host %r)" % (name, host))
     return name
 
 
 def meta_value(text):
     """Metadata rides on the same whitespace-separated line as the sample, so
     a value carrying whitespace would split off into a stray token."""
-    return "_".join(str(text).split()) or "?"
+    return "_".join(str(text).replace('"', "'").split()) or "?"
 
 
 def emit(test, host, value, extras=()):
+    """File one sample. The test name is prefixed on the way out, so a second
+    run exported with a different --overlay-test-prefix lands as its own set
+    of overlays and the two can be compared side by side on one floor plan
+    instead of averaging into each other."""
     _seen.add(test)
-    samples.append((test, target_for(host), value, list(extras)))
+    samples.append((test_prefix + test, target_for(host), value, list(extras)))
 
 
 # ---- iperf_results.csv: one row per direction ------------------------------
@@ -3863,6 +3995,19 @@ with io.open(results_csv, "r", encoding="utf-8-sig", newline="") as handle:
             "error": (row.get("error") or "").strip(),
             "log": (row.get("filename") or "").strip(),
         })
+
+# --overlay-window: the last N seconds of the run only. A long rolling run
+# spends its first minutes ramping, and the steady state is what you want on
+# the wall. Rows without a start time cannot be placed in time, so a window
+# keeps them rather than dropping what it cannot judge.
+windowed = 0
+if window > 0:
+    starts = [r["start"] for r in rows if r["start"] is not None]
+    if starts:
+        cutoff = max(starts) - window
+        kept = [r for r in rows if r["start"] is None or r["start"] >= cutoff]
+        windowed = len(rows) - len(kept)
+        rows = kept
 
 measured = [r for r in rows if r["ok"]]
 failed = len(rows) - len(measured)
@@ -3983,15 +4128,18 @@ for row in rows:
     if not row["ok"]:
         continue
     extras = direction_meta(row)
-    emit("iperf_mbps_out", row["source"], trim(row["mbps"]), extras)
-    emit("iperf_mbps_in", row["target"], trim(row["mbps"]),
+    emit("mbps_out", row["source"], trim(row["mbps"]), extras)
+    emit("mbps_in", row["target"], trim(row["mbps"]),
          ["peer=" + target_for(row["source"])] + extras[1:])
     if run_median:
-        emit("iperf_rel_median", row["source"],
+        emit("rel_median", row["source"],
              trim(row["mbps"] / run_median * 100.0), extras[:1])
     if line_rate:
-        emit("iperf_line_util", row["source"],
+        emit("line_util", row["source"],
              trim(row["mbps"] / line_rate * 100.0), extras[:1])
+    if target_rate:
+        emit("achieved", row["source"],
+             trim(row["mbps"] / target_rate * 100.0), extras[:1])
 
 # Asymmetry: how far apart a pair's two directions are, as a percentage of the
 # faster one. A clean link is a few percent; a duplex mismatch or a congested
@@ -4014,15 +4162,15 @@ for (a, b), forward in sorted(pair_mbps.items()):
     if top <= 0:
         continue
     gap = trim(abs(forward - back) / top * 100.0)
-    emit("iperf_asymmetry", a, gap, ["peer=" + target_for(b)])
-    emit("iperf_asymmetry", b, gap, ["peer=" + target_for(a)])
+    emit("asymmetry", a, gap, ["peer=" + target_for(b)])
+    emit("asymmetry", b, gap, ["peer=" + target_for(a)])
 
 # Verdicts. A failed direction is a fact about the sender's mesh, so it is
 # credited there; the status that explains it rides along for the inspector.
 for row in rows:
     extras = ["peer=" + target_for(row["target"])]
     if row["ok"]:
-        emit("iperf_status", row["source"], "OK", extras)
+        emit("status", row["source"], "OK", extras)
     else:
         if row["status"]:
             extras.append("status=" + meta_value(row["status"]))
@@ -4032,9 +4180,9 @@ for row in rows:
             extras.append("err=" + meta_value(row["error"])[:80])
         if row["log"]:
             extras.append("log=" + meta_value(row["log"]))
-        emit("iperf_status", row["source"], "FAIL", extras)
+        emit("status", row["source"], "FAIL", extras)
         # A second overlay carrying only the failures, coloured by kind.
-        emit("iperf_fail_kind", row["source"],
+        emit("fail_kind", row["source"],
              meta_value(row["status"]) if row["status"] else "UNKNOWN",
              extras[:1])
 
@@ -4046,7 +4194,7 @@ for row in measured:
         extras = ["peer=" + target_for(row["target"])]
         if row["ip"]:
             extras.append("ip=" + meta_value(row["ip"]))
-        emit("iperf_bind_iface", row["source"], meta_value(row["iface"]), extras)
+        emit("bind_iface", row["source"], meta_value(row["iface"]), extras)
 
 # What fraction of a host's own directions produced a number. A host whose
 # mesh half failed reads 50% here even when its one good link is fast.
@@ -4057,34 +4205,42 @@ for host in hosts:
     if recv_total[host]:
         halves.append(recv_ok[host] * 100.0 / recv_total[host])
     if halves:
-        emit("iperf_ok_pct", host, trim(min(halves)),
+        emit("ok_pct", host, trim(min(halves)),
              ["sent=%d/%d" % (sent_ok[host], sent_total[host]),
               "recv=%d/%d" % (recv_ok[host], recv_total[host])])
     if peers[host]:
-        emit("iperf_peers", host, "%d" % len(peers[host]))
+        emit("peers", host, "%d" % len(peers[host]))
+        planned = EXPECTED_PEERS.get(host)
+        if planned:
+            emit("coverage", host, trim(len(peers[host]) * 100.0 / planned),
+                 ["of=%d" % planned])
+    if sent_total[host] or recv_total[host]:
+        emit("tests", host, "%d" % (sent_total[host] + recv_total[host]))
+        emit("state", host, "TESTED")
     if byte_total[host]:
-        emit("iperf_gbytes", host, trim(byte_total[host] / 1e9),
+        emit("gbytes", host, trim(byte_total[host] / 1e9),
              ["flows=%d" % len(carried[host])])
     if carried[host]:
         load = concurrent_load(carried[host])
         if load is None:
             untimed += 1
         else:
-            emit("iperf_mbps_duplex", host, trim(load),
+            emit("mbps_duplex", host, trim(load),
                  ["flows=%d" % len(carried[host])])
 
 # Hosts the run was meant to cover that produced no row at all. Without this
 # they are simply absent from the results file, and an absent element on a
 # floor plan reads as "not part of this test" -- the one reading that is
-# certainly wrong. NO-DATA says the host was asked and never answered, and 0%
-# coverage puts it on the same overlay as every other broken host.
+# certainly wrong. iperf_state=NO-DATA says the host was asked and never
+# answered, and 0% success puts it on the same numeric overlay as every other
+# broken host.
 silent = []
 for host in expected:
     if host not in host_seen:
         silent.append(host)
         note_host(host)
-        emit("iperf_status", host, "NO-DATA")
-        emit("iperf_ok_pct", host, "0", ["sent=0/0", "recv=0/0"])
+        emit("state", host, "NO-DATA")
+        emit("ok_pct", host, "0", ["sent=0/0", "recv=0/0"])
 
 # ---- cpu_summary.csv: one row per host ------------------------------------
 cpu_hosts = 0
@@ -4110,7 +4266,7 @@ if cpu_csv and os.path.isfile(cpu_csv):
                 if value is None:
                     continue
                 extras = list(shared)
-                if test == "iperf_cpu_softirq":
+                if test == "cpu_softirq":
                     core = (row.get("peak_softirq_cpu") or "").strip()
                     if core:
                         extras.append("core=" + meta_value(core))
@@ -4153,9 +4309,9 @@ if want_reduce:
 
 # Every sample carries its run, so appending run after run into one results
 # file keeps them distinguishable in the viewer's inspector.
-if run_id and not any(c in WHITESPACE for c in run_id):
+if run_tag and not any(c in BAD_IN_FIELD for c in run_tag):
     for _test, _target, _value, extras in samples:
-        extras.append("run=" + run_id)
+        extras.append("run=" + run_tag)
 
 
 # ---- rendering -------------------------------------------------------------
@@ -4198,6 +4354,12 @@ def header_lines():
     if stamps:
         lines.append("# tests ran %s .. %s"
                      % (readable_stamp(min(stamps)), readable_stamp(max(stamps))))
+    if window > 0:
+        lines.append("# window: the last %ds of the run (%d earlier test(s) "
+                     "left out)" % (window, windowed))
+    if target_rate:
+        lines.append("# -b target %s (%g Mb/s per flow): iperf_achieved is "
+                     "measured against it" % (bandwidth, target_rate))
     if line_rate:
         lines.append("# line rate %g Mb/s: throughput overlays are scaled "
                      "absolutely and iperf_line_util is included"
@@ -4211,9 +4373,9 @@ def header_lines():
 def tsv_lines():
     lines = []
     if want_meta:
-        for test in declared():
-            tokens = [meta_token(k, v) for k, v in TESTS[test]]
-            lines.append("\t".join(["!test", test] + tokens))
+        for name, meta in declared_names():
+            tokens = [meta_token(k, v) for k, v in meta]
+            lines.append("\t".join(["!test", name] + tokens))
     for test, target, value, extras in samples:
         lines.append("\t".join([test, target, value] + extras))
     return lines
@@ -4222,8 +4384,8 @@ def tsv_lines():
 def ndjson_lines():
     lines = []
     if want_meta:
-        for test in declared():
-            record = [("!test", test)] + TESTS[test]
+        for name, meta in declared_names():
+            record = [("!test", name)] + meta
             lines.append(json.dumps(dict(record), sort_keys=True))
     for test, target, value, extras in samples:
         number_value = number(value)
@@ -4271,7 +4433,7 @@ if failed:
                      "iperf_ok_pct, never as 0 Mb/s\n" % failed)
 if silent:
     sys.stderr.write("export-overlay: %d host(s) in the server list produced "
-                     "no rows at all; exported as iperf_status=NO-DATA with 0%% "
+                     "no rows at all; exported as iperf_state=NO-DATA with 0%% "
                      "coverage so they are visible rather than absent: %s\n"
                      % (len(silent), " ".join(sorted(silent)[:8])))
 if untimed:
