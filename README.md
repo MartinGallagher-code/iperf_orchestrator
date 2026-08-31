@@ -432,12 +432,16 @@ http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
 | `iperf_mbps_duplex` | host | everything that host carried at once, both directions |
 | `iperf_gbytes` | host | total data carried; bytes add over time, so this is exact in every mode |
 | `iperf_line_util` | direction | throughput as a % of the NIC's line rate (with `--overlay-line-rate`) |
+| `iperf_achieved` | direction | throughput as a % of the `-b` rate the run asked for |
 | `iperf_rel_median` | direction | that direction against the run's own median, in % |
 | `iperf_asymmetry` | pair | the gap between a pair's two directions, in % of the faster one |
 | `iperf_status` | direction | `OK`, `FAIL` (with the status, error text and log to open), or `NO-DATA` |
 | `iperf_fail_kind` | direction | the failures only, coloured by why (`NO_SUMMARY`, `DIRECTION_MISSING`, …) |
 | `iperf_ok_pct` | host | how much of that host's mesh actually measured |
 | `iperf_peers` | host | how many distinct peers it exchanged data with |
+| `iperf_coverage` | host | those peers as a % of the ones it was *planned* to reach |
+| `iperf_tests` | host | how many directed tests it took part in |
+| `iperf_state` | host | the roll call: `TESTED`, or `NO-DATA` for a host that never answered |
 | `iperf_cpu_peak`, `_mean`, `_softirq`, `_sys`, `_user`, `_idle_floor` | host | from `cpu_summary.csv` |
 | `iperf_bind_iface` | direction | which NIC the traffic rode, when `--bind` was used |
 
@@ -528,6 +532,35 @@ Throughput overlays are then scaled `0..25000` (and duplex `0..50000`) instead
 of to whatever this run produced, and `iperf_line_util` gives each direction as
 a percentage of line rate. It is never guessed: without the flag the overlay is
 absent, because a run cannot tell you what the hardware was capable of.
+
+### Comparing two runs
+
+Every overlay is named with a prefix (`iperf_` by default). Give two exports
+different prefixes and they load into one file as separate overlays, so the
+viewer shows them side by side instead of averaging them together:
+
+```bash
+./iperf-orchestrator.sh --run-id monday export-overlay \
+    --overlay-out compare.tsv --overlay-test-prefix before_ --overlay-run before
+./iperf-orchestrator.sh export-overlay \
+    --overlay-out compare.tsv --overlay-append --overlay-test-prefix after_ --overlay-run after
+```
+
+`--overlay-run LABEL` sets the `run=` tag each sample carries, which is what
+tells them apart in the inspector when they *do* share an overlay.
+
+### Kinship with `mx export`
+
+[`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator)
+writes overlays into the same results file, and the two tools deliberately
+answer the same questions the same way: `iperf_achieved` is `mx_achieved`
+against a target rate, `iperf_coverage` is `mx_coverage`, `iperf_tests` is
+`mx_intervals`, `iperf_state` is `mx_state`, and both keep per-host and
+per-peer values in separate overlays so the two granularities never reduce
+into each other. Numbers are written the same way too — four significant
+digits, fixed notation, because `%g` turns a host's aggregate into
+`1.163e+06`, which is correct and unreadable in a file people grep. Load an
+`mx` export and an iperf export together and they read as one system.
 
 ### Matching hosts to the layout
 

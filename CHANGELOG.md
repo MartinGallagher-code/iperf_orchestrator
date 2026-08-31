@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-08-30
+
+### Added
+Ideas taken from [`matrix_orchestrator`](https://github.com/MartinGallagher-code/matrix_orchestrator)'s
+`mx export`, which writes overlays into the same results file. The two
+tools should answer the same questions the same way wherever their data
+allows it.
+
+- **`iperf_achieved`** — throughput against the `-b` rate the run asked
+  for, mirroring `mx_achieved` against its target pps. Falling short of
+  what you asked for is a finding whatever the NIC could have done.
+  Absent when no `--bandwidth` was set: there is no target to score
+  against.
+- **`iperf_coverage`** — peers measured as a percentage of the peers a
+  host was *planned* to reach, mirroring `mx_coverage`. A pair grid
+  narrows what "planned" means, so a partial mesh still reads 100% when
+  it is complete, and a rolling run cut short reads 40% where the raw
+  `iperf_peers` count just said 8.
+- **`iperf_tests`** — how many directed tests a host took part in,
+  mirroring `mx_intervals`: sample count is confidence, and rolling mode
+  spreads it unevenly.
+- **`iperf_state`** — the roll call (`TESTED` / `NO-DATA`), split out of
+  `iperf_status` so a per-host value and a per-direction one can never
+  reduce into each other, which is the separation `mx export` keeps
+  between its host and peer overlays.
+- **`--overlay-test-prefix`** — namespaces every overlay (default
+  `iperf_`), so two runs exported with different prefixes load side by
+  side as separate overlays instead of averaging into one. This is how
+  `mx --test-prefix` makes a before/after comparison possible.
+- **`--overlay-run LABEL`** — the `run=` tag, defaulting to the run id,
+  validated for whitespace and quotes because it is written onto every
+  sample line.
+- **`--overlay-window SECONDS`** — only the tests started in the last N
+  seconds, for a long rolling run whose first minutes are ramp-up.
+
+### Changed
+- **Numbers are written to four significant digits in fixed notation**,
+  the rule `mx export` settled on: `%g` renders a host's aggregate as
+  `1.163e+06`, which is correct and unreadable in a file people grep. 62
+  samples in a 64-host export were in scientific notation before this.
+- **A target may hold no quote either**, not just no whitespace: a
+  results line is quote-aware, and a quote would swallow the rest of it.
+
 ## [2.4.0] - 2026-08-30
 
 ### Added

@@ -227,8 +227,11 @@ test_export_overlay_scores_each_direction_against_the_run_median() {
     fast=$(printf '%s\n' "$samples" | awk -F'\t' '$1=="iperf_rel_median" && $4=="peer=hostB" {print $3}')
     slow=$(printf '%s\n' "$samples" | awk -F'\t' '$1=="iperf_rel_median" && $4=="peer=hostC" {print $3}')
     # 1000/880 and 800/880 of the run's median.
-    assert_eq "113.636" "$fast" "the fast direction reads above the median" || return 1
-    assert_eq "90.9091" "$slow" "the slow one reads below it" || return 1
+    # Four significant digits, fixed notation -- the same rule
+    # matrix_orchestrator's export uses, so numbers written into a shared
+    # results file by either tool read alike and neither turns into 1.2e+06.
+    assert_eq "113.6" "$fast" "the fast direction reads above the median" || return 1
+    assert_eq "90.91" "$slow" "the slow one reads below it" || return 1
 }
 
 test_export_overlay_measures_pair_asymmetry_both_ways() {
@@ -404,7 +407,11 @@ test_export_overlay_shows_hosts_that_never_reported() {
     local samples err
     samples="$(bash "$ORCH" export-overlay --overlay-out - 2>"$TEST_TMPDIR/err" | samples_of)"
     err="$(cat "$TEST_TMPDIR/err")"
-    assert_contains "$samples" "iperf_status	hostD	NO-DATA" "the silent host says so" || return 1
+    # The roll call is its own overlay, per host, so it never reduces
+    # together with the per-direction verdicts.
+    assert_contains "$samples" "iperf_state	hostD	NO-DATA" "the silent host says so" || return 1
+    assert_contains "$samples" "iperf_state	hostA	TESTED" "a host that ran says so too" || return 1
+    assert_not_contains "$samples" "iperf_status	hostD" "and stays out of the per-direction overlay" || return 1
     assert_contains "$samples" "iperf_ok_pct	hostD	0	sent=0/0	recv=0/0" \
         "and reads zero coverage, like every other broken host" || return 1
     assert_contains "$err" "produced no rows at all" "counted on stderr" || return 1
@@ -445,6 +452,90 @@ test_export_overlay_totals_the_data_carried() {
     assert_contains "$samples" "iperf_gbytes	hostA	3.35	flows=3" "total data carried" || return 1
 }
 
+# Ideas taken from matrix_orchestrator's `mx export`, which writes into the
+# same results file: the two tools should answer the same questions the same
+# way where their data allows it.
+
+test_export_overlay_measures_coverage_against_the_planned_peers() {
+    write_csvs
+    write_server_list hostA hostB hostC >/dev/null
+    local samples
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # A raw peer count says 2; the readable form is what fraction of the
+    # peers this host was meant to reach it actually did. Full mesh of three
+    # hosts, so each was meant to reach two.
+    assert_contains "$samples" "iperf_coverage	hostA	100	of=2" "a host that reached everyone" || return 1
+    assert_contains "$samples" "iperf_coverage	hostB	50	of=2" "and one that reached half" || return 1
+    assert_contains "$samples" "iperf_tests	hostA	4" "sample count is confidence" || return 1
+}
+
+test_export_overlay_measures_a_pair_grid_against_its_own_plan() {
+    write_csvs
+    # A partial mesh: hostC only ever exchanges with hostA. Coverage must be
+    # judged against that plan, or every grid run reads as incomplete.
+    local grid="$TEST_TMPDIR/grid.csv"
+    {
+        echo 'src\dst,hostA,hostB,hostC'
+        echo 'hostA,,x,x'
+        echo 'hostB,x,,'
+        echo 'hostC,x,,'
+    } > "$grid"
+    IPERF_SERVERS="$grid" bash "$ORCH" export-overlay --overlay-out - >"$TEST_TMPDIR/out" 2>/dev/null
+    local samples; samples="$(samples_of < "$TEST_TMPDIR/out")"
+    assert_contains "$samples" "iperf_coverage	hostC	100	of=1" "a grid host reaching its only peer is complete" || return 1
+    assert_contains "$samples" "iperf_coverage	hostA	100	of=2" "and a two-peer host with both" || return 1
+}
+
+test_export_overlay_scores_against_the_requested_rate() {
+    write_csvs
+    local samples
+    # iperf2 was told to aim at 2G per flow; 1000 Mb/s of that is half.
+    samples="$(IPERF_BANDWIDTH=2G bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    assert_contains "$samples" "iperf_achieved	hostA	50	peer=hostB" "half of what was asked for" || return 1
+    # Absent when nothing was asked for: there is no target to score against.
+    assert_not_contains "$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null)" \
+        "iperf_achieved" "no target, no overlay" || return 1
+}
+
+test_export_overlay_namespaces_two_runs_for_comparison() {
+    write_csvs
+    local before after
+    before="$(bash "$ORCH" export-overlay --overlay-out - --overlay-test-prefix before_ \
+        --overlay-run baseline 2>/dev/null)"
+    after="$(bash "$ORCH" export-overlay --overlay-out - --overlay-test-prefix after_ 2>/dev/null)"
+    # Two runs in one file as different overlays, so the viewer can show them
+    # side by side instead of averaging them into each other.
+    assert_contains "$before" "!test	before_mbps_out" "the first run's overlays are its own" || return 1
+    assert_contains "$after" "!test	after_mbps_out" "and so are the second's" || return 1
+    assert_contains "$before" "run=baseline" "--overlay-run labels the samples" || return 1
+    # A label that would break a results line is refused, not written.
+    run_orch export-overlay --overlay-run 'two words'
+    assert_status 1 "$RUN_RC" "a label with whitespace is refused" || return 1
+}
+
+test_export_overlay_window_keeps_only_recent_tests() {
+    write_rolling_csv
+    local all recent
+    all=$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of | grep -c '^iperf_mbps_out' || true)
+    # The three probes are 20s apart; a 25s window keeps the last two.
+    recent=$(bash "$ORCH" export-overlay --overlay-out - --overlay-window 25 2>/dev/null \
+        | samples_of | grep -c '^iperf_mbps_out' || true)
+    assert_eq "3" "$all" "the whole run by default" || return 1
+    assert_eq "2" "$recent" "--overlay-window keeps the last 25 seconds" || return 1
+    assert_contains "$(bash "$ORCH" export-overlay --overlay-out - --overlay-window 25 2>/dev/null)" \
+        "window: the last 25s" "and the header says so" || return 1
+}
+
+test_export_overlay_writes_numbers_a_person_can_grep() {
+    write_csvs
+    local samples exponents
+    samples="$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # %g would render a large aggregate as 1.163e+06: correct, and unreadable
+    # in a file people grep. matrix_orchestrator's export settled this rule.
+    exponents=$(printf '%s\n' "$samples" | awk -F'\t' '{print $3}' | grep -c 'e+' || true)
+    assert_eq "0" "$exponents" "no scientific notation in the values" || return 1
+}
+
 run_test test_export_overlay_writes_the_run_directory_file
 run_test test_export_overlay_writes_stdout_without_log_noise
 run_test test_export_overlay_never_invents_zero_for_a_failed_direction
@@ -459,6 +550,12 @@ run_test test_export_overlay_records_the_bound_interface
 run_test test_export_overlay_shows_hosts_that_never_reported
 run_test test_export_overlay_scales_absolutely_against_a_line_rate
 run_test test_export_overlay_totals_the_data_carried
+run_test test_export_overlay_measures_coverage_against_the_planned_peers
+run_test test_export_overlay_measures_a_pair_grid_against_its_own_plan
+run_test test_export_overlay_scores_against_the_requested_rate
+run_test test_export_overlay_namespaces_two_runs_for_comparison
+run_test test_export_overlay_window_keeps_only_recent_tests
+run_test test_export_overlay_writes_numbers_a_person_can_grep
 run_test test_export_overlay_keeps_the_cpu_detail_the_csv_carries
 run_test test_export_overlay_metadata_pins_percentages_to_a_real_scale
 run_test test_export_overlay_header_records_the_run_shape
