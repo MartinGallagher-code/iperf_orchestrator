@@ -4210,10 +4210,14 @@ for host in hosts:
               "recv=%d/%d" % (recv_ok[host], recv_total[host])])
     if peers[host]:
         emit("peers", host, "%d" % len(peers[host]))
-        planned = EXPECTED_PEERS.get(host)
-        if planned:
-            emit("coverage", host, trim(len(peers[host]) * 100.0 / planned),
-                 ["of=%d" % planned])
+    # Coverage is emitted whenever the host was planned to reach anyone, even
+    # when it reached nobody: a host that answered nothing reads 0% here
+    # rather than dropping off the overlay, for the same reason it gets a
+    # NO-DATA state instead of no sample at all.
+    planned = EXPECTED_PEERS.get(host)
+    if planned:
+        emit("coverage", host, trim(len(peers[host]) * 100.0 / planned),
+             ["of=%d" % planned])
     if sent_total[host] or recv_total[host]:
         emit("tests", host, "%d" % (sent_total[host] + recv_total[host]))
         emit("state", host, "TESTED")
@@ -4241,6 +4245,9 @@ for host in expected:
         note_host(host)
         emit("state", host, "NO-DATA")
         emit("ok_pct", host, "0", ["sent=0/0", "recv=0/0"])
+        planned = EXPECTED_PEERS.get(host)
+        if planned:
+            emit("coverage", host, "0", ["of=%d" % planned])
 
 # ---- cpu_summary.csv: one row per host ------------------------------------
 cpu_hosts = 0

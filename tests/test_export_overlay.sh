@@ -410,6 +410,9 @@ test_export_overlay_shows_hosts_that_never_reported() {
     # The roll call is its own overlay, per host, so it never reduces
     # together with the per-direction verdicts.
     assert_contains "$samples" "iperf_state	hostD	NO-DATA" "the silent host says so" || return 1
+    # It reached none of the peers it was planned to reach: 0%, not an
+    # absent sample, for the same reason the state is exported at all.
+    assert_contains "$samples" "iperf_coverage	hostD	0	of=3" "and covers none of its planned peers" || return 1
     assert_contains "$samples" "iperf_state	hostA	TESTED" "a host that ran says so too" || return 1
     assert_not_contains "$samples" "iperf_status	hostD" "and stays out of the per-direction overlay" || return 1
     assert_contains "$samples" "iperf_ok_pct	hostD	0	sent=0/0	recv=0/0" \
