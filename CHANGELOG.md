@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`--single-server HOST`** (env `IPERF_SINGLE_SERVER`) — sequential-host
+  mode only: instead of sweeping the fleet one host at a time, run a single
+  all→one round in which every other host tests against HOST simultaneously,
+  with a synchronized start. This measures the target's inbound under incast
+  — the whole fleet converging on one box — rather than each sender's
+  uncontended path. The flag validates HOST against the server list and
+  respects a pair grid's enabled sources.
+- **`--test-timeout SECONDS`** (env `IPERF_TEST_TIMEOUT`) — a hard per-test
+  time limit, on by default. iperf2's `-t` bounds the send window, but a
+  client that cannot connect or wedges on a dead peer sits past it and
+  stalls the round; each `iperf -c` is now wrapped in coreutils `timeout`
+  (where present on the remote host) capped at `--duration` + 30 seconds.
+  Override with `--test-timeout N`; `0` disables the cap. A killed test is
+  reported as a `FAIL` with `killed by test timeout` in its log. Applies to
+  the generated run scripts and to rolling mode's inline probes alike.
+
 ## [2.5.0] - 2026-08-30
 
 ### Added
