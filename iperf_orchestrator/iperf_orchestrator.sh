@@ -191,10 +191,18 @@ REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
 
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
+IPERF_TEST_TIMEOUT="${IPERF_TEST_TIMEOUT:-}" # hard cap per iperf -c, in seconds.
+                                # iperf2's -t bounds the send window, but a
+                                # client that can't connect or wedges on a dead
+                                # peer sits past it and stalls the whole round.
+                                # Empty = duration + 30; 0 = no cap.
 IPERF_TOTAL_TIME="${IPERF_TOTAL_TIME:-300}"  # 'rolling' mode wall-time
 IPERF_HOST_FLOWS="${IPERF_HOST_FLOWS:-1}"              # 'rolling' mode per-host concurrency
 IPERF_MODE="${IPERF_MODE:-}"    # default run-tests mode; usually set by the
                                 # plan file's 'mode=' key. Empty = parallel.
+IPERF_SINGLE_SERVER="${IPERF_SINGLE_SERVER:-}" # sequential-host only: skip the
+                                # host-at-a-time sweep and run one all->one
+                                # round with this host as the sole target.
 
 # iperf2 performance knobs forwarded to every iperf -c invocation.
 # Empty = use iperf2's default; otherwise passed through verbatim.
@@ -304,6 +312,10 @@ while [ $# -gt 0 ]; do
         --port=*)        IPERF_PORT="${1#*=}"; shift ;;
         --duration|-d)   _flag_need "$1" "${2:-}"; IPERF_DURATION="$2"; shift 2 ;;
         --duration=*)    IPERF_DURATION="${1#*=}"; shift ;;
+        --test-timeout)   _flag_need "$1" "${2:-}"; IPERF_TEST_TIMEOUT="$2"; shift 2 ;;
+        --test-timeout=*) IPERF_TEST_TIMEOUT="${1#*=}"; shift ;;
+        --single-server)   _flag_need "$1" "${2:-}"; IPERF_SINGLE_SERVER="$2"; shift 2 ;;
+        --single-server=*) IPERF_SINGLE_SERVER="${1#*=}"; shift ;;
         --streams|-P)    _flag_need "$1" "${2:-}"; IPERF_STREAMS="$2"; shift 2 ;;
         --streams=*)     IPERF_STREAMS="${1#*=}"; shift ;;
         --ssh-jobs|-j)   _flag_need "$1" "${2:-}"; IPERF_SSH_JOBS="$2"; shift 2 ;;
@@ -409,6 +421,8 @@ _validate_uint "IPERF_DURATION / --duration"   "$IPERF_DURATION" 1
 _validate_uint "IPERF_STREAMS / --streams"   "$IPERF_STREAMS" 1
 _validate_uint "START_DELAY / --start-delay"   "$START_DELAY"    0
 _validate_uint "IPERF_TOTAL_TIME / --total-time" "$IPERF_TOTAL_TIME" 1
+# Empty stays empty (auto: duration + 30); 0 explicitly disables the cap.
+[ -z "$IPERF_TEST_TIMEOUT" ] || _validate_uint "IPERF_TEST_TIMEOUT / --test-timeout" "$IPERF_TEST_TIMEOUT" 0
 _validate_uint "IPERF_HOST_FLOWS / --host-flows"           "$IPERF_HOST_FLOWS"      1
 _validate_uint "IPERF_VERBOSITY"               "$IPERF_VERBOSITY" 0
 [ "$IPERF_VERBOSITY" -le 2 ] || _flag_die "IPERF_VERBOSITY must be 0, 1, or 2 (got $IPERF_VERBOSITY)"
@@ -965,7 +979,9 @@ AND WHEN YOU WANT THEM:
 MODES:
     parallel (default)   every host pairs up at once -- fabric stress test
     sequential-pair      one connection on the wire at a time -- per-link max
-    sequential-host      one host's tests at a time
+    sequential-host      one host's tests at a time. --single-server HOST flips
+                         it to a single all->one round: every other host tests
+                         against just HOST, simultaneously (incast)
     rolling              random rolling probes for --total-time; any fleet size
 
 COMMON FLAGS (all become plan defaults once 'gen' has run):
@@ -1021,6 +1037,13 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --run-id ID                Address an existing run (default: follow 'latest' symlink)
     --port PORT                iperf2 listening port (default $IPERF_PORT)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
+    --test-timeout SECONDS     hard cap per iperf -c, enforced with coreutils
+                               'timeout' on the remote host so a wedged client
+                               can't stall the round (default: duration + 30;
+                               0 disables the cap)
+    --single-server HOST       sequential-host mode only: run one all->one
+                               round -- every other host tests against HOST at
+                               once -- instead of the host-at-a-time sweep
     --streams, -P N            parallel streams within each test (default $IPERF_STREAMS)
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
@@ -1132,7 +1155,9 @@ EXECUTION:
                            distribute-scripts for parallel/sequential modes. MODE:
                              parallel         all hosts run simultaneously after a
                                               synchronized start (default)
-                             sequential-host  hosts run one at a time
+                             sequential-host  hosts run one at a time. With
+                                              --single-server HOST: one all->one
+                                              round against just HOST instead
                              sequential-pair  one connection on the wire at any moment
                              rolling          each host independently picks its
                                               least-tested peer, repeats for
@@ -1197,6 +1222,8 @@ CONFIG (env vars; CLI flags above take precedence, plan values yield):
     IPERF_MODE=${IPERF_MODE:-}             # default run mode (plan 'mode=' key)
     IPERF_PORT=$IPERF_PORT
     IPERF_DURATION=$IPERF_DURATION
+    IPERF_TEST_TIMEOUT=${IPERF_TEST_TIMEOUT:-} # per-test hard cap, seconds (empty = duration+30; 0 = off)
+    IPERF_SINGLE_SERVER=${IPERF_SINGLE_SERVER:-} # sequential-host: all->one against this host
     IPERF_STREAMS=$IPERF_STREAMS
     IPERF_SSH_JOBS=$IPERF_SSH_JOBS
     IPERF_TOTAL_TIME=$IPERF_TOTAL_TIME
@@ -1549,6 +1576,7 @@ SOURCE="$src"
 RUN_ID="$RUN_ID"
 PORT=$IPERF_PORT
 DURATION=$IPERF_DURATION
+TEST_TIMEOUT=${IPERF_TEST_TIMEOUT:-$((IPERF_DURATION + 30))}
 PARALLEL=$IPERF_STREAMS
 BIND_RAW="$IPERF_BIND"
 TARGETS=( $targets_str )
@@ -1557,6 +1585,15 @@ TARGETS=( $targets_str )
 # this is a no-op when --bind is unset.
 TARGET_CONN_IPS=( $conn_ips_str )
 HOST_FLOWS=$IPERF_HOST_FLOWS
+
+# Hard per-test cap: iperf2's -t bounds the send window, but a client that
+# can't connect or wedges on a dead peer sits past it and stalls the whole
+# round's wait. Wrap each iperf -c in coreutils timeout where available;
+# TEST_TIMEOUT=0 disables the cap.
+TIMEOUT_CMD=""
+if [ "\$TEST_TIMEOUT" -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout \${TEST_TIMEOUT}s"
+fi
 
 cd "\$(dirname "\$0")"
 
@@ -1686,15 +1723,19 @@ if [ \${#run_targets[@]} -gt 0 ]; then
                 # Build the exact iperf invocation as a single string and
                 # echo it into the per-test log BEFORE running. Anyone
                 # debugging a failure can copy-paste this directly.
-                cmd="iperf -c \$conn_ip -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
+                cmd="\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
                 echo "# cmd: \$cmd" >> "\$out"
-                iperf -c "\$conn_ip" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
+                \$TIMEOUT_CMD iperf -c "\$conn_ip" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
                 rc=\$?
                 # iperf2 sometimes returns 0 even when the connection failed
                 # (it writes "connect failed" to stdout and exits cleanly).
                 # Catch both: non-zero exit OR known error tokens in output.
                 if [ "\$rc" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' "\$out"; then
                     err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' "\$out" | head -n1)
+                    # coreutils timeout exits 124 when it had to kill the client.
+                    if [ -z "\$err_tail" ] && [ "\$rc" -eq 124 ] && [ -n "\$TIMEOUT_CMD" ]; then
+                        err_tail="killed by test timeout after \${TEST_TIMEOUT}s"
+                    fi
                     [ -z "\$err_tail" ] && err_tail="exit_status=\$rc"
                     echo "# exit_status: \$rc" >> "\$out"
                     # Surface failure into the per-host SSH log (which is
@@ -1807,6 +1848,9 @@ cmd_run_tests() {
         parallel|sequential-host|sequential-pair|rolling) ;;
         *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair|rolling)" ;;
     esac
+    if [ -n "$IPERF_SINGLE_SERVER" ] && [ "$mode" != "sequential-host" ]; then
+        die "--single-server only applies to sequential-host mode (got $mode)"
+    fi
     # rolling is self-starting (doesn't use per-host run scripts).
     # Other modes generate + distribute the per-host scripts as part
     # of run-tests so users don't have to chain create-scripts and
@@ -1828,7 +1872,13 @@ cmd_run_tests() {
 
     case "$mode" in
         parallel)         _run_one_round "$(( $(date +%s) + START_DELAY ))" "" ;;
-        sequential-host)  while IFS= read -r h; do [ -n "$h" ] && _run_one_round 0 "" "$h"; done < <(read_servers) ;;
+        sequential-host)
+            if [ -n "$IPERF_SINGLE_SERVER" ]; then
+                _run_all_to_one "$IPERF_SINGLE_SERVER"
+            else
+                while IFS= read -r h; do [ -n "$h" ] && _run_one_round 0 "" "$h"; done < <(read_servers)
+            fi
+            ;;
         sequential-pair)
             # One directed iperf connection on the wire at any moment.
             # Iterates every (s, d) where s != d, so both directions of
@@ -1858,6 +1908,7 @@ cmd_run_tests() {
 # because each host has at most one outbound flow at any moment.
 _run_rolling() {
     log "Rolling: ${IPERF_TOTAL_TIME}s wall-time, ${IPERF_DURATION}s per test, up to ${IPERF_HOST_FLOWS} flow(s) per host"
+    local test_timeout="${IPERF_TEST_TIMEOUT:-$((IPERF_DURATION + 30))}"
     local hosts=()
     while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
     local pids=() src
@@ -1915,6 +1966,12 @@ _run_rolling() {
                 echo \"[bind] $src: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP\"
             fi
             PEERS=( $peers )
+            # Same hard per-test cap as the generated run scripts: a probe
+            # that wedges on a dead peer must not eat the rolling window.
+            TIMEOUT_CMD=\"\"
+            if [ $test_timeout -gt 0 ] && command -v timeout >/dev/null 2>&1; then
+                TIMEOUT_CMD=\"timeout ${test_timeout}s\"
+            fi
             # Peer name -> data-plane IP (or empty when --bind unset).
             # The rolling loop picks targets by name (for fair-share
             # counting) but connects via the resolved conn IP.
@@ -1962,10 +2019,10 @@ _run_rolling() {
                 # flows can be in flight at once.
                 (
                     sleep 0.\$((100 + RANDOM % 900))
-                    cmd=\"iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
+                    cmd=\"\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
                     echo \"# pair_a=$src pair_b=\$target conn_ip=\$conn_ip run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
                     echo \"# cmd: \$cmd\" >> \"\$outfile\"
-                    iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
+                    \$TIMEOUT_CMD iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
                     rc=\$?
                     if [ \"\$rc\" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' \"\$outfile\"; then
                         err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' \"\$outfile\" | head -n1)
@@ -1986,6 +2043,28 @@ _run_rolling() {
     local pid
     for pid in "${pids[@]}"; do wait "$pid" || true; done
     log "Rolling phase complete."
+}
+
+# All->one round for --single-server: every other host runs its script
+# against the one named target, with a synchronized start like parallel
+# mode so the flows genuinely overlap. This measures the target's inbound
+# under incast — the whole fleet converging on one box — rather than each
+# sender's uncontended path to it.
+_run_all_to_one() {
+    local target="$1"
+    read_servers | grep -qxF -- "$target" \
+        || die "--single-server: '$target' is not in the server list"
+    local sources=() h
+    while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        [ "$h" = "$target" ] && continue
+        pair_enabled "$h" "$target" || continue
+        sources+=("$h")
+    done < <(read_servers)
+    [ ${#sources[@]} -ge 1 ] \
+        || die "--single-server: no enabled source for '$target' (check the pair grid)"
+    log "Single-server round: ${#sources[@]} host(s) -> $target (all->one)"
+    _run_one_round "$(( $(date +%s) + START_DELAY ))" "$target" "${sources[@]}"
 }
 
 # Run one batch: each named source host invokes its remote run script with
