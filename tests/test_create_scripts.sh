@@ -258,7 +258,10 @@ test_generated_script_writes_cmd_line_to_log() {
     grep -q '^[[:space:]]*echo "# cmd: \$cmd"' "$s" || {
         echo "expected '# cmd:' line emission" >&2; cat "$s" >&2; return 1
     }
-    grep -qE 'cmd="iperf -c \$conn_ip' "$s" || {
+    # The assignment may carry the optional timeout wrapper prefix
+    # (${TIMEOUT_CMD:+...}) ahead of iperf; what matters is that the
+    # logged command is the real invocation against $conn_ip.
+    grep -qE '^[[:space:]]*cmd=".*iperf -c \$conn_ip' "$s" || {
         echo "expected cmd= assignment with iperf -c \$conn_ip" >&2
         grep '^[[:space:]]*cmd=' "$s" >&2
         return 1
@@ -386,5 +389,72 @@ SHIM
 run_test test_create_scripts_embeds_target_conn_ips_when_bind_set
 run_test test_create_scripts_target_conn_ips_empty_when_bind_unset
 run_test test_create_scripts_dies_when_peer_bind_pattern_unmatched
+
+# ---- per-test time limit -------------------------------------------------
+
+test_generated_script_caps_each_test_by_default() {
+    # iperf2's -t bounds the send window, but a client that cannot connect
+    # sits past it, so every invocation is wrapped in coreutils timeout.
+    # The default cap is duration + 30.
+    write_servers_only h0 h1
+    IPERF_DURATION=10 run_orch create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^TEST_TIMEOUT=40$' "$s" || {
+        echo "expected TEST_TIMEOUT=40 (duration 10 + 30)" >&2
+        grep '^TEST_TIMEOUT=' "$s" >&2; return 1
+    }
+    grep -q 'TIMEOUT_CMD="timeout \${TEST_TIMEOUT}s"' "$s" || {
+        echo "expected the timeout wrapper to be built" >&2
+        grep 'TIMEOUT_CMD' "$s" >&2; return 1
+    }
+    grep -qE '^[[:space:]]*\$TIMEOUT_CMD iperf -c "\$conn_ip"' "$s" || {
+        echo "expected iperf -c to run under \$TIMEOUT_CMD" >&2
+        grep 'iperf -c' "$s" >&2; return 1
+    }
+    # A cap that fired must be legible in the log, not just an exit code.
+    grep -q 'killed by test timeout' "$s" || {
+        echo "expected a timeout-specific failure message" >&2; return 1
+    }
+}
+
+test_generated_script_honors_explicit_test_timeout() {
+    write_servers_only h0 h1
+    run_orch --test-timeout 5 create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^TEST_TIMEOUT=5$' "$s" || {
+        echo "expected --test-timeout 5 to reach the script" >&2
+        grep '^TEST_TIMEOUT=' "$s" >&2; return 1
+    }
+}
+
+test_generated_script_test_timeout_zero_disables_the_cap() {
+    # 0 means "no cap": the wrapper stays empty, so iperf runs unwrapped.
+    write_servers_only h0 h1
+    run_orch --test-timeout 0 create-scripts >/dev/null 2>&1
+    local s
+    s=$(find "$(scripts_dir)" -name 'run_*.sh' | head -n1)
+    grep -q '^TEST_TIMEOUT=0$' "$s" || {
+        echo "expected TEST_TIMEOUT=0" >&2; grep '^TEST_TIMEOUT=' "$s" >&2; return 1
+    }
+    # The guard is evaluated on the remote host, so the script must still
+    # carry it -- what matters is that 0 takes the empty branch there.
+    grep -q 'if \[ "\$TEST_TIMEOUT" -gt 0 \]' "$s" || {
+        echo "expected the cap to be guarded on TEST_TIMEOUT > 0" >&2; return 1
+    }
+}
+
+test_test_timeout_rejects_garbage() {
+    write_servers_only h0 h1
+    run_orch --test-timeout abc create-scripts
+    assert_ne 0 "$RUN_RC" "non-numeric --test-timeout should die" || return 1
+    assert_contains "$RUN_OUT" "non-negative integer" || return 1
+}
+
+run_test test_generated_script_caps_each_test_by_default
+run_test test_generated_script_honors_explicit_test_timeout
+run_test test_generated_script_test_timeout_zero_disables_the_cap
+run_test test_test_timeout_rejects_garbage
 
 report_tests

@@ -197,7 +197,9 @@ test_run_tests_rolling_writes_cmd_and_traps_failures() {
     write_server_list a b >/dev/null
     run_with_fake_path --total-time 1 --duration 1 run-tests rolling
     assert_status 0 "$RUN_RC" || return 1
-    grep -qE 'cmd="iperf -c \$conn_ip' "$FAKE_SSH_LOG" || {
+    # As in the generated run scripts, the assignment may carry the
+    # optional timeout wrapper prefix ahead of iperf.
+    grep -qE 'cmd=".*iperf -c \$conn_ip' "$FAKE_SSH_LOG" || {
         echo "rolling probe should build cmd= string for the log" >&2
         cat "$FAKE_SSH_LOG" >&2; return 1
     }
@@ -252,6 +254,68 @@ test_run_tests_rolling_embeds_peer_conn_ips_when_bind_set() {
     }
 }
 run_test test_run_tests_rolling_embeds_peer_conn_ips_when_bind_set
+
+# ---- --single-server: the all->one incast round --------------------------
+
+test_single_server_runs_every_other_host_against_one_target() {
+    prep_workflow a b c d
+    run_with_fake_path --start-delay=0 --single-server c run-tests sequential-host
+    assert_status 0 "$RUN_RC" "single-server round should succeed" || return 1
+    local n
+    n=$(run_iperf_dispatch_count)
+    # 4 hosts, one of them the target: the other 3 send to it, in one round.
+    assert_eq "3" "$n" "every host but the target should dispatch" || return 1
+    # The target itself must not run a client against itself. Match only
+    # dispatch lines (script + start_time): run-tests re-runs create- and
+    # distribute-scripts, so every host's script is named in the log by
+    # the scp/chmod setup regardless of who ends up sending.
+    if grep -qE "run_iperf_c_[^[:space:]]+\.sh'[[:space:]]+[0-9]+" "$FAKE_SSH_LOG"; then
+        echo "the target should not run its own client script" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    fi
+    # Every dispatch carries the single target as SINGLE_TARGET.
+    local targeted
+    targeted=$(grep -cE "run_iperf_[^[:space:]]+\.sh' [0-9]+ 'c'" "$FAKE_SSH_LOG")
+    assert_eq "3" "$targeted" "each sender should be given 'c' as its target" || return 1
+    [ "$(cat "$RESULTS_BASE/$IPERF_RUN_ID/.run_mode")" = "sequential-host" ] || return 1
+}
+
+test_single_server_uses_a_synchronized_start() {
+    # The whole point is incast: the flows have to overlap, so the round
+    # shares one future start_time the way parallel mode does, rather
+    # than the 0 that sequential-host uses.
+    prep_workflow a b c
+    run_with_fake_path --start-delay=5 --single-server a run-tests sequential-host
+    assert_status 0 "$RUN_RC" || return 1
+    local times
+    times=$(grep -oE "run_iperf_[^[:space:]]+\.sh' [0-9]+" "$FAKE_SSH_LOG" | awk '{print $2}' | sort -u)
+    local count
+    count=$(printf '%s\n' "$times" | wc -l)
+    assert_eq "1" "$count" "all senders should share one start_time" || return 1
+    [ "$times" -gt 0 ] || {
+        echo "expected a future start_time, got $times" >&2; return 1
+    }
+}
+
+test_single_server_rejects_a_host_not_in_the_list() {
+    prep_workflow a b c
+    run_with_fake_path --single-server nosuchhost run-tests sequential-host
+    assert_ne 0 "$RUN_RC" "unknown target should die" || return 1
+    assert_contains "$RUN_OUT" "not in the server list" || return 1
+}
+
+test_single_server_rejects_other_modes() {
+    prep_workflow a b c
+    run_with_fake_path --single-server a run-tests parallel
+    assert_ne 0 "$RUN_RC" "--single-server outside sequential-host should die" || return 1
+    assert_contains "$RUN_OUT" "only applies to sequential-host" || return 1
+}
+run_test test_single_server_runs_every_other_host_against_one_target
+run_test test_single_server_uses_a_synchronized_start
+run_test test_single_server_rejects_a_host_not_in_the_list
+run_test test_single_server_rejects_other_modes
+
 run_test test_run_tests_parallel_default_mode
 run_test test_run_tests_parallel_uses_synchronized_start
 run_test test_run_tests_sequential_host_mode
