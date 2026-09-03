@@ -246,6 +246,8 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address |
 | `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
+| `IPERF_TEST_TIMEOUT` | `--test-timeout` | `duration + 30` | hard cap per iperf -c, enforced with coreutils `timeout` on the remote host; `0` disables |
+| `IPERF_SINGLE_SERVER` | `--single-server` | *(unset)* | sequential-host mode only: one all→one round against this host instead of the host-at-a-time sweep |
 | `IPERF_STREAMS` | `--streams`, `-P` | `1` | parallel TCP streams within each test (iperf2 `-P`) |
 | `IPERF_SSH_JOBS` | `--ssh-jobs`, `-j` | 4×cores, capped at 32 | max concurrent SSH/SCP fan-out (capped concurrency) |
 | `IPERF_TOTAL_TIME` | `--total-time` | `300` | rolling mode wall-time (seconds) |
@@ -302,8 +304,17 @@ Every connection uses `BatchMode=yes`, so any host still requiring a password wi
 |---|---|---|---|
 | `parallel` (default) | all hosts launch all of their clients at once after a synchronized start | ~1 × DURATION (~50s) | fabric stress testing: load everything at once and see what breaks |
 | `sequential-host` | one host at a time runs all of its clients in parallel | ~N × DURATION (~17 min) | clean numbers per host without inter-host interference |
+| `sequential-host --single-server HOST` | every *other* host targets just HOST, simultaneously (all→one) | ~1 × DURATION | incast: what one server's inbound looks like with the whole fleet converging on it |
 | `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
 | `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--host-flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--host-flows`, independent of fleet size |
+
+Every iperf client is additionally wrapped in a hard per-test time limit
+(coreutils `timeout` on the remote host, when present): iperf2's `-t` bounds
+the send window, but a client that cannot connect or wedges on a dead peer
+would otherwise stall the whole round. The default cap is `--duration` + 30
+seconds; `--test-timeout SECONDS` overrides it, and `--test-timeout 0`
+disables the cap. A test killed by the cap is reported as a `FAIL` with
+`killed by test timeout` in its log.
 
 <!-- docs:end -->
 ---
