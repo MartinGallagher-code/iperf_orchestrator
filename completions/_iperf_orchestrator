@@ -49,6 +49,8 @@ _iperf_orchestrator() {
         '--port[iperf2 listening port]:port:'
         '--duration[seconds per pair]:seconds:'
         '-d[seconds per pair]:seconds:'
+        '--test-timeout[hard cap per iperf -c (default duration+30; 0 = off)]:seconds:'
+        '--single-server[sequential-host: one all->one round against HOST]:host:'
         '--streams[parallel TCP streams per test]:N:'
         '-P[parallel TCP streams per test]:N:'
         '--ssh-jobs[max concurrent SSH/SCP fan-out]:N:'
