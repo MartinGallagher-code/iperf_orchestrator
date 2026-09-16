@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 """iperf-orchestrator: full-mesh iperf2 throughput testing across a fleet.
 
 The tool itself is a self-contained bash script (``iperf_orchestrator.sh``,

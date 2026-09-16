@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the mx-style live status ticker (one progress line per host,
 # derived from the remote status files) and for the what-next hints that
 # results-summary appends to its statistics.

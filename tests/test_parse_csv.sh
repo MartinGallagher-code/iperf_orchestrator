@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the embedded Python parser invoked by `parse-csv`. We
 # create iperf_test_*.log fixtures in $RESULTS_DIR and invoke the
 # subcommand, then assert on the output CSV's structure and values.

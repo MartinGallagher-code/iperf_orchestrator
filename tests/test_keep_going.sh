@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the --keep-going flag in cmd_all. Without --keep-going,
 # cmd_all aborts on the first step with worker failures; with it, it
 # logs a warning and continues. (--resume was removed in the stateless

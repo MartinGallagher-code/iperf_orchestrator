@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Miscellaneous edge-case tests that don't naturally belong to one of
 # the focused test files: CSV parser corner cases, CPU parser corner
 # cases, integration probes, robustness against weird input.

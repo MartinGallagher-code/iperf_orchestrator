@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 """Sphinx configuration for the iperf-orchestrator documentation.
 
 The documentation is a thin shell around the files that already live at

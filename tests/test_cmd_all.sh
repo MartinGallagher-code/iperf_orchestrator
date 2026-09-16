@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # End-to-end tests for cmd_all -- the convenience entry point that
 # runs the full pipeline (check-iperf, check-servers,
 # start-servers, create-scripts, distribute-scripts, run-tests,

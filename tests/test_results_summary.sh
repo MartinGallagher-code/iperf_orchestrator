@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the `results-summary` subcommand: percentile/min/max/mean
 # stats and "slowest 5" listing read from results/iperf_results.csv.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for cmd_collect_results. The worker builds a tarball on the
 # remote, scp-pulls it, and extracts into RESULTS_DIR. We use a smart
 # ssh/scp shim that runs commands inside per-host pseudo-remote dirs.

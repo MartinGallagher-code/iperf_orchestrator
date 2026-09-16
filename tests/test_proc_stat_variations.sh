@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Variations on the /proc/stat fallback parser. The parser walks
 # samples and computes per-sample deltas. We exercise:
 #   - missing fallback marker -> rejected (returns None)
