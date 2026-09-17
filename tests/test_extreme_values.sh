@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Extreme / boundary input tests:
 #   - 100 Gbps throughput
 #   - very small (sub-Mbps) throughput

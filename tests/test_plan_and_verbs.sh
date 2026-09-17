@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the mx-style surface: the `gen` plan file (write, load,
 # precedence), and the plan-driven verbs (start, summarize, stop, clean,
 # run, hints).

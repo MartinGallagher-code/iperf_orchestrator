@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 #
 # Documentation toolchain only. These are never installed alongside the
 # orchestrator itself: the docs build runs on a modern Python (see

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for partial-mesh support: the src\dst pair grid written by
 # `gen --grid`, its parsing (read_servers + _load_pair_grid), and the
 # modes that honor it. Also covers `status --watch`.

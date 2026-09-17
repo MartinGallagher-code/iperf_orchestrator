@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
 """Console-script entry point for iperf-orchestrator.
 
 Locates the bundled ``iperf_orchestrator.sh`` and hands off to it via

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 #
 # The documentation site has no prose of its own: every page pulls its
 # body out of README.md (or CHANGELOG.md / PUBLISHING.md) with a MyST

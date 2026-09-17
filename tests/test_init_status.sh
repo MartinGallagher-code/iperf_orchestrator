@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for the `status` subcommand and server-list validation. The
 # `init` subcommand was removed: server lists are now passed via
 # --servers / IPERF_SERVERS, and status probes hosts live instead of

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026 Martin J. Gallagher
+# SPDX-FileCopyrightText: 2026 Martin J. Gallagher
+
 # Tests for cmd_distribute_scripts. The worker:
 #   1. mkdirs $REMOTE_DIR remotely
 #   2. removes stale files matching the active <run-id>
