@@ -313,9 +313,31 @@ EOF
     assert_eq "" "$rev" "single-direction log must not emit a reverse-direction row" || return 1
 }
 
+test_parse_csv_rolling_log_without_full_duplex_key_emits_one_row() {
+    # Rolling probes wrote their header without full_duplex=0 until 2.6.0,
+    # and a header missing the key was parsed as a legacy --full-duplex log:
+    # every probe gained a phantom DIRECTION_MISSING row for the reverse
+    # direction. conn_ip= only ever appears in one-way headers (it arrived
+    # after --full-duplex was dropped), so such a log must parse as one row
+    # -- which also repairs rolling runs collected before the fix.
+    local rd; rd=$(prep_results_dir)
+    cat > "$rd/iperf_test_host-a_to_host-b_1_${IPERF_RUN_ID}.log" <<EOF
+# pair_a=host-a pair_b=host-b conn_ip=host-b run_id=${IPERF_RUN_ID} duration=10 port=5001 parallel=1 bind_iface= bind_ip= test_start=1700000000
+20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
+EOF
+    run_orch parse-csv
+    assert_status 0 "$RUN_RC" "parse-csv should succeed" || return 1
+    local csv="$rd/iperf_results.csv"
+    assert_eq "1" "$(csv_row_count "$csv")" "rolling probe log -> one CSV row" || return 1
+    assert_eq "OK" "$(csv_cell "$csv" host-a host-b status)" "a->b status should be OK" || return 1
+    assert_eq "" "$(csv_cell "$csv" host-b host-a status)" \
+        "rolling probe log must not emit a reverse-direction row" || return 1
+}
+
 run_test test_parse_csv_includes_bind_columns
 run_test test_parse_csv_populates_bind_columns_from_header
 run_test test_parse_csv_bind_columns_empty_when_absent
 run_test test_parse_csv_single_direction_log_emits_one_row
+run_test test_parse_csv_rolling_log_without_full_duplex_key_emits_one_row
 
 report_tests

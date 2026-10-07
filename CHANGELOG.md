@@ -4,7 +4,32 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.6.0] - 2026-10-07
+
+### Added
+
+- **`--single-server HOST`** (env `IPERF_SINGLE_SERVER`) — sequential-host
+  mode only: instead of sweeping the fleet one host at a time, run a single
+  all→one round in which every other host tests against HOST simultaneously,
+  with a synchronized start. This measures the target's inbound under incast
+  — the whole fleet converging on one box — rather than each sender's
+  uncontended path. The flag validates HOST against the server list and
+  respects a pair grid's enabled sources.
+- **`--test-timeout SECONDS`** (env `IPERF_TEST_TIMEOUT`) — a hard per-test
+  time limit, on by default. iperf2's `-t` bounds the send window, but a
+  client that cannot connect or wedges on a dead peer sits past it and
+  stalls the round; each `iperf -c` is now wrapped in coreutils `timeout`
+  (where present on the remote host) capped at `--duration` + 30 seconds.
+  Override with `--test-timeout N`; `0` disables the cap. A killed test is
+  reported as a `FAIL` with `killed by test timeout` in its log. Applies to
+  the generated run scripts and to rolling mode's inline probes alike.
+- **Tests that hold the README and the shell completions to the parser.**
+  Every long flag the parser accepts must appear in `README.md` and in both
+  completion files, every plan key the loader reads must appear in the
+  README, and every column the two CSV writers declare must appear in the
+  output schema. Each of those had drifted (see Fixed); the help text, which
+  was already tested this way, had not. A further test requires
+  `__init__.py`'s `__version__` to match `pyproject.toml`.
 
 ### Changed
 
@@ -26,22 +51,69 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **REUSE:** a `REUSE.toml` of the same shape in every repo; `reuse lint`
     passes in all of them.
 
-### Added
-- **`--single-server HOST`** (env `IPERF_SINGLE_SERVER`) — sequential-host
-  mode only: instead of sweeping the fleet one host at a time, run a single
-  all→one round in which every other host tests against HOST simultaneously,
-  with a synchronized start. This measures the target's inbound under incast
-  — the whole fleet converging on one box — rather than each sender's
-  uncontended path. The flag validates HOST against the server list and
-  respects a pair grid's enabled sources.
-- **`--test-timeout SECONDS`** (env `IPERF_TEST_TIMEOUT`) — a hard per-test
-  time limit, on by default. iperf2's `-t` bounds the send window, but a
-  client that cannot connect or wedges on a dead peer sits past it and
-  stalls the round; each `iperf -c` is now wrapped in coreutils `timeout`
-  (where present on the remote host) capped at `--duration` + 30 seconds.
-  Override with `--test-timeout N`; `0` disables the cap. A killed test is
-  reported as a `FAIL` with `killed by test timeout` in its log. Applies to
-  the generated run scripts and to rolling mode's inline probes alike.
+### Fixed
+
+- **Rolling mode no longer invents a failure for every probe.** Rolling
+  probes wrote their log header without `full_duplex=0`, and `parse-csv`
+  reads a header without it as a legacy `--full-duplex` log with two
+  directions. So every probe produced its real row plus a phantom
+  `DIRECTION_MISSING` row for the reverse direction, which roughly halved
+  `iperf_ok_pct`, padded the failure counts and painted `FAIL` on the
+  overlays. The probes now write `full_duplex=0`. The parser also treats any
+  header carrying `conn_ip=` as one-way, since that key only ever appeared
+  after `--full-duplex` was dropped, so rolling runs collected before this
+  fix come out right when re-analysed with `parse-csv` or `summarize`.
+- **A host that reached no peers reads 0 on `iperf_coverage`** instead of
+  having no coverage sample at all. That host — already `iperf_state=NO-DATA`
+  with 0% success — sat blank on the coverage overlay next to hosts reading
+  100%, which reads as "not part of this test" rather than "reached none of
+  the peers it was planned to reach". The sample's `of=` names how many were
+  planned.
+- **Shell completions.** The bash completion was missing `--test-timeout`,
+  `--single-server`, `--overlay-test-prefix`, `--overlay-run`,
+  `--overlay-window` and `--overlay-line-rate`; the zsh one was missing the
+  four overlay flags. In zsh, nothing after the subcommand ever completed —
+  not `status --watch`, `cleanup --yes` or the `run-tests` modes — because the
+  catch-all argument spec was `'*:::'` where `'*::'` was needed. All of it
+  completes now, and `export-overlay` offers its `--overlay-*` flags in both
+  shells.
+- **The documentation describes the tool as it is.** Much of the README —
+  and so the Read the Docs site, which is built from it — still described a
+  design replaced in May 2026:
+  - **`--bind` / `--server-bind` are documented properly** — how the pattern
+    is matched, the up-front probe of every peer's data-plane address, the
+    daemons following the client binding, what stays on the login address,
+    and where the bound NIC shows up in the results. They had a single table
+    row each.
+  - **How the tests run.** The README still described one `--full-duplex`
+    test per pair with a parity rule choosing the client. Every host has run
+    one one-way `iperf -c` per directed edge since `--full-duplex` was
+    dropped; the run modes, *How it works*, heatmap reading and design notes
+    now say so, and `sequential-pair` at N=100 is ~28 hours (`N(N-1)`
+    directed tests), not ~14.
+  - **`cleanup` is not scoped to a run.** The docs said it removed only the
+    active run's files and that a shared `--remote-dir` was safe. `cleanup`,
+    `clean`, `all` and `run` all `rm -rf` the whole remote directory, which
+    on a shared filesystem includes other runs' files. The README and
+    `--help-advanced` now say so.
+  - **`--server-bind=''`** was documented as keeping the daemons on 0.0.0.0
+    while `--bind` is set. An empty value is ignored and the daemons still
+    bind to the `--bind` NIC, so the README and `--help-advanced` no longer
+    promise it.
+  - **Reference gaps filled:** the `bind_iface`, `bind_ip` and `test_start`
+    columns of `iperf_results.csv` and `filename` of `cpu_summary.csv`; a
+    table of every `--overlay-*` flag with its `IPERF_OVERLAY_*` variable,
+    and `--overlay-window`, which was undocumented; `SSH_OPTS`; `status
+    --watch`, `start --keep-going` and `run --keep-going`; the `ssh_jobs=`,
+    `start_delay=` and `output=` plan keys; and which flags are per-run
+    rather than plan settings. `--help-advanced` lists every environment
+    variable.
+  - **Things that do not exist were removed:** `all --resume` and its state
+    file, the `iperf_installed.txt`, `iperf_running.txt` and
+    `iperf_server_<host>.log` files, sequential-pair's `run_<src>_to_<dst>.log`
+    logs, and the claim that `@` is sanitized out of filenames.
+  - **`PUBLISHING.md`** lists all three places the version is written, not
+    just `pyproject.toml`.
 
 ## [2.5.0] - 2026-08-30
 

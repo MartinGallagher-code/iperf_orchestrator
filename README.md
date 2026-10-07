@@ -115,14 +115,16 @@ Results in `./results/<run-id>/`:
 - tar, gzip
 
 ### On every server in the mesh
-- **iperf2** (binary name `iperf`, *not* `iperf3`) — version 2.0.13+ recommended for `--full-duplex`
+- **iperf2** (binary name `iperf`, *not* `iperf3`)
 - **sysstat** providing `mpstat` (recommended) — falls back to `/proc/stat` sampling if missing
+- **coreutils `timeout`** (recommended) — enforces the per-test time limit; without it a wedged client can stall its round
+- **iproute2 `ip`** — only with `--bind` / `--server-bind`, which resolve their pattern against `ip -o -4 addr show`
 - ssh access from the orchestrator
 
 The script's `check-iperf` subcommand verifies both iperf2 and mpstat before you start.
 
 ### Why iperf2 and not iperf3
-iperf3's server is single-threaded and accepts only one client at a time. A full mesh of N hosts would need N iperf3 servers per host on different ports just to function, plus a port-assignment scheme, plus N times the firewall holes. iperf2's multi-threaded server handles concurrent clients on a single port — one daemon per host on port 5001 and you're done. iperf2's `--full-duplex` also gives you a true single-socket bidirectional test, which is what fabric stress testing actually wants.
+iperf3's server is single-threaded and accepts only one client at a time. A full mesh of N hosts would need N iperf3 servers per host on different ports just to function, plus a port-assignment scheme, plus N times the firewall holes. iperf2's multi-threaded server handles concurrent clients on a single port — one daemon per host on port 5001 and you're done.
 
 <!-- docs:end -->
 ---
@@ -135,13 +137,17 @@ connects non-interactively with `BatchMode=yes`).
 
 ```
 PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
-  gen [MODE]             Write iperf_plan.conf: host list + settings in one file
-  start [MODE]           start-servers + run-tests in one verb
-  status                 Probes, daemons, and a live progress line per host
+  gen [MODE] [--grid]    Write iperf_plan.conf: host list + settings in one file;
+                         --grid writes the hosts as a src\dst pair grid
+  start [MODE] [--keep-going]
+                         start-servers + run-tests in one verb
+  status [--watch N]     Probes, daemons, and a live progress line per host;
+                         --watch redraws every N seconds until ctrl-c
   summarize              process + pivot + results-summary (with what-next hints)
   stop                   stop-servers, plus the next steps spelled out
   clean                  stop + remove $REMOTE_DIR everywhere, then verify
-  run [MODE] [--for N]   all + results-summary; --for pins total-time (rolling)
+  run [MODE] [--for N] [--keep-going]
+                         all + results-summary; --for pins total-time (rolling)
                          or per-test duration (other modes)
   hints                  What you want to know -> the command that gets you there
 
@@ -150,7 +156,7 @@ SETUP:
   check-servers          Check which hosts have iperf -s currently running
 
 EXECUTION:
-  start-servers          Start iperf2 -s on every host (port 5001)
+  start-servers          Start iperf2 -s on every host (--port, default 5001)
   run-tests [MODE]       Run the tests. Auto-runs create-scripts and
                          distribute-scripts for non-rolling modes. MODE is
                          parallel | sequential-host | sequential-pair | rolling.
@@ -178,8 +184,10 @@ CONVENIENCE:
                              (start + run-tests + process + stop)
   status                     Probe hosts live + list available runs
   doctor                     Check local prerequisites
-  help                       Common commands and flags
+  help                       Common commands and flags (also -h, --help)
   help-advanced              Every command, every flag, every env var
+                             (also --help-advanced)
+  version                    Print the version and licence (also --version)
 ```
 
 The orchestrator is **stateless**: nothing persists between invocations except the contents of the results directory. `status` derives state by probing hosts directly. Server lists are passed via `--servers`/`IPERF_SERVERS`/`./servers.txt` — or carried by the plan file. Each pipeline run creates a fresh `<results>/<run-id>/` directory; `<results>/latest` is updated to point at the most recent one.
@@ -207,6 +215,12 @@ in the `key=value` tokens. Edit either by hand and just re-run. Precedence
 is `CLI flag > env var > plan file > built-in default`, so a one-off
 `--duration 60` still wins without touching the plan, and re-running `gen`
 preserves any setting you don't override.
+
+Three more keys are read if you add them by hand, though `gen` does not write
+them: `ssh_jobs=`, `start_delay=` and `output=` (the results directory). Values
+cannot contain whitespace. `--test-timeout`, `--single-server`, `--python`,
+`--run-id` and the `--overlay-*` flags are per-run choices, not plan
+settings: pass them (or their environment variables) each time.
 
 **Partial mesh.** `gen --grid` writes the hosts as an mx-style pair grid
 instead of a plain list — rows send, columns receive, and a non-empty cell
@@ -257,14 +271,74 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_WINDOW` | `--window`, `-w` | *(unset)* | TCP window / socket buffer (iperf2 `-w`) |
 | `IPERF_MSS` | `--mss`, `-M` | *(unset)* | TCP maximum segment size (iperf2 `-M`) |
 | `IPERF_NO_NAGLE` | `--no-nagle`, `-N` | `0` | disable Nagle's algorithm (iperf2 `-N`) |
-| `IPERF_BIND` | `--bind`, `-B` | *(unset)* | bind clients to the matching NIC; substring-matched against `ip -o -4 addr show` |
-| `IPERF_SERVER_BIND` | `--server-bind` | mirrors `--bind` | bind the daemon side too; `--server-bind=''` keeps 0.0.0.0 |
+| `IPERF_BIND` | `--bind`, `-B` | *(unset)* | run the tests over the NIC matching this pattern instead of the login address (see the `--bind` section below) |
+| `IPERF_SERVER_BIND` | `--server-bind` | the `--bind` pattern | bind each `iperf -s` daemon to its matching NIC too |
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; safe to point at a shared FS (every remote-side file embeds `<host>_<run-id>`) |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory (see **Shared-FS safety**) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
+| `SSH_OPTS` | *(env only)* | `-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30` | options passed to every `ssh`/`scp` (`BatchMode=yes` is always added) |
+
+The `--overlay-*` flags and their `IPERF_OVERLAY_*` variables are listed with
+the overlays they control, under **Datacenter layout overlays**.
+
+#### `--bind` and `--server-bind`: testing a separate data-plane NIC
+
+Many fleets are reached over one interface — the management address in
+`servers.txt` — and carry their real traffic on another. Without `--bind`,
+every test dials the address in the server list, the kernel routes it over the
+management interface, and the run measures the wrong NIC. `--bind PATTERN` puts
+the traffic on the NIC you name:
+
+```bash
+./iperf-orchestrator.sh --bind mlx5 run        # by interface name
+./iperf-orchestrator.sh --bind 10.20.0 run     # by address
+./iperf-orchestrator.sh gen --bind mlx5        # or make it a plan setting
+```
+
+**Matching.** On each host, PATTERN is matched with `grep` against the lines
+of `ip -o -4 addr show`, so it can name the interface or part of its address,
+and the **first** matching line's IPv4 address is the one used. It is a basic
+regular expression rather than a literal (a `.` matches any character), and a
+pattern that matches more than one line silently takes the first — `eth1` also
+matches `eth10`. Check a pattern on a host with
+`ip -o -4 addr show | grep -- 'PATTERN'` before a large run.
+
+**What it changes.**
+
+- **Before any test starts**, the orchestrator SSHes to every host (over its
+  login address, `--ssh-jobs` at a time) and resolves the pattern to that
+  host's data-plane address. If any host has no matching interface, the run
+  stops there and names those hosts, before a mesh of broken tests is launched.
+- **Each client binds and dials the data plane.** Every `iperf -c` binds its
+  source to its own host's matching address (`-B <ip>`) and connects to the
+  *peer's* data-plane address rather than the peer's login address. Results
+  are still labelled with the names from the server list; the address actually
+  dialled is recorded as `conn_ip=` in each test log's header.
+- **The daemons follow.** `--server-bind` defaults to the same pattern, so
+  `start-servers` starts each `iperf -s` with `-B` set to that host's matching
+  address, and it accepts connections only on that NIC. A connection routed the
+  wrong way then fails loudly rather than quietly measuring the management
+  network. A host with no matching interface fails `start-servers`. Give
+  `--server-bind` its own pattern when the daemons should listen on a different
+  NIC from the one the clients send from.
+- **Everything else stays on the login address.** SSH, `scp`, `status`,
+  `collect-results` and `cleanup` are unaffected; only iperf traffic moves.
+
+Every mode honours it, `rolling` included. Both are plan settings (`bind=` and
+`server_bind=`), so a plan written with `gen --bind PATTERN` applies it to
+every later command. A pattern can go into the plan only if it contains no
+whitespace.
+
+**Where it shows up.** Each host's session log (`logs/run_<host>.log`, or
+`logs/rolling_<host>.log` in rolling mode) carries a
+`[bind] <host>: 'PATTERN' -> iface=… ip=…` line, and `-v` logs every peer's
+resolved address. `iperf_results.csv` records the sending host's NIC in its
+`bind_iface` and `bind_ip` columns, `iperf_pivot.txt` ends with a "Source
+bindings" list, and `export-overlay` adds the `iperf_bind_iface` overlay, so a
+floor plan shows which NIC each rack's traffic actually rode.
 
 #### `--ssh-jobs` and capped-concurrency parallel SSH
 
@@ -284,9 +358,9 @@ for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
 Every connection uses `BatchMode=yes`, so any host still requiring a password will simply fail rather than prompt.
 
-#### `--keep-going` for `all`
+#### `--keep-going` for `all`, `run` and `start`
 
-`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). Without it, the first step that records per-host failures aborts the pipeline.
+`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). Without it, the first step that records per-host failures aborts the pipeline. `run` passes the flag through to `all`, and `start --keep-going` runs the tests even when some hosts failed to start their daemon.
 
 #### `--dry-run`, `--verbose`, `--quiet`
 
@@ -298,14 +372,14 @@ Every connection uses `BatchMode=yes`, so any host still requiring a password wi
 <!-- docs:run-modes -->
 ## Run modes
 
-`run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. The first three modes use canonical-pair generation — each unordered pair `{A, B}` is tested exactly once, with `--full-duplex` measuring both directions concurrently on a single TCP socket. `rolling` is structured differently (see below).
+`run-tests` (and therefore `all`) takes a mode argument that controls how the tests are scheduled. In the first three modes every host runs one one-way `iperf -c` against each of its peers, so a pair `{A, B}` is measured as two directed tests, A→B and B→A, each with its own log. `parallel` runs both at once, so every link carries traffic in both directions simultaneously; `sequential-pair` gives each direction a round of its own. `rolling` is structured differently (see below).
 
 | Mode | What runs concurrently | Wall-clock at N=100, DUR=10 | When to use |
 |---|---|---|---|
 | `parallel` (default) | all hosts launch all of their clients at once after a synchronized start | ~1 × DURATION (~50s) | fabric stress testing: load everything at once and see what breaks |
 | `sequential-host` | one host at a time runs all of its clients in parallel | ~N × DURATION (~17 min) | clean numbers per host without inter-host interference |
 | `sequential-host --single-server HOST` | every *other* host targets just HOST, simultaneously (all→one) | ~1 × DURATION | incast: what one server's inbound looks like with the whole fleet converging on it |
-| `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1)/2 × DURATION (~14 hr) | cleanest possible per-pair numbers; usually overkill |
+| `sequential-pair` | exactly one connection on the wire at any moment | ~N(N-1) × DURATION (~28 hr) | cleanest possible per-pair numbers; usually overkill |
 | `rolling` | each host independently picks its least-tested peer, runs one short iperf, repeats for `--total-time`; up to `--host-flows` concurrent flows per host | bounded by `--total-time` | only practical mode at very large N: per-host load is `--host-flows`, independent of fleet size |
 
 Every iperf client is additionally wrapped in a hard per-test time limit
@@ -323,21 +397,25 @@ disables the cap. A test killed by the cap is reported as a `FAIL` with
 ## How it works
 
 ### Synchronized start (`parallel` mode)
-The orchestrator computes `start_time = now + START_DELAY` once locally, pushes that epoch timestamp to every host as a script argument, and each remote run-script busy-waits until that epoch before launching iperf. All hosts start within a fraction of a second of each other.
+The orchestrator computes `start_time = now + START_DELAY` once locally, pushes that epoch timestamp to every host as a script argument, and each remote run-script sleeps until that epoch before launching iperf. All hosts start within a fraction of a second of each other.
 
 ### Per-host run scripts
-Generated locally with each host's targets baked in, then distributed once via scp. The remote side has no orchestration logic — it's just a target list, a synchronization barrier, mpstat in the background, and a fan-out of `iperf -c ... --full-duplex` calls (one per target, all backgrounded and `wait`-ed).
+Generated locally with each host's targets baked in, then distributed once via scp. The remote side has no orchestration logic — it's just a target list, a synchronization barrier, mpstat in the background, and a fan-out of one-way `iperf -c` calls (one per target, or `--host-flows` per target, all backgrounded and `wait`-ed, each under the per-test time limit).
 
-### Balanced pair assignment (the parity rule)
-For an unordered pair `{A, B}` somebody has to be the iperf2 client. Naive "lex-smaller is always the client" gives terrible load imbalance: at N=100 the lex-first host runs 99 clients and the lex-last runs 0.
+### One test per directed edge
+Every host is the client for its own outbound directions. In a full mesh of N
+hosts each one runs N-1 one-way `iperf -c` invocations — the fleet runs
+N(N-1) tests in all — and every log file carries exactly one direction's
+bytes. The two directions of a pair are measured by the two hosts' own clients,
+so in `parallel` mode A→B and B→A run at the same moment on two TCP
+connections: the link is loaded both ways, and each number is unambiguously
+one direction's.
 
-The fix is the **parity rule on host indices**: for indices `i, j` (positions in the sorted server list), the client is the smaller index when `(i+j)` is even, the larger when `(i+j)` is odd. Both endpoints compute the same answer independently, so no coordination is needed.
-
-| N | spread | meaning |
-|---|---|---|
-| odd | 0 | every host runs exactly `(N-1)/2` clients |
-| even | 1 | every host runs `(N-2)/2` or `N/2` clients |
-| 100 | 1 | every host runs 49 or 50 clients (was 0..99 before) |
+The load is even by construction: every host sends N-1 tests and receives
+N-1, so at N=100 each runs 99 clients. A pair grid (`gen --grid`) enables
+directions one at a time, and then each host runs exactly the tests its grid
+row enables. `create-scripts` logs the resulting client load (min / max /
+mean) so you can confirm the fan-out before the run starts.
 
 ### CPU sampling
 Each host runs `mpstat -P ALL 1 N` in the background, started right before iperf and running for `DURATION + 4` seconds. The fallback (`/proc/stat` deltas) kicks in if mpstat isn't installed; the parser detects which format it's reading.
@@ -354,7 +432,7 @@ The bar chart annotates each host's bar with peak CPU. Three patterns to watch f
 For each host, one ssh + one scp + one local untar — instead of N-1 individual scp calls. At N=100 that's roughly 300 SSH/SCP operations across the whole pipeline instead of 5,000.
 
 ### Hostname sanitization in filenames
-Server-list entries like `host.example.com`, `2001:db8::1`, or `user@10.0.0.1` are sanitized when used in filenames (`iperf_test_<src>_to_<dst>.log`, `cpu_<host>.log`, `run_<host>.sh`, the per-host tarballs). Slashes, colons, and `@` are replaced so the path is well-formed on every filesystem; the parser reverses the mapping when reading filenames back into the CSV. This means an IPv6 address or a `user@host` entry no longer produces broken paths or silently dropped logs.
+Server-list entries like `2001:db8::1` or `[fe80::1]` are sanitized when used in filenames (`iperf_test_<src>_to_<dst>_<run-id>.log`, `cpu_<host>_<run-id>.log`, `run_<host>_<run-id>.sh`, the per-host tarballs): colons, slashes, square brackets and whitespace become `_`, so the path is well-formed on every filesystem. The real name travels in each file's header (`# pair_a=…`, `# host=…`) and the parsers read it from there, so the CSV shows hosts exactly as the server list names them, and an IPv6 address no longer produces broken paths or silently dropped logs.
 
 ### Heatmap auto-degradation
 Cell annotations, axis labels, and figure size adapt to N:
@@ -374,7 +452,9 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 <!-- docs:output-schema -->
 ## Output schema
 
-### `iperf_results.csv` (one row per direction, two per test file)
+### `iperf_results.csv` (one row per directed test)
+
+Columns appear in this order:
 
 | Column | Meaning |
 |---|---|
@@ -384,10 +464,12 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 | status | `OK`, `NO_HEADER`, `NO_SUMMARY`, `DIRECTION_MISSING`, `READ_ERROR` |
 | protocol | `TCP` |
 | duration_s, parallel_streams | from the run-script header |
+| bind_iface, bind_ip | the sending host's interface and address under `--bind`; empty without it |
 | bytes_transferred, bps, mbps | the throughput numbers |
 | src_port, dst_port | raw from iperf2 |
-| pair_a, pair_b | the canonical pair this row came from |
+| pair_a, pair_b | the two hosts named in the log's header; `pair_a` ran the client |
 | filename, error | log file and any error text |
+| test_start | epoch seconds the run script stamped just before launching iperf; how `make-pivot` and the overlays tell concurrent flows from repeated probes |
 
 ### `cpu_summary.csv` (one row per host)
 
@@ -403,11 +485,15 @@ At N=100 the heatmap renders as a ~280KB PNG in a few seconds, with slow hosts v
 | peak_sys_pct | max `%sys` (box-wide) |
 | peak_user_pct | max `%usr` (box-wide) |
 | peak_idle_floor_pct | lowest `%idle` on any single core |
+| filename | the CPU log the row was parsed from |
+
+A CPU log that cannot be parsed still gets a row, with `source` set to
+`PARSE_ERROR` and the other measurements blank.
 
 ### Heatmap reading
 - **Rows = source** (sender direction)
 - **Columns = target** (receiver direction)
-- Cell `(A, B)` is the throughput when A was sending to B during the full-duplex test
+- Cell `(A, B)` is the throughput of A's test to B (in `parallel` mode, measured while B was sending to A at the same time)
 - A row that's all red → that host has bad outbound
 - A column that's all red → that host has bad inbound
 - The bar chart underneath ranks hosts by mean outgoing Mbps with peak CPU% labeled when available
@@ -610,6 +696,44 @@ extension picks it automatically, so `--overlay-out nightly.ndjson` is enough).
 `--overlay-out -` writes to stdout, and `--overlay-no-meta` omits the `!test`
 lines that carry units, ranges, palettes and short names.
 
+### Steady state only: `--overlay-window`
+
+A long rolling run spends its first minutes ramping up, and the steady state is
+what belongs on the wall. `--overlay-window SECONDS` keeps only the tests that
+started in the last SECONDS of the run, counting back from the last test to
+start:
+
+```bash
+./iperf-orchestrator.sh export-overlay --overlay-window 600   # the last 10 minutes
+```
+
+Rows with no `test_start` cannot be placed in time, so they are kept rather
+than dropped, and the file header records the window and how many earlier
+tests it left out.
+
+### Export options
+
+Each flag has an environment variable; the flag wins when both are set.
+Passing a flag that names a destination, format, map, prefix, label, window or
+line rate is itself a request for the overlay, so `process --overlay-out x.tsv`
+needs no separate `--overlay`. The environment variables only configure the
+export: to have `process` write it, set `IPERF_OVERLAY=1` as well.
+
+| Flag | Env var | Default | Purpose |
+|---|---|---|---|
+| `--overlay` | `IPERF_OVERLAY` | `0` | also write the overlay during `process` (and so `summarize`, `run`, `all`) |
+| `--overlay-out FILE` | `IPERF_OVERLAY_OUT` | `<run-dir>/iperf_overlay.tsv` | destination; `-` is stdout |
+| `--overlay-format FMT` | `IPERF_OVERLAY_FORMAT` | from the extension, else `tsv` | `tsv` or `ndjson` |
+| `--overlay-map FILE` | `IPERF_OVERLAY_MAP` | *(unset)* | `<host> <element>` lines renaming tested hosts to layout elements |
+| `--overlay-prefix STR` | `IPERF_OVERLAY_PREFIX` | *(unset)* | prepended to every target, e.g. `DH1/A/` |
+| `--overlay-test-prefix STR` | `IPERF_OVERLAY_TEST_PREFIX` | `iperf_` | prefix on every overlay name, for comparing runs side by side |
+| `--overlay-run LABEL` | `IPERF_OVERLAY_RUN` | the run id | the `run=` tag on every sample |
+| `--overlay-window SECONDS` | `IPERF_OVERLAY_WINDOW` | `0` (the whole run) | only tests started in the last SECONDS |
+| `--overlay-line-rate MBPS` | `IPERF_OVERLAY_LINE_RATE` | *(unset)* | NIC line rate: absolute throughput scales, plus `iperf_line_util` |
+| `--overlay-append` | `IPERF_OVERLAY_APPEND` | `0` | append to the destination instead of replacing it |
+| `--overlay-reduce` | `IPERF_OVERLAY_REDUCE` | `0` | one median sample per host per overlay |
+| `--overlay-no-meta` | `IPERF_OVERLAY_META=0` | metadata on | omit the `!test` metadata lines |
+
 <!-- docs:end -->
 ---
 
@@ -641,7 +765,9 @@ ls results/
 
 ### Shared-FS safety on the remotes
 
-`REMOTE_DIR` (default `/tmp/iperf_orchestrator`) can safely point at a shared filesystem (NFS home, GPFS, etc.). Every remote-side file the orchestrator creates embeds both the sanitized hostname and the run-id, so simultaneous runs (or back-to-back runs sharing the same `REMOTE_DIR`) never overwrite each other. `cleanup` (without `--all`) only removes files matching the active run-id, leaving prior runs untouched.
+`REMOTE_DIR` (default `/tmp/iperf_orchestrator`) can point at a shared filesystem (NFS home, GPFS, etc.) while a run is in flight. Every remote-side file the orchestrator creates embeds both the sanitized hostname and the run-id, so hosts sharing the directory, and simultaneous or back-to-back runs, never overwrite each other's files.
+
+**Cleanup is not scoped the same way.** `cleanup`, `clean`, and the last step of `all` and `run` all run `rm -rf "$REMOTE_DIR"` on every host. On a shared filesystem that removes the directory for everyone, including the files of any other run still using it. Give concurrent runs their own `--remote-dir`, or use `start` / `summarize` / `stop` and clean up once every run sharing the directory has finished.
 
 <!-- docs:end -->
 ---
@@ -654,20 +780,20 @@ This section documents *why* the script is shaped the way it is. Most of these w
 ### iperf3 was the wrong tool for full-mesh testing
 The first version of this script used iperf3 with JSON output. iperf3 has nicer reporting (TCP retransmits, CPU utilization in the output, structured JSON), but its server is single-threaded and accepts one client at a time. At 100 hosts, every other host trying to connect to one server simultaneously would mostly fail with "the server is busy running a test." Working around this means running 100 iperf3 daemons per host on 100 ports, plus a port-assignment scheme, plus 100× the firewall config. We switched to iperf2 and the architecture got dramatically simpler.
 
-### Bidirectional testing per pair
-Earlier versions ran two independent tests per host pair (A→B as one test, B→A as another). With iperf2 `--full-duplex`, one TCP socket carries traffic in both directions simultaneously, both numbers come out of the same test, and you halve the test count. For fabric stress testing this is also more realistic — real-world traffic isn't strictly unidirectional and the switch buffers don't see the same patterns.
+### One-way tests per directed edge, not `--full-duplex`
+Earlier versions measured each pair with iperf2's `--full-duplex`: one TCP socket carrying both directions, both numbers from one test, half the test count. It did not survive iperf2's CSV output. The `-y C` reports label per-direction rows and SUM rows inconsistently across iperf2 builds and `-P` values, so the same cell could read one direction, the other, or both added together depending on which iperf2 a host had. The orchestrator now runs one unidirectional `iperf -c` per directed edge and has the two hosts of a pair test their own outbound direction at the same moment. In `parallel` mode the link still carries both directions at once, and every log holds exactly one direction's bytes whatever the iperf2 build.
 
-### Parity rule for client assignment
-The first canonical-pair scheme used "lex-smaller host is always the client." That's correct but pathologically imbalanced — lex-first runs N-1 clients, lex-last runs 0. The parity-on-indices rule gives every host roughly (N-1)/2 clients with a max-min spread of 0 (N odd) or 1 (N even). At N=100 this turns 0..99 client load into 49..50 client load. Both endpoints compute the rule independently and agree without coordination.
+### Client assignment: from the parity rule to every host a client
+With one full-duplex test per pair, somebody had to be the client, and "lex-smaller host is always the client" was pathologically imbalanced — lex-first ran N-1 clients, lex-last ran 0. A parity rule on host indices fixed that (49 or 50 clients each at N=100). Moving to one test per directed edge removed the question: every host is the client for its own outbound directions, so every host runs N-1 clients and the load is even by construction.
 
 ### Per-host iperf parallelism
 A subtle bug in early versions: `parallel` mode synchronized the *start* of each host but each host then ran its iperf3 calls in a serial `for` loop. So all hosts started at T+0, but A→B finished before A→C started. The whole point of parallel mode is to load the wire all at once; we were missing it. Fixed by backgrounding each `iperf` call with `&` and `wait`-ing for the whole batch on each host.
 
 ### CPU sampling has to run on every host, including the no-client one
-With balanced pair assignment, every host has *some* client work — but if N is odd or if you customize the rule, you can end up with a host whose only role is being a server for inbound flows. That host's CPU is still doing real work (handling N/2 inbound full-duplex sockets), so it still needs to be sampled. The run-script keeps the mpstat sampler running even when its target list is empty.
+In a full mesh every host has client work, but a pair grid can leave a host with no outbound tests at all (a blank grid row). That host's CPU is still doing real work, terminating every inbound flow, so it still needs to be sampled. The run-script keeps the mpstat sampler running even when its target list is empty.
 
 ### Synchronized barrier instead of locks/coordination
-The first design considered something like a GPIO-style "everyone signal ready" barrier. Vastly simpler: pick a future epoch timestamp, push it to every host, each host busy-waits until then. No coordination, no failure modes around partial-readiness, no protocol to debug. Just a number.
+The first design considered something like a GPIO-style "everyone signal ready" barrier. Vastly simpler: pick a future epoch timestamp, push it to every host, each host sleeps until then. No coordination, no failure modes around partial-readiness, no protocol to debug. Just a number.
 
 ### Tar-batched result collection
 N-1 sequential scp calls per host at N=100 is ~80 minutes of pure SSH handshake overhead. One tar + one scp + one local untar per host is closer to a few minutes. Same data, ~17× faster, and the tarball naming naturally namespaces server-side log files (which were originally going to collide on extract).
@@ -690,7 +816,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 ## Limitations and known gaps
 
 - **No automatic retry on transient SSH failures.** If `start-servers` fails on one host, the orchestrator reports it and moves on (`all` aborts unless `--keep-going` is passed). Re-run the subcommand to pick up stragglers.
-- **`sequential-pair` at N=100 takes ~14 hours.** The cleanest mode is also the slowest. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack all `N(N-1)/2` edges into ~N-1 rounds where every host has at most one flow per round). Not implemented; would be moderate complexity.
+- **`sequential-pair` at N=100 takes ~28 hours.** The cleanest mode is also the slowest: it runs all `N(N-1)` directed tests one at a time. If you want sequential-pair-quality numbers in less time, the right approach is round-robin tournament scheduling (pack the `N(N-1)` directed edges into ~N-1 rounds where every host sends at most one flow and receives at most one per round). Not implemented; would be moderate complexity.
 - **Heatmap above ~60 hosts loses cell labels.** This is by design — they're unreadable at that density — but it means you have to read the colormap or the CSV for exact values.
 - **Asymmetric NIC speeds aren't auto-handled.** If half your fleet is 1G and half is 10G, the heatmap colormap is dominated by the 10G hosts and the 1G hosts all look very red. Acceptable for our use case ("uniform fleet"); for a heterogeneous fleet you'd want per-pair expected-bandwidth normalization.
 - **No UDP testing.** Fabric stress testing usually wants TCP because that's what real workloads do; if you specifically need UDP loss/jitter measurements, the iperf invocation in the generated run script needs `-u` and the parser needs to read different CSV columns.
@@ -715,7 +841,7 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 
 **Every host fails with a password prompt or `Permission denied`.** The orchestrator connects with `BatchMode=yes` and never distributes keys itself. Set up key-based SSH first, e.g. `for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done`.
 
-**A run aborted halfway and I want to pick up where it left off.** `./iperf-orchestrator.sh all --resume` consults `~/.iperf_orchestrator/state` and skips the steps already marked done. If the failure was on a single flaky host and you want to barrel past it instead, add `--keep-going`.
+**A run aborted halfway and I want to pick up where it left off.** There is no resume: the orchestrator keeps no state, and `all` always starts a fresh run. Every step is a subcommand you can re-run on its own, though. If the tests finished but the analysis did not, `summarize` (or `process`) collects and analyses the latest run, and `--run-id ID` addresses an earlier one. If the failure was one flaky host, re-run with `--keep-going` to barrel past it.
 
 <!-- docs:end -->
 ---
@@ -729,17 +855,17 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 results/
   latest -> 2026-05-05_14-22-01    # symlink to most recent run
   2026-05-05_14-22-01/
-    iperf_installed.txt            # check-iperf output (this run only)
-    iperf_running.txt              # check-servers output (this run only)
-    .run_mode                      # parallel | sequential-host | sequential-pair
+    .run_mode                      # parallel | sequential-host | sequential-pair | rolling
     scripts/
-      run_<host>_<run-id>.sh       # generated per-host run scripts
+      run_<host>_<run-id>.sh       # generated per-host run scripts (not rolling)
     logs/
       orchestrator.log             # everything the orchestrator did this run
       run_<host>.log               # stdout/stderr of each host's run-tests session
-      run_<src>_to_<dst>.log       # sequential-pair only
+                                   # (sequential-pair: that host's last round)
+      rolling_<host>.log           # rolling mode's per-host session instead
     iperf_test_<src>_to_<dst>_<run-id>.log    # raw iperf2 CSV with header
-    iperf_server_<host>_<run-id>.log          # server-side iperf log per host
+                                              # (_f<N> per flow with --host-flows > 1,
+                                              #  _<seq> per probe in rolling mode)
     iperf_run_<host>_<run-id>.status          # per-host status timeline
     cpu_<host>_<run-id>.log                   # mpstat or proc_stat samples
     iperf_results.csv                          # parsed throughput data
@@ -753,9 +879,8 @@ results/
 ### Remote: `$REMOTE_DIR/` (default `/tmp/iperf_orchestrator/`)
 
 ```
-run_iperf_<host>_<run-id>.sh
+run_iperf_<host>_<run-id>.sh          # the run script, as distributed
 iperf_test_<src>_to_<dst>_<run-id>.log
-iperf_server_<host>_<run-id>.log
 iperf_run_<host>_<run-id>.status
 cpu_<host>_<run-id>.log
 ```

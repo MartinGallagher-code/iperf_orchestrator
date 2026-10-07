@@ -171,6 +171,20 @@ test_run_tests_rolling_passes_streams_to_iperf() {
 run_test test_run_tests_rolling_mode_dispatches_per_host_loop
 run_test test_run_tests_rolling_passes_perf_flags_to_iperf
 run_test test_run_tests_rolling_passes_streams_to_iperf
+test_run_tests_rolling_header_marks_logs_one_way() {
+    # Each rolling probe is a single one-way iperf -c, and its log header
+    # must say so: without full_duplex=0, parse-csv falls back to the legacy
+    # two-direction parse and invents a DIRECTION_MISSING row per probe.
+    install_fake_ssh
+    write_server_list a b >/dev/null
+    run_with_fake_path --total-time 1 --duration 1 run-tests rolling
+    assert_status 0 "$RUN_RC" || return 1
+    grep -qE '# pair_a=.* full_duplex=0' "$FAKE_SSH_LOG" || {
+        echo "rolling probe header should carry full_duplex=0" >&2
+        grep 'pair_a=' "$FAKE_SSH_LOG" >&2; return 1
+    }
+}
+
 test_run_tests_rolling_embeds_bind_resolver() {
     install_fake_ssh
     write_server_list a b c >/dev/null
@@ -226,6 +240,7 @@ test_run_tests_rolling_omits_bind_when_unset() {
     }
 }
 run_test test_run_tests_rolling_embeds_bind_resolver
+run_test test_run_tests_rolling_header_marks_logs_one_way
 run_test test_run_tests_rolling_omits_bind_when_unset
 run_test test_run_tests_rolling_writes_cmd_and_traps_failures
 
