@@ -53,6 +53,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Rolling mode no longer invents a failure for every probe.** Rolling
+  probes wrote their log header without `full_duplex=0`, and `parse-csv`
+  reads a header without it as a legacy `--full-duplex` log with two
+  directions. So every probe produced its real row plus a phantom
+  `DIRECTION_MISSING` row for the reverse direction, which roughly halved
+  `iperf_ok_pct`, padded the failure counts and painted `FAIL` on the
+  overlays. The probes now write `full_duplex=0`. The parser also treats any
+  header carrying `conn_ip=` as one-way, since that key only ever appeared
+  after `--full-duplex` was dropped, so rolling runs collected before this
+  fix come out right when re-analysed with `parse-csv` or `summarize`.
 - **A host that reached no peers reads 0 on `iperf_coverage`** instead of
   having no coverage sample at all. That host — already `iperf_state=NO-DATA`
   with 0% success — sat blank on the coverage overlay next to hosts reading

@@ -2019,7 +2019,7 @@ _run_rolling() {
                 (
                     sleep 0.\$((100 + RANDOM % 900))
                     cmd=\"\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
-                    echo \"# pair_a=$src pair_b=\$target conn_ip=\$conn_ip run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
+                    echo \"# pair_a=$src pair_b=\$target conn_ip=\$conn_ip run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
                     echo \"# cmd: \$cmd\" >> \"\$outfile\"
                     \$TIMEOUT_CMD iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
                     rc=\$?
@@ -2329,8 +2329,13 @@ for path in sorted(glob.glob(os.path.join(results_dir, "iperf_test_*.log"))):
     # log produced by pair_b's matching iperf -c against pair_a. If the
     # header is missing or full_duplex=1, fall back to the legacy
     # --full-duplex two-row parse for backwards compatibility with old
-    # log files.
-    full_duplex = header.get("full_duplex", "1") != "0"
+    # log files. A header that carries conn_ip= is one-way whatever it
+    # says about full_duplex: conn_ip arrived after --full-duplex was
+    # dropped, and rolling probes wrote it without full_duplex=0 until
+    # 2.6.0 -- which made every probe sprout a phantom DIRECTION_MISSING
+    # row for the reverse direction.
+    full_duplex = (header.get("full_duplex", "1") != "0"
+                   and "conn_ip" not in header)
 
     if not pair_a or not pair_b:
         rows.append(make_blank_row(pair_a, pair_b, "", "", base, "NO_HEADER",
