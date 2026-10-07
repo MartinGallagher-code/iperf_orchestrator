@@ -1056,15 +1056,16 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --server-bind PATTERN      bind the iperf2 server side too. Same pattern
                                syntax as --bind. Defaults to the value of
                                --bind so the daemon only accepts on the
-                               data-plane NIC; pass --server-bind='' to
-                               keep listening on 0.0.0.0 instead.
+                               data-plane NIC; give it a different PATTERN
+                               to put the daemons on another NIC.
     --dry-run, -n              print SSH/SCP commands without executing them
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
     --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
-                               Safe to point at a shared FS: filenames embed <host>_<run-id>.
+                               Filenames embed <host>_<run-id>, so hosts can share
+                               it, but cleanup/clean/all/run rm -rf the whole dir.
     --python PATH              Python interpreter (default $PYTHON_BIN)
     --overlay                  Also write the datacenter-layout overlay during
                                'process' (so 'summarize', 'run' and 'all' too).
@@ -1228,9 +1229,21 @@ CONFIG (env vars; CLI flags above take precedence, plan values yield):
     START_DELAY=$START_DELAY
     IPERF_OVERLAY=$IPERF_OVERLAY             # 1 = export the overlay during 'process'
     IPERF_OVERLAY_OUT=${IPERF_OVERLAY_OUT:-}      # overlay destination ('-' = stdout)
+    IPERF_OVERLAY_FORMAT=${IPERF_OVERLAY_FORMAT:-}   # tsv | ndjson (--overlay-format)
+    IPERF_OVERLAY_MAP=${IPERF_OVERLAY_MAP:-}      # host -> element map (--overlay-map)
+    IPERF_OVERLAY_PREFIX=${IPERF_OVERLAY_PREFIX:-}   # target prefix (--overlay-prefix)
+    IPERF_OVERLAY_TEST_PREFIX=$IPERF_OVERLAY_TEST_PREFIX  # overlay name prefix (--overlay-test-prefix)
+    IPERF_OVERLAY_RUN=${IPERF_OVERLAY_RUN:-}      # run= label (--overlay-run)
+    IPERF_OVERLAY_WINDOW=$IPERF_OVERLAY_WINDOW      # last N seconds only (--overlay-window)
+    IPERF_OVERLAY_LINE_RATE=${IPERF_OVERLAY_LINE_RATE:-}  # NIC Mb/s (--overlay-line-rate)
+    IPERF_OVERLAY_APPEND=$IPERF_OVERLAY_APPEND      # 1 = append (--overlay-append)
+    IPERF_OVERLAY_REDUCE=$IPERF_OVERLAY_REDUCE      # 1 = one sample per host (--overlay-reduce)
+    IPERF_OVERLAY_META=$IPERF_OVERLAY_META        # 0 = no !test lines (--overlay-no-meta)
     IPERF_SERVERS=${IPERF_SERVERS:-}
+    IPERF_RUN_ID=${IPERF_RUN_ID:-}           # run to address (--run-id)
     RESULTS_BASE=$RESULTS_BASE
     REMOTE_DIR=$REMOTE_DIR
+    PYTHON_BIN=$PYTHON_BIN
 
 FILES:
     Plan file:    ${PLAN_FILE:-(none; 'gen' writes ./$PLAN_FILE_DEFAULT)}

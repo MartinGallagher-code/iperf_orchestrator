@@ -22,12 +22,15 @@ _iperf_orchestrator() {
         all help help-advanced version"
 
     local global_flags="--plan --servers -s --output -o --run-id \
-        --port --duration -d --streams -P --ssh-jobs -j --start-delay \
+        --port --duration -d --test-timeout --single-server \
+        --streams -P --ssh-jobs -j --start-delay \
         --total-time --host-flows --bandwidth -b --length -l --window -w \
         --mss -M --no-nagle -N --bind -B --server-bind \
         --ssh-user -u --remote-dir --python \
         --overlay --overlay-out --overlay-format --overlay-map \
-        --overlay-prefix --overlay-append --overlay-reduce --overlay-no-meta \
+        --overlay-prefix --overlay-test-prefix --overlay-run \
+        --overlay-window --overlay-line-rate \
+        --overlay-append --overlay-reduce --overlay-no-meta \
         --dry-run -n --verbose -v --quiet -q \
         -h --help --help-advanced --version"
 
@@ -50,10 +53,12 @@ _iperf_orchestrator() {
         --overlay-format)
             COMPREPLY=( $(compgen -W "tsv ndjson" -- "$cur") )
             return ;;
-        --run-id|--port|--duration|-d|--streams|-P|--ssh-jobs|-j|--start-delay|\
+        --run-id|--port|--duration|-d|--test-timeout|--single-server|\
+        --streams|-P|--ssh-jobs|-j|--start-delay|\
         --total-time|--host-flows|--bandwidth|-b|--length|-l|--window|-w|\
         --mss|-M|--bind|-B|--server-bind|--remote-dir|--ssh-user|-u|--for|--watch|\
-        --overlay-prefix)
+        --overlay-prefix|--overlay-test-prefix|--overlay-run|--overlay-window|\
+        --overlay-line-rate)
             return ;;  # numeric/text values, no completion
     esac
 
@@ -89,7 +94,9 @@ _iperf_orchestrator() {
             ;;
         export-overlay)
             COMPREPLY=( $(compgen -W "--overlay-out --overlay-format --overlay-map \
-                --overlay-prefix --overlay-append --overlay-reduce --overlay-no-meta \
+                --overlay-prefix --overlay-test-prefix --overlay-run \
+                --overlay-window --overlay-line-rate \
+                --overlay-append --overlay-reduce --overlay-no-meta \
                 --run-id --help" -- "$cur") )
             ;;
         *)

@@ -80,6 +80,10 @@ _iperf_orchestrator() {
         '--overlay-format[overlay format]:format:(tsv ndjson)'
         '--overlay-map[<host> <element> mapping file]:file:_files'
         '--overlay-prefix[string prepended to every target]:prefix:'
+        '--overlay-test-prefix[prefix on every overlay name (default iperf_)]:prefix:'
+        '--overlay-run[run= label on every sample (default: the run id)]:label:'
+        '--overlay-window[only tests started in the last N seconds]:seconds:'
+        '--overlay-line-rate[NIC line rate in Mb/s; adds iperf_line_util]:mbps:'
         '--overlay-append[append instead of replacing the destination]'
         '--overlay-reduce[one sample per host per test (median)]'
         '--overlay-no-meta[omit the !test metadata lines]'
@@ -98,7 +102,7 @@ _iperf_orchestrator() {
     _arguments -C \
         $global_flags \
         '1: :->subcmd' \
-        '*::: :->subargs'
+        '*:: :->subargs'
 
     case $state in
         subcmd)
@@ -136,6 +140,11 @@ _iperf_orchestrator() {
                     ;;
                 status)
                     _arguments '--watch[redraw every N seconds]:seconds:' '--help[show help]'
+                    ;;
+                export-overlay)
+                    _arguments ${(M)global_flags:#--overlay-*} \
+                        '--run-id[address an existing run]:run-id:' \
+                        '--help[show help]'
                     ;;
                 *)
                     _arguments '--help[show help]'

@@ -143,6 +143,99 @@ test_help_includes_setup_quickstart() {
     assert_contains "$RUN_OUT" "--servers" "help should mention --servers flag" || return 1
 }
 
+# ---- README and completions cross-check -----------------------------------
+#
+# The help text is generated next to the parser, so it rarely falls behind.
+# The README and the completion files live elsewhere and did: --overlay-window
+# never reached the README, and the bash completion missed six flags. These
+# hold every surface to the parser itself.
+
+# Long flags the pre-pass parser accepts, one per line (same scrape as the
+# help-text test above).
+_parser_long_flags() {
+    grep -oE '^[[:space:]]+--[a-z][a-z0-9-]*(\|-[a-zA-Z])?(=\*)?\)' "$ORCH" \
+        | grep -oE -- '--[a-z][a-z0-9-]*' \
+        | sort -u
+}
+
+# _flags_missing_from FILE: print each parser flag FILE never mentions as a
+# whole word (so --overlay is not satisfied by --overlay-out).
+_flags_missing_from() {
+    local file="$1" f
+    while IFS= read -r f; do
+        grep -qE -- "${f}([^a-z0-9-]|\$)" "$file" || echo "$f"
+    done < <(_parser_long_flags)
+}
+
+test_readme_documents_every_long_flag() {
+    local missing
+    missing=$(_flags_missing_from "$REPO_ROOT/README.md")
+    [ -z "$missing" ] || {
+        echo "flags the parser accepts but README.md never mentions:" >&2
+        printf '  %s\n' $missing >&2
+        return 1
+    }
+}
+
+test_bash_completion_offers_every_long_flag() {
+    local missing
+    missing=$(_flags_missing_from "$REPO_ROOT/completions/iperf_orchestrator.bash")
+    [ -z "$missing" ] || {
+        echo "flags missing from completions/iperf_orchestrator.bash:" >&2
+        printf '  %s\n' $missing >&2
+        return 1
+    }
+}
+
+test_zsh_completion_offers_every_long_flag() {
+    local missing
+    missing=$(_flags_missing_from "$REPO_ROOT/completions/_iperf_orchestrator")
+    [ -z "$missing" ] || {
+        echo "flags missing from completions/_iperf_orchestrator:" >&2
+        printf '  %s\n' $missing >&2
+        return 1
+    }
+}
+
+test_readme_documents_every_plan_key() {
+    # Every key _load_plan_settings accepts must be findable as `key=` in
+    # the README, or it is a setting nobody can discover.
+    local keys k missing=()
+    keys=$(sed -n '/^_load_plan_settings()/,/^}/p' "$ORCH" \
+        | grep -oE '^[[:space:]]+[a-z_]+\)[[:space:]]+_plan_default' \
+        | grep -oE '[a-z_]+' | grep -v '^_plan_default$')
+    [ -n "$keys" ] || { echo "could not extract plan keys from script" >&2; return 1; }
+    while IFS= read -r k; do
+        grep -qE "(^|[^a-z_])${k}=" "$REPO_ROOT/README.md" || missing+=("$k")
+    done <<< "$keys"
+    [ "${#missing[@]}" -eq 0 ] || {
+        echo "plan keys missing from README.md:" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        return 1
+    }
+}
+
+test_readme_output_schema_lists_every_csv_column() {
+    # Both CSV writers declare their columns as a literal `cols = [...]`
+    # list; every name in them must appear in the README's output-schema
+    # section (bind_iface, bind_ip and test_start once did not).
+    local schema cols c missing=()
+    schema=$(sed -n '/^<!-- docs:output-schema -->$/,/^<!-- docs:end -->$/p' \
+        "$REPO_ROOT/README.md")
+    [ -n "$schema" ] || { echo "no docs:output-schema section in README.md" >&2; return 1; }
+    cols=$(awk '/^cols = \[/{grab=1} grab{print} grab && /\]/{grab=0}' "$ORCH" \
+        | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u)
+    [ -n "$cols" ] || { echo "could not extract CSV columns from script" >&2; return 1; }
+    while IFS= read -r c; do
+        echo "$schema" | grep -qE "(^|[^a-z_])${c}([^a-z_]|\$)" || missing+=("$c")
+    done <<< "$cols"
+    [ "${#missing[@]}" -eq 0 ] || {
+        echo "CSV columns missing from the README output schema:" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        return 1
+    }
+}
+
 run_test test_orchestrator_passes_bash_n
 run_test test_orchestrator_is_executable
 run_test test_orchestrator_uses_set_u
@@ -152,5 +245,10 @@ run_test test_help_text_documents_every_long_flag
 run_test test_help_includes_all_three_run_modes
 run_test test_help_includes_files_section
 run_test test_help_includes_setup_quickstart
+run_test test_readme_documents_every_long_flag
+run_test test_bash_completion_offers_every_long_flag
+run_test test_zsh_completion_offers_every_long_flag
+run_test test_readme_documents_every_plan_key
+run_test test_readme_output_schema_lists_every_csv_column
 
 report_tests

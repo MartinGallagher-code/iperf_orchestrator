@@ -73,6 +73,18 @@ test_version_matches_pyproject() {
         "--version should match the version in pyproject.toml" || return 1
 }
 
+test_package_version_matches_pyproject() {
+    # The version lives in three places: pyproject.toml, the script's
+    # ORCH_VERSION (checked above through --version), and __init__.py,
+    # which the docs site scrapes for its title. A release that bumps two
+    # of them ships a third that lies.
+    local pkg_ver init_ver
+    pkg_ver=$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$REPO_ROOT/pyproject.toml" | head -n1)
+    init_ver=$(sed -nE 's/^__version__ = "([^"]+)"$/\1/p' "$REPO_ROOT/iperf_orchestrator/__init__.py")
+    assert_eq "$pkg_ver" "$init_ver" \
+        "__version__ in __init__.py should match pyproject.toml" || return 1
+}
+
 test_version_shows_copyright_and_license() {
     run_orch --version
     assert_contains "$RUN_OUT" "Copyright (C) 2026 Martin J. Gallagher" || return 1
@@ -98,6 +110,7 @@ run_test test_help_double_dash_help_flag
 run_test test_version_flag
 run_test test_version_subcommand
 run_test test_version_matches_pyproject
+run_test test_package_version_matches_pyproject
 run_test test_version_shows_copyright_and_license
 run_test test_unknown_subcommand_is_rejected
 

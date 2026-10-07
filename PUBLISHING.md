@@ -18,8 +18,15 @@ see `pyproject.toml` for the metadata.
 
 ## Cut a release
 
-1. **Bump the version** in `pyproject.toml` (`[project].version`) and add a
-   matching entry to `CHANGELOG.md`. Follow [SemVer](https://semver.org/).
+1. **Bump the version** in all three places it is written, and add a matching
+   entry to `CHANGELOG.md`. Follow [SemVer](https://semver.org/).
+   - `pyproject.toml` (`[project].version`)
+   - `iperf_orchestrator/__init__.py` (`__version__`, which the docs site
+     scrapes for its title)
+   - `iperf_orchestrator/iperf_orchestrator.sh` (`ORCH_VERSION`, which
+     `--version` prints)
+
+   `tests/test_help_and_dispatch.sh` fails if any of the three disagree.
 
 2. **Build the distributions** (sdist + wheel) into `dist/`:
    ```bash
