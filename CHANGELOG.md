@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-10-27
+
+### Fixed
+
+- **`iperf_achieved` reads the `-b` rate the way iperf2 does.** iperf2 reads a
+  rate suffix by its case — lowercase `k`/`m`/`g` are 10^3/10^6/10^9 bit/s,
+  UPPERCASE `K`/`M`/`G` are 2^10/2^20/2^30 — but `export-overlay` read both
+  cases as decimal. A run with `bandwidth=1000M` had iperf2 aiming at
+  1048.576 Mb/s per stream while the overlay scored it against 1000, so a
+  link doing exactly what it was told read ~105%: found from a floor-plan
+  viewer's generated plans, where iperf 2.1.9 sent 1044.5 Mb/s for
+  `-b 1000M` and 998.6 Mb/s for `-b 1000m`. That direction now reads 99.6%,
+  and `1000M`, `1G` and `1000000K` are scored against 1048.576, 1073.74 and
+  1024 Mb/s. The overlay header states the rate it used in decimal Mb/s.
+  Nothing sent on the wire changes: `-b` still goes to iperf2 exactly as
+  written.
+- **`iperf_achieved` counts every stream.** `-b` caps each of a test's `-P`
+  streams, and the row it is scored against is iperf2's SUM across them, so
+  a `--streams 4 --bandwidth 250m` test asked for 1000 Mb/s in all — and read
+  400% when it delivered it. The target is now the rate times the test's
+  `parallel_streams`.
+- **The help, README and zsh completion say which suffix means what.** They
+  gave `100M` and `1G` as examples of a per-flow rate, which reads as decimal
+  and is binary to iperf2. The examples are now `100m` and `1g`, the README
+  has a **Rate units** table, and `-b` is described as a per-stream cap.
+
 ## [2.6.0] - 2026-10-07
 
 ### Added

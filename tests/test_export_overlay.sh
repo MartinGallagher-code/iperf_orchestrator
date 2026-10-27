@@ -493,12 +493,70 @@ test_export_overlay_measures_a_pair_grid_against_its_own_plan() {
 test_export_overlay_scores_against_the_requested_rate() {
     write_csvs
     local samples
-    # iperf2 was told to aim at 2G per flow; 1000 Mb/s of that is half.
-    samples="$(IPERF_BANDWIDTH=2G bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    # iperf2 was told to aim at 2g (2000 Mb/s) per stream; 1000 Mb/s of that
+    # is half.
+    samples="$(IPERF_BANDWIDTH=2g bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
     assert_contains "$samples" "iperf_achieved	hostA	50	peer=hostB" "half of what was asked for" || return 1
     # Absent when nothing was asked for: there is no target to score against.
     assert_not_contains "$(bash "$ORCH" export-overlay --overlay-out - 2>/dev/null)" \
         "iperf_achieved" "no target, no overlay" || return 1
+}
+
+# The fixture's A->B direction measured 1000 Mb/s. iperf2 reads the -b
+# suffix by case -- k/m/g are 10^3/10^6/10^9, K/M/G are 2^10/2^20/2^30 -- so
+# `-b 1000M` aimed at 1048.576 Mb/s, and 1000 Mb/s arriving is 95.37% of it.
+# Reading 1000M as 1000 Mb/s scored every direction ~105% of what iperf2 was
+# really doing (measured with iperf 2.1.9: -b 1000M sends 1044.5 Mb/s,
+# -b 1000m 998.6).
+achieved_a_to_b() {
+    IPERF_BANDWIDTH="$1" bash "$ORCH" export-overlay --overlay-out - 2>/dev/null \
+        | samples_of \
+        | awk -F'\t' '$1=="iperf_achieved" && $2=="hostA" && $4=="peer=hostB" {print $3}'
+}
+
+test_export_overlay_reads_the_rate_suffix_the_way_iperf2_does() {
+    write_csvs
+    assert_eq "100"   "$(achieved_a_to_b 1000m)"    "1000m is 10^9 bit/s" || return 1
+    assert_eq "95.37" "$(achieved_a_to_b 1000M)"    "1000M is 1000 x 2^20 = 1048.576 Mb/s" || return 1
+    assert_eq "100"   "$(achieved_a_to_b 1g)"       "1g is 10^9 bit/s" || return 1
+    assert_eq "93.13" "$(achieved_a_to_b 1G)"       "1G is 2^30 = 1073.74 Mb/s" || return 1
+    assert_eq "100"   "$(achieved_a_to_b 1000000k)" "1000000k is 10^9 bit/s" || return 1
+    assert_eq "97.66" "$(achieved_a_to_b 1000000K)" "1000000K is 1000000 x 2^10 = 1024 Mb/s" || return 1
+    assert_eq "100"   "$(achieved_a_to_b 1000000000)" "a bare number is bit/s" || return 1
+    # Not a plain rate: no target to score against, so no overlay rather
+    # than a wrong one.
+    assert_eq "" "$(achieved_a_to_b 10000pps)" "a pps rate is not scored" || return 1
+}
+
+test_export_overlay_reads_the_plan_bandwidth_the_way_iperf2_does() {
+    write_csvs
+    # The path the bug was found on: a generated plan carrying 1000M.
+    local plan="$TEST_TMPDIR/plan.conf"
+    printf '# bandwidth=1000M\nhostA\nhostB\nhostC\n' > "$plan"
+    local out samples
+    out="$(env -u IPERF_SERVERS bash "$ORCH" --plan "$plan" export-overlay --overlay-out - 2>/dev/null)"
+    samples="$(printf '%s\n' "$out" | samples_of)"
+    assert_contains "$samples" "iperf_achieved	hostA	95.37	peer=hostB" \
+        "a plan's 1000M is scored against 1048.576 Mb/s" || return 1
+    # The header names the rate it scored against, in decimal Mb/s.
+    assert_contains "$out" "# -b target 1000M = 1048.58 Mb/s per stream" \
+        "the header says what 1000M meant" || return 1
+}
+
+test_export_overlay_scores_the_rate_against_every_stream() {
+    local run_dir; run_dir="$(RUN_DIR)"
+    mkdir -p "$run_dir"
+    ln -sfn "$IPERF_RUN_ID" "$RESULTS_BASE/latest"
+    # One -P 4 test: the row is iperf2's SUM over four streams, and -b caps
+    # each stream, so `-b 250m` asked for 1000 Mb/s in all.
+    cat > "$run_dir/iperf_results.csv" <<'CSV'
+timestamp,source,target,status,protocol,duration_s,parallel_streams,bind_iface,bind_ip,bytes_transferred,bps,mbps,src_port,dst_port,pair_a,pair_b,filename,error,test_start
+20260101120000,hostA,hostB,OK,TCP,10,4,,,1250000000,1000000000,1000.0,-1,5001,hostA,hostB,a_to_b.log,,1767268800
+CSV
+    local samples
+    samples="$(IPERF_BANDWIDTH=250m bash "$ORCH" export-overlay --overlay-out - 2>/dev/null | samples_of)"
+    assert_contains "$samples" "iperf_achieved	hostA	100	peer=hostB" \
+        "four streams at 250m each is 1000 Mb/s asked for, not 250" || return 1
 }
 
 test_export_overlay_namespaces_two_runs_for_comparison() {
@@ -557,6 +615,9 @@ run_test test_export_overlay_totals_the_data_carried
 run_test test_export_overlay_measures_coverage_against_the_planned_peers
 run_test test_export_overlay_measures_a_pair_grid_against_its_own_plan
 run_test test_export_overlay_scores_against_the_requested_rate
+run_test test_export_overlay_reads_the_rate_suffix_the_way_iperf2_does
+run_test test_export_overlay_reads_the_plan_bandwidth_the_way_iperf2_does
+run_test test_export_overlay_scores_the_rate_against_every_stream
 run_test test_export_overlay_namespaces_two_runs_for_comparison
 run_test test_export_overlay_window_keeps_only_recent_tests
 run_test test_export_overlay_writes_numbers_a_person_can_grep
