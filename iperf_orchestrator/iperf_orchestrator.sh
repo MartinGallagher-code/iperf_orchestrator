@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.6.0"
+ORCH_VERSION="2.6.1"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -192,7 +192,8 @@ IPERF_SINGLE_SERVER="${IPERF_SINGLE_SERVER:-}" # sequential-host only: skip the
 
 # iperf2 performance knobs forwarded to every iperf -c invocation.
 # Empty = use iperf2's default; otherwise passed through verbatim.
-IPERF_BANDWIDTH="${IPERF_BANDWIDTH:-}"   # -b: target rate (e.g. 100M, 1G)
+IPERF_BANDWIDTH="${IPERF_BANDWIDTH:-}"   # -b: target rate per stream (e.g. 100m, 1g;
+                                         # iperf2: k/m/g decimal, K/M/G binary)
 IPERF_LENGTH="${IPERF_LENGTH:-}"         # -l: TCP read/write buffer (e.g. 128K)
 IPERF_WINDOW="${IPERF_WINDOW:-}"         # -w: TCP window / socket buffer (e.g. 4M)
 IPERF_MSS="${IPERF_MSS:-}"               # -M: TCP maximum segment size
@@ -431,7 +432,9 @@ fi
 
 # Build the optional iperf2 client-arg string (-b/-l/-w/-M/-N) once at
 # startup. Empty if no perf knobs were set; otherwise something like
-# "-b 1G -l 128K -N". Pass-through; iperf2 validates the values.
+# "-b 1g -l 128K -N". Pass-through; iperf2 validates the values -- and
+# reads their suffixes by case (k/m/g decimal, K/M/G binary), which only
+# export-overlay's iperf_achieved has to reproduce (target_mbps).
 _iperf_extra_args() {
     local parts=()
     [ -n "$IPERF_BANDWIDTH" ]   && parts+=("-b" "$IPERF_BANDWIDTH")
@@ -978,7 +981,8 @@ COMMON FLAGS (all become plan defaults once 'gen' has run):
     --host-flows N             concurrent iperf processes per directed edge
                                (parallel/sequential) or per-host concurrency
                                cap (rolling). (default $IPERF_HOST_FLOWS)
-    --bandwidth, -b RATE       cap per-flow rate, e.g. 100M, 1G (iperf2 -b)
+    --bandwidth, -b RATE       cap each stream's rate (iperf2 -b), e.g. 100m, 1g;
+                               lowercase k/m/g decimal, UPPERCASE K/M/G binary
     --streams, -P N            parallel TCP streams within each test
     --ssh-jobs, -j N           max concurrent SSH/SCP fan-out (default $IPERF_SSH_JOBS)
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
@@ -1035,7 +1039,10 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --total-time SECONDS       rolling mode wall-time (default $IPERF_TOTAL_TIME)
     --host-flows N             concurrent iperf procs per directed edge (parallel)
                                or per-host concurrency cap (rolling). (default $IPERF_HOST_FLOWS)
-    --bandwidth, -b RATE       cap per-flow target rate (iperf2 -b; e.g. 100M, 1G)
+    --bandwidth, -b RATE       cap each stream's target rate (iperf2 -b), e.g.
+                               100m, 1g. iperf2 reads the suffix by case:
+                               k/m/g = 10^3/10^6/10^9 bit/s and K/M/G =
+                               2^10/2^20/2^30, so 1000M is 1048.576 Mb/s
     --length, -l SIZE          TCP read/write buffer size (iperf2 -l; e.g. 128K)
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
     --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
@@ -1215,7 +1222,7 @@ CONFIG (env vars; CLI flags above take precedence, plan values yield):
     IPERF_SSH_JOBS=$IPERF_SSH_JOBS
     IPERF_TOTAL_TIME=$IPERF_TOTAL_TIME
     IPERF_HOST_FLOWS=$IPERF_HOST_FLOWS
-    IPERF_BANDWIDTH=${IPERF_BANDWIDTH:-}   # iperf2 -b (per-flow rate cap)
+    IPERF_BANDWIDTH=${IPERF_BANDWIDTH:-}   # iperf2 -b (per-stream cap; 1000m = 1000 Mb/s)
     IPERF_LENGTH=${IPERF_LENGTH:-}         # iperf2 -l (TCP read/write buffer)
     IPERF_WINDOW=${IPERF_WINDOW:-}         # iperf2 -w (TCP window / socket buffer)
     IPERF_MSS=${IPERF_MSS:-}               # iperf2 -M (TCP MSS)
@@ -3963,18 +3970,28 @@ if run_label and any(c in BAD_IN_FIELD for c in run_label):
 run_tag = run_label or run_id
 
 
+# iperf2 reads a rate suffix by its case, for -b as for every size it takes
+# ("1k = 1000, 1K = 1024, 1m = 1,000,000 and 1M = 1,048,576", iperf --help):
+# lowercase is decimal, UPPERCASE is binary. So `-b 1000M` sends 1048.576
+# Mb/s, not 1000 -- and scoring the run against 1000 would read every
+# direction ~105% of what was asked for.
+RATE_SCALE = {"k": 1e3, "m": 1e6, "g": 1e9,
+              "K": 2.0 ** 10, "M": 2.0 ** 20, "G": 2.0 ** 30}
+
+
 def target_mbps(spec):
-    """iperf2's -b rate as Mb/s: 1G -> 1000, 100M -> 100, plain bits/s scaled."""
+    """iperf2's -b rate as decimal Mb/s, read the way iperf2 reads it:
+    1000m -> 1000, 1g -> 1000, but 1000M -> 1048.576 and 1G -> 1073.74;
+    a bare number is bits/s. None for anything that is not a plain rate
+    (a pps rate, a mean,stddev pair), which leaves iperf_achieved out."""
     text = spec.strip()
     if not text:
         return None
-    scale = 1.0
-    if text[-1:] in ("k", "K"):
-        scale, text = 1e3, text[:-1]
-    elif text[-1:] in ("m", "M"):
-        scale, text = 1e6, text[:-1]
-    elif text[-1:] in ("g", "G"):
-        scale, text = 1e9, text[:-1]
+    scale = RATE_SCALE.get(text[-1:])
+    if scale is not None:
+        text = text[:-1]
+    else:
+        scale = 1.0
     try:
         return float(text) * scale / 1e6
     except ValueError:
@@ -4221,8 +4238,14 @@ for row in rows:
         emit("line_util", row["source"],
              trim(row["mbps"] / line_rate * 100.0), extras[:1])
     if target_rate:
+        # -b caps each of a test's -P streams, and a row is the test's SUM,
+        # so what iperf2 was asked to send is the rate times the streams.
+        try:
+            streams = max(int(row["streams"]), 1)
+        except ValueError:
+            streams = 1
         emit("achieved", row["source"],
-             trim(row["mbps"] / target_rate * 100.0), extras[:1])
+             trim(row["mbps"] / (target_rate * streams) * 100.0), extras[:1])
 
 # Asymmetry: how far apart a pair's two directions are, as a percentage of the
 # faster one. A clean link is a few percent; a duplex mismatch or a congested
@@ -4448,8 +4471,10 @@ def header_lines():
         lines.append("# window: the last %ds of the run (%d earlier test(s) "
                      "left out)" % (window, windowed))
     if target_rate:
-        lines.append("# -b target %s (%g Mb/s per flow): iperf_achieved is "
-                     "measured against it" % (bandwidth, target_rate))
+        lines.append("# -b target %s = %g Mb/s per stream (iperf2 reads "
+                     "k/m/g as 10^3/10^6/10^9 and K/M/G as 2^10/2^20/2^30): "
+                     "iperf_achieved is measured against it times each "
+                     "test's streams" % (bandwidth, target_rate))
     if line_rate:
         lines.append("# line rate %g Mb/s: throughput overlays are scaled "
                      "absolutely and iperf_line_util is included"

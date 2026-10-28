@@ -266,7 +266,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_SSH_JOBS` | `--ssh-jobs`, `-j` | 4×cores, capped at 32 | max concurrent SSH/SCP fan-out (capped concurrency) |
 | `IPERF_TOTAL_TIME` | `--total-time` | `300` | rolling mode wall-time (seconds) |
 | `IPERF_HOST_FLOWS` | `--host-flows` | `1` | concurrent iperf processes per directed edge (parallel/sequential) or per-host concurrency cap (rolling) |
-| `IPERF_BANDWIDTH` | `--bandwidth`, `-b` | *(unset)* | cap per-flow target rate, e.g. `100M`, `1G` (iperf2 `-b`) |
+| `IPERF_BANDWIDTH` | `--bandwidth`, `-b` | *(unset)* | cap each stream's target rate (iperf2 `-b`), e.g. `100m`, `1g` — lowercase for Mb/s and Gb/s; see **Rate units** below |
 | `IPERF_LENGTH` | `--length`, `-l` | *(unset)* | TCP read/write buffer size, e.g. `128K` (iperf2 `-l`) |
 | `IPERF_WINDOW` | `--window`, `-w` | *(unset)* | TCP window / socket buffer (iperf2 `-w`) |
 | `IPERF_MSS` | `--mss`, `-M` | *(unset)* | TCP maximum segment size (iperf2 `-M`) |
@@ -283,6 +283,28 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 
 The `--overlay-*` flags and their `IPERF_OVERLAY_*` variables are listed with
 the overlays they control, under **Datacenter layout overlays**.
+
+#### Rate units: write `-b` in lowercase
+
+iperf2 reads a rate suffix by its **case** — `iperf --help` puts it as "1k =
+1000, 1K = 1024, 1m = 1,000,000 and 1M = 1,048,576" — and `-b` is no
+exception. Lowercase `k`/`m`/`g` are decimal (10^3/10^6/10^9 bit/s), the units
+every throughput figure here is reported in; UPPERCASE `K`/`M`/`G` are binary
+(2^10/2^20/2^30):
+
+| You write | iperf2 sends, per stream |
+|---|---|
+| `--bandwidth 1000m` (plan `bandwidth=1000m`) | 1000 Mb/s |
+| `--bandwidth 1000M` (plan `bandwidth=1000M`) | 1048.576 Mb/s — 4.9% more |
+| `--bandwidth 1g` | 1000 Mb/s |
+| `--bandwidth 1G` | 1073.74 Mb/s — 7.4% more |
+
+So for "1000 Mb/s", write `1000m`. The value is passed to iperf2 exactly as
+written either way; the orchestrator never rewrites it. Where it does read the
+rate itself — `iperf_achieved` in `export-overlay` — it reads it the way iperf2
+does, so a run asked for `1000M` is scored against the 1048.576 Mb/s iperf2
+actually aimed at. `-b` caps each of a test's `--streams` separately, so a
+test with `-P 4 -b 1000m` was asked for 4000 Mb/s in all.
 
 #### `--bind` and `--server-bind`: testing a separate data-plane NIC
 
@@ -529,7 +551,7 @@ http://localhost:8000/?layout=floor.dc&results=iperf_overlay.tsv
 | `iperf_mbps_duplex` | host | everything that host carried at once, both directions |
 | `iperf_gbytes` | host | total data carried; bytes add over time, so this is exact in every mode |
 | `iperf_line_util` | direction | throughput as a % of the NIC's line rate (with `--overlay-line-rate`) |
-| `iperf_achieved` | direction | throughput as a % of the `-b` rate the run asked for |
+| `iperf_achieved` | direction | throughput as a % of what `-b` asked iperf2 to send: the rate read by iperf2's own suffix rule (`1000M` is 1048.576 Mb/s) times the test's streams |
 | `iperf_rel_median` | direction | that direction against the run's own median, in % |
 | `iperf_asymmetry` | pair | the gap between a pair's two directions, in % of the faster one |
 | `iperf_status` | direction | `OK`, `FAIL` (with the status, error text and log to open), or `NO-DATA` |
