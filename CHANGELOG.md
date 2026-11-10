@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-11-10
+
+### Changed
+
+- **Every change moves the version** (shared_tools ticket BN-002). Each pull
+  request into `main` now carries its own version bump, in
+  `pyproject.toml`, `iperf_orchestrator/__init__.py` and
+  `iperf_orchestrator/iperf_orchestrator.sh`, and its own numbered, dated
+  section at the top of this file. `tests/check_version.sh` fails if those
+  disagree, and a new **version** job in CI fails a pull request whose
+  version is not greater than its base branch's. `PUBLISHING.md` no longer
+  leaves the bump for release time: publishing to PyPI stays a separate step,
+  taken by a person. `CLAUDE.md` is new and says the same. Nothing the tool
+  does changes.
+- **CI's `test` job runs on `ubuntu-24.04`**, not `ubuntu-latest`: that
+  became 26.04 in November 2026, and `setup-python` has no Python 3.9 for it.
+
 ## [2.6.1] - 2026-10-27
 
 ### Fixed

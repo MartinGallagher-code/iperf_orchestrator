@@ -76,7 +76,7 @@ test_version_matches_pyproject() {
 test_package_version_matches_pyproject() {
     # The version lives in three places: pyproject.toml, the script's
     # ORCH_VERSION (checked above through --version), and __init__.py,
-    # which the docs site scrapes for its title. A release that bumps two
+    # which the docs site scrapes for its title. A pull request that bumps two
     # of them ships a third that lies.
     local pkg_ver init_ver
     pkg_ver=$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$REPO_ROOT/pyproject.toml" | head -n1)

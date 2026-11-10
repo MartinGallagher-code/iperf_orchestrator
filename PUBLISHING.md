@@ -16,17 +16,39 @@ see `pyproject.toml` for the metadata.
   for the PEP 639 license metadata), `build`, and `twine` all require 3.9+.
   The wheel they produce is `py3`-generic and installs fine on 3.6.
 
+## The version moves in every pull request
+
+Every change moves the version, however small: code, tests, docs or CI,
+Dependabot's pull requests included. The bump belongs to the pull request,
+not to a release. In the same pull request:
+
+- **Raise the version** in all three places it is written. Follow
+  [SemVer](https://semver.org/): patch for fixes, docs, tests and CI; minor
+  for anything new a user can use; major only when something that worked
+  stops working the way it did.
+  - `pyproject.toml` (`[project].version`)
+  - `iperf_orchestrator/__init__.py` (`__version__`, which the docs site
+    scrapes for its title)
+  - `iperf_orchestrator/iperf_orchestrator.sh` (`ORCH_VERSION`, which
+    `--version` prints)
+- **Add a `## [X.Y.Z] - YYYY-MM-DD` section** for it at the top of
+  `CHANGELOG.md`, never an "Unreleased" one.
+
+`tests/check_version.sh` fails if the three disagree or the changelog does
+not open with that version, and `bash tests/check_version.sh origin/main`
+also fails unless the version is greater than `main`'s. CI's **version** job
+runs it on every pull request and every push to `main`.
+`tests/test_help_and_dispatch.sh` checks the three agree as well.
+
+Publishing is a separate step, and a person's call. A number that is never
+published is fine; a change with no number is not.
+
 ## Cut a release
 
-1. **Bump the version** in all three places it is written, and add a matching
-   entry to `CHANGELOG.md`. Follow [SemVer](https://semver.org/).
-   - `pyproject.toml` (`[project].version`)
-   - `iperf_orchestrator/__init__.py` (`__version__`, which the docs site
-     scrapes for its title)
-   - `iperf_orchestrator/iperf_orchestrator.sh` (`ORCH_VERSION`, which
-     `--version` prints)
+A release publishes a version that is already on `main`; it never bumps one.
 
-   `tests/test_help_and_dispatch.sh` fails if any of the three disagree.
+1. **Check out the commit to publish.** `bash tests/check_version.sh` prints
+   its version, which is the one that will reach PyPI.
 
 2. **Build the distributions** (sdist + wheel) into `dist/`:
    ```bash
@@ -73,10 +95,11 @@ API token is stored in the repo. One-time setup:
    - Environment name: `pypi`
 2. In the GitHub repo, create an environment named `pypi` (Settings →
    Environments) if you want approval gates.
-3. Push a tag and publish a Release (e.g. `v1.0.0`). The workflow builds,
-   runs `twine check`, and publishes to PyPI.
+3. Push a tag for the version on `main` and publish a Release (e.g.
+   `v1.0.0`). The workflow builds, runs `twine check`, and publishes to PyPI.
 
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs the bash test suite (`tests/run_tests.sh`) on
-every push and pull request to `main`.
+every push and pull request to `main`, and its **version** job runs
+`tests/check_version.sh` (above).
