@@ -39,6 +39,21 @@ jobs:
       - name: Run bash test suite
         run: ./tests/run_tests.sh
 
+      # The same suite again, with every fake host's remote commands really
+      # run (install_sandbox_ssh in tests/test_helper.bash), so a test that
+      # only reads a command's text also exercises what the command does.
+      # Once is enough: the sandbox exercises bash, not Python.
+      - name: Run bash test suite on the sandbox ssh
+        if: matrix.python-version == '3.13'
+        run: ./tests/run_tests.sh --sandbox
+
+      # The hostile-input tests again under bash 4.2's rules (CentOS 7):
+      # quoting and array subscripts behave differently there. The Python
+      # 3.6 job's image covers bash 5.1 for real.
+      - name: Run the adversarial tests under bash 4.2 rules
+        if: matrix.python-version == '3.13'
+        run: BASH_COMPAT=42 bash tests/test_adversarial.sh
+
   # Guards the `requires-python = ">=3.6"` floor in pyproject.toml. The
   # analysis steps live in heredocs inside iperf_orchestrator.sh, so they get
   # extracted before scanning -- see tests/check_python_compat.sh.

@@ -79,16 +79,19 @@ test_remote_dir_propagates_to_generated_scripts() {
     install_fake_ssh
     write_server_list a b >/dev/null
     : > "$FAKE_SSH_LOG"
-    PATH="$FAKE_BIN:$PATH" run_orch --remote-dir=/var/myremote --run-id myrun create-scripts >/dev/null
-    PATH="$FAKE_BIN:$PATH" run_orch --remote-dir=/var/myremote --run-id myrun distribute-scripts >/dev/null
-    grep -q "mkdir -p '/var/myremote'" "$FAKE_SSH_LOG" || {
-        echo "expected mkdir -p '/var/myremote' on remote" >&2
+    # Inside the test's temp dir, so the sandbox ssh (run_tests.sh
+    # --sandbox) can really create it.
+    local rd="$TEST_TMPDIR/var/myremote"
+    PATH="$FAKE_BIN:$PATH" run_orch --remote-dir="$rd" --run-id myrun create-scripts >/dev/null
+    PATH="$FAKE_BIN:$PATH" run_orch --remote-dir="$rd" --run-id myrun distribute-scripts >/dev/null
+    grep -qF "mkdir -p '$rd'" "$FAKE_SSH_LOG" || {
+        echo "expected mkdir -p '$rd' on remote" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }
     grep -E '^scp' "$FAKE_SSH_LOG" | awk -F'\t' '{print $3}' \
-        | grep -q '/var/myremote/run_iperf_a_myrun.sh' || {
-        echo "expected scp dst at /var/myremote/run_iperf_a_myrun.sh" >&2
+        | grep -qF "$rd/run_iperf_a_myrun.sh" || {
+        echo "expected scp dst at $rd/run_iperf_a_myrun.sh" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }
