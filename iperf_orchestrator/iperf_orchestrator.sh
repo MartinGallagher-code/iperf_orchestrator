@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.6.3"
+ORCH_VERSION="2.6.4"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -444,7 +444,60 @@ _iperf_extra_args() {
     [ "$IPERF_NO_NAGLE" = "1" ] && parts+=("-N")
     printf '%s' "${parts[*]}"
 }
+
+#------------------------------------------------------------------------------
+# Quoting for the remote shell
+#
+# Every value that is pasted into a command a host runs -- an ssh_run
+# snippet or a generated run script -- goes through one of these, so it
+# reaches the host as the literal value it is, whatever it holds: a quote,
+# ';', '$(...)', a backtick, a glob, a newline. Nothing is refused here,
+# and a value made only of ordinary characters is written exactly as
+# before, so the generated text does not change for it. POSIX single
+# quotes (each ' becomes '\''), not bash's printf %q, because a host's
+# login shell may be plain sh.
+#
+#   _shq  VALUE   a whole quoted word:          'a b'
+#   _sqin VALUE   for inside '...' already:     a b, with ' as '\''
+#   _dqin VALUE   for inside "..." already: as is when nothing in it is
+#                 special there; otherwise "'...'" (close, quote, reopen)
+#   _bare VALUE   where a value used to stand unquoted: as is when it is
+#                 only [A-Za-z0-9._/:,+=@%^-] characters; else _shq
+#   _cmt  VALUE   for a '#' comment line: newlines become spaces
+#
+# _dqin_to VAR VALUE is _dqin into a variable, without a subshell, for
+# the loops that run once per pair of hosts (N^2 at fleet scale).
+#------------------------------------------------------------------------------
+_sqin() { printf '%s' "${1//\'/\'\\\'\'}"; }
+_shq()  { printf "'%s'" "$(_sqin "$1")"; }
+_dqin_to() {
+    case "$2" in
+        *[\"\$\`\\]*|*$'\n'*|*$'\r'*) printf -v "$1" "\"'%s'\"" "${2//\'/\'\\\'\'}" ;;
+        *) printf -v "$1" '%s' "$2" ;;
+    esac
+}
+_dqin() { local _dq; _dqin_to _dq "$1"; printf '%s' "$_dq"; }
+_bare() {
+    case "$1" in
+        ''|*[!A-Za-z0-9._/:,+=@%^-]*) _shq "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+_cmt()  { local s="${1//$'\n'/ }"; printf '%s' "${s//$'\r'/ }"; }
+
 IPERF_EXTRA_ARGS=$(_iperf_extra_args)
+# The same arguments for a host's shell: split into words on whitespace
+# exactly as the unquoted expansion always did (so '-b "1g -N"' still
+# means two words), but each word _bare-quoted, so a ';' or '$(...)'
+# inside a value stays part of the value instead of running on the host.
+_iperf_extra_args_q() {
+    local -a words=()
+    local w out=""
+    read -r -d '' -a words <<< "$IPERF_EXTRA_ARGS" || true
+    for w in ${words[@]+"${words[@]}"}; do out+="$(_bare "$w") "; done
+    printf '%s' "${out% }"
+}
+IPERF_EXTRA_ARGS_Q=$(_iperf_extra_args_q)
 
 # Run ID + results directory.
 #
@@ -668,7 +721,42 @@ _validate_server_list() {
 
 #------------------------------------------------------------------------------
 # SSH wrappers
+#
+# The destination always follows `--`, so an --ssh-user (or a plan's
+# ssh_user=) that starts with '-' is a user name ssh refuses, never an
+# option such as -oProxyCommand=... that would run on THIS machine.
+#
+# IPv6 literals: ssh wants the bare address (it does not strip brackets,
+# so user@[fe80::1] fails to resolve), while scp splits user@host:path at
+# the first colon unless the address is in brackets (user@2001:db8::1:/p
+# goes to host "2001"). _ssh_host and _scp_host give each tool its form,
+# so a server list may use either.
 #------------------------------------------------------------------------------
+_ssh_host() {
+    case "$1" in
+        \[*\]) local h="${1#\[}"; printf '%s' "${h%\]}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+_scp_host() {
+    case "$1" in
+        \[*\]) printf '%s' "$1" ;;
+        *:*) printf '[%s]' "$1" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# A remote path scp may be given as it is: nothing in it means anything
+# to a shell. scp before OpenSSH 9.0 (and scp -O) hands the remote path to
+# the remote shell, where a '$(...)' or ';' in --remote-dir or --run-id
+# would run; such a path goes over ssh + cat instead, quoted.
+_scp_plain_path() {
+    case "$1" in
+        ''|*[!A-Za-z0-9._/:,+=@%^~-]*) return 1 ;;
+    esac
+    return 0
+}
+
 ssh_run() {
     # ssh_run <host> <command...>
     local host="$1"; shift
@@ -678,7 +766,7 @@ ssh_run() {
         return 0
     fi
     # shellcheck disable=SC2086
-    ssh $SSH_BATCH_OPTS "$SSH_USER@$host" "$@"
+    ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "$@"
 }
 
 scp_to() {
@@ -689,8 +777,13 @@ scp_to() {
         echo "DRY-RUN scp $src -> $SSH_USER@$host:$dst"
         return 0
     fi
+    if ! _scp_plain_path "$dst"; then
+        # shellcheck disable=SC2086
+        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "cat > $(_shq "$dst")" < "$src"
+        return
+    fi
     # shellcheck disable=SC2086
-    scp $SSH_BATCH_OPTS "$src" "$SSH_USER@$host:$dst" >/dev/null
+    scp $SSH_BATCH_OPTS -- "$src" "$SSH_USER@$(_scp_host "$host"):$dst" >/dev/null
 }
 
 scp_from() {
@@ -701,8 +794,14 @@ scp_from() {
         echo "DRY-RUN scp $SSH_USER@$host:$src -> $dst"
         return 0
     fi
+    if ! _scp_plain_path "$src"; then
+        # shellcheck disable=SC2086
+        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "cat $(_shq "$src")" > "$dst" 2>/dev/null \
+            || { rm -f -- "$dst"; return 1; }
+        return 0
+    fi
     # shellcheck disable=SC2086
-    scp $SSH_BATCH_OPTS "$SSH_USER@$host:$src" "$dst" >/dev/null 2>&1
+    scp $SSH_BATCH_OPTS -- "$SSH_USER@$(_scp_host "$host"):$src" "$dst" >/dev/null 2>&1
 }
 
 #------------------------------------------------------------------------------
@@ -757,7 +856,7 @@ parallel_hosts() {
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/iperf-orch-XXXXXX") || die "mktemp failed"
 
-    local i running=0
+    local i running=0 pids=()
     for ((i=0; i<n; i++)); do
         if [ "$running" -ge "$jobs" ]; then
             wait -n 2>/dev/null || wait
@@ -767,9 +866,12 @@ parallel_hosts() {
             "$fn" "${hosts[$i]}" > "$tmpdir/$i.out" 2>&1
             echo $? > "$tmpdir/$i.rc"
         ) &
+        pids+=("$!")
         running=$((running + 1))
     done
-    wait
+    # Only this fan-out's workers: a bare `wait` would also wait for any
+    # other background job of the caller's, such as a test round's ssh.
+    wait "${pids[@]}"
 
     for ((i=0; i<n; i++)); do
         [ -s "$tmpdir/$i.out" ] && cat "$tmpdir/$i.out"
@@ -828,7 +930,7 @@ _resolve_peer_bind_ips() {
         fi
         (
             ssh_run "${hosts[$i]}" "
-                BIND_RAW='$pattern'
+                BIND_RAW='$(_sqin "$pattern")'
                 _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
                 [ -n \"\$_line\" ] || exit 1
                 echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1
@@ -958,6 +1060,7 @@ THE SIX COMMANDS (each reads the plan file, so no flags need repeating):
                     throughput summary and what to do next
     stop            Stop the iperf2 daemons (test logs stay on the hosts)
     clean           stop + delete the remote work dir everywhere, verified
+                    (rm -rf of --remote-dir as given; it does not ask)
 
 AND WHEN YOU WANT THEM:
     run [MODE] [--for N]   start + summarize + stop + clean in one shot
@@ -1017,7 +1120,8 @@ USAGE:
 
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --plan FILE                Plan file written by 'gen' (default: \$IPERF_PLAN
-                               env, else ./$PLAN_FILE_DEFAULT when it exists).
+                               env, else ./$PLAN_FILE_DEFAULT whenever it exists --
+                               loaded silently, by every command).
                                Holds the host list plus every setting below;
                                precedence: CLI flag > env var > plan > default.
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
@@ -1072,7 +1176,8 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
                                Filenames embed <host>_<run-id>, so hosts can share
-                               it, but cleanup/clean/all/run rm -rf the whole dir.
+                               it, but cleanup/clean/all/run rm -rf the whole dir,
+                               exactly as given: nothing checks what it is.
     --python PATH              Python interpreter (default $PYTHON_BIN)
     --overlay                  Also write the datacenter-layout overlay during
                                'process' (so 'summarize', 'run' and 'all' too).
@@ -1130,8 +1235,9 @@ PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
                            every SECONDS until ctrl-c (like mx status).
     summarize              process + pivot + results-summary (with hints).
     stop                   stop-servers, plus what-to-do-next breadcrumbs.
-    clean                  stop-servers + remove \$REMOTE_DIR on every host,
-                           then VERIFY nothing is left (no --yes needed).
+    clean                  stop-servers + rm -rf \$REMOTE_DIR, exactly as given,
+                           on every host, then VERIFY nothing is left (no --yes
+                           needed, and nothing checks what the directory is).
     run [MODE] [--for N] [--keep-going]
                            all + results-summary. --for N pins total-time
                            (rolling mode) or per-test duration (others).
@@ -1278,9 +1384,9 @@ _worker_run_progress() {
     local safe; safe=$(_sanitize_host "$host")
     local out
     if ! out=$(ssh_run "$host" "
-            cd '$REMOTE_DIR' 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
-            st='iperf_run_${safe}_${run}.status'
-            logs=\$(ls iperf_test_${safe}_to_*_${run}.log 2>/dev/null | wc -l | tr -d ' ')
+            cd '$(_sqin "$REMOTE_DIR")' 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
+            st='$(_sqin "iperf_run_${safe}_${run}.status")'
+            logs=\$(ls iperf_test_$(_bare "$safe")_to_*_$(_bare "$run").log 2>/dev/null | wc -l | tr -d ' ')
             if [ -f \"\$st\" ]; then
                 printf '%s|%s\n' \"\$logs\" \"\$(tail -n 1 \"\$st\")\"
             elif [ \"\$logs\" -gt 0 ]; then
@@ -1461,15 +1567,15 @@ _worker_start_server() {
     # of silently falling back to a 0.0.0.0 listener.
     ssh_run "$host" "
         set -e
-        mkdir -p '$REMOTE_DIR'
-        BIND_RAW='$IPERF_SERVER_BIND'
+        mkdir -p '$(_sqin "$REMOTE_DIR")'
+        BIND_RAW='$(_sqin "$IPERF_SERVER_BIND")'
         BIND_FLAG=''
         if [ -n \"\$BIND_RAW\" ]; then
             _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
-            [ -n \"\$_line\" ] || { echo \"ERROR: $host: --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
+            [ -n \"\$_line\" ] || { echo \"ERROR: $(_dqin "$host"): --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
             _ip=\$(echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1)
             BIND_FLAG=\"-B \$_ip\"
-            echo \"[server-bind] $host: '\$BIND_RAW' -> ip=\$_ip\"
+            echo \"[server-bind] $(_dqin "$host"): '\$BIND_RAW' -> ip=\$_ip\"
         fi
         iperf -p $IPERF_PORT \$BIND_FLAG -s -D
     "
@@ -1549,23 +1655,25 @@ cmd_create_scripts() {
 
         target_counts+=("${#targets[@]}")
 
-        local targets_str="" conn_ips_str=""
+        local targets_str="" conn_ips_str="" qt qc
         for t in "${targets[@]}"; do
-            targets_str+="\"$t\" "
+            _dqin_to qt "$t"
+            targets_str+="\"$qt\" "
             # Parallel array: conn IP to actually feed to iperf -c. When
             # --bind isn't set (or PEER_BIND_IPS is empty) this stays
             # empty per slot and the generated script falls back to the
             # login IP. We resolved every host in _resolve_peer_bind_ips
             # so missing entries here mean --bind wasn't set.
-            conn_ips_str+="\"${PEER_BIND_IPS[$t]:-}\" "
+            _dqin_to qc "${PEER_BIND_IPS[$t]:-}"
+            conn_ips_str+="\"$qc\" "
         done
 
-        cat > "$script" <<EOF
+        cat > "$script" <<EOF || die "create-scripts: could not write $script"
 #!/usr/bin/env bash
 # Auto-generated by iperf-orchestrator. Do not edit by hand.
-# Source host: $src
-# Run ID:      $RUN_ID
-# Targets:     ${targets[*]}
+# Source host: $(_cmt "$src")
+# Run ID:      $(_cmt "$RUN_ID")
+# Targets:     $(_cmt "${targets[*]}")
 #
 # Runs one unidirectional iperf2 against each target. One iperf -c per
 # directed (src -> dst) edge, producing a log with exactly one
@@ -1578,13 +1686,13 @@ set -u
 
 START_TIME="\${1:-0}"
 SINGLE_TARGET="\${2:-}"
-SOURCE="$src"
-RUN_ID="$RUN_ID"
+SOURCE="$(_dqin "$src")"
+RUN_ID="$(_dqin "$RUN_ID")"
 PORT=$IPERF_PORT
 DURATION=$IPERF_DURATION
 TEST_TIMEOUT=${IPERF_TEST_TIMEOUT:-$((IPERF_DURATION + 30))}
 PARALLEL=$IPERF_STREAMS
-BIND_RAW="$IPERF_BIND"
+BIND_RAW="$(_dqin "$IPERF_BIND")"
 TARGETS=( $targets_str )
 # Parallel to TARGETS: the data-plane IP to feed to iperf -c. Empty
 # slots fall back to the matching TARGETS entry (the SSH/login IP), so
@@ -1729,9 +1837,9 @@ if [ \${#run_targets[@]} -gt 0 ]; then
                 # Build the exact iperf invocation as a single string and
                 # echo it into the per-test log BEFORE running. Anyone
                 # debugging a failure can copy-paste this directly.
-                cmd="\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p \$PORT -t \$DURATION -P \$PARALLEL $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C"
+                cmd="\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p \$PORT -t \$DURATION -P \$PARALLEL $(_dqin "$IPERF_EXTRA_ARGS") \$BIND_ARG -e -y C"
                 echo "# cmd: \$cmd" >> "\$out"
-                \$TIMEOUT_CMD iperf -c "\$conn_ip" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS \$BIND_ARG -e -y C >> "\$out" 2>&1
+                \$TIMEOUT_CMD iperf -c "\$conn_ip" -p "\$PORT" -t "\$DURATION" -P "\$PARALLEL" $IPERF_EXTRA_ARGS_Q \$BIND_ARG -e -y C >> "\$out" 2>&1
                 rc=\$?
                 # iperf2 sometimes returns 0 even when the connection failed
                 # (it writes "connect failed" to stdout and exits cleanly).
@@ -1769,7 +1877,7 @@ fi
 
 echo "\$(date '+%F %T') DONE" >> "\$STATUS_FILE"
 EOF
-        chmod +x "$script"
+        chmod +x "$script" || die "create-scripts: could not make $script executable"
         vlog "  created $script (targets: ${#targets[@]})"
     done
 
@@ -1810,11 +1918,14 @@ _worker_distribute_script() {
         return 1
     fi
     # Only delete files belonging to this run-id so prior runs sharing
-    # the same $REMOTE_DIR aren't collateral damage.
-    local clean_glob="'$REMOTE_DIR'/iperf_test_*_${RUN_ID}.log '$REMOTE_DIR'/iperf_run_*_${RUN_ID}.status"
-    if ssh_run "$host" "mkdir -p '$REMOTE_DIR' && rm -f $clean_glob" \
+    # the same $REMOTE_DIR aren't collateral damage. The run id is quoted
+    # as well: a '*' or a space in it must not widen what rm matches.
+    local rd rid
+    rd=$(_sqin "$REMOTE_DIR"); rid=$(_bare "$RUN_ID")
+    local clean_glob="'$rd'/iperf_test_*_$rid.log '$rd'/iperf_run_*_$rid.status"
+    if ssh_run "$host" "mkdir -p '$rd' && rm -f $clean_glob" \
        && scp_to "$script" "$host" "$REMOTE_DIR/$remote_name" \
-       && ssh_run "$host" "chmod +x '$REMOTE_DIR/$remote_name'"; then
+       && ssh_run "$host" "chmod +x '$(_sqin "$REMOTE_DIR/$remote_name")'"; then
         vlog "  OK: $host"
     else
         warn "  FAILED: $host"
@@ -1843,6 +1954,16 @@ cmd_distribute_scripts() {
 _orchestrator_signal_cleanup() {
     trap - INT TERM
     warn "interrupted; attempting to stop iperf servers on all hosts"
+    # First end this run's own ssh jobs (a test round still in flight).
+    # A Ctrl-C at a terminal reaches them anyway, but a SIGTERM sent to
+    # this process alone does not: they would run on until the round
+    # ended, and the stop below waited for them. Each job is a subshell
+    # running ssh, so take its children (pkill -P) and then the job.
+    local j
+    for j in $(jobs -p); do
+        command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$j" 2>/dev/null
+        kill -TERM "$j" 2>/dev/null
+    done
     # Best-effort: don't let a failure here mask the original signal.
     cmd_stop_servers || true
     exit 130
@@ -1919,57 +2040,64 @@ _run_rolling() {
     while IFS= read -r h; do [ -n "$h" ] && hosts+=("$h"); done < <(read_servers)
     local pids=() src
     for src in "${hosts[@]}"; do
-        local peers="" peer_conn_ips_decl="declare -A PEER_CONN_IPS=( " p
+        local peers="" peer_conn_ips_decl="declare -A PEER_CONN_IPS=( " p qp qc
         for p in "${hosts[@]}"; do
             [ "$p" = "$src" ] && continue
             pair_enabled "$src" "$p" || continue
-            peers+="\"$p\" "
+            _dqin_to qp "$p"
+            peers+="\"$qp\" "
             # Embed an associative-array entry per peer so the rolling
             # loop can look up the data-plane IP by name. Empty value
             # when --bind wasn't set; the loop falls back to the login IP.
-            peer_conn_ips_decl+="[\"$p\"]=\"${PEER_BIND_IPS[$p]:-}\" "
+            _dqin_to qc "${PEER_BIND_IPS[$p]:-}"
+            peer_conn_ips_decl+="[\"$qp\"]=\"$qc\" "
         done
         peer_conn_ips_decl+=")"
         local src_safe; src_safe=$(_sanitize_host "$src")
+        # The snippet below is one double-quoted string; every value in it
+        # goes in through the quoting helpers (see _shq).
+        local q_src q_safe q_rid rd
+        q_src=$(_dqin "$src"); q_safe=$(_dqin "$src_safe"); q_rid=$(_dqin "$RUN_ID")
+        rd=$(_sqin "$REMOTE_DIR")
         local hostlog="$LOGS_DIR/rolling_${src_safe}.log"
         ssh_run "$src" "
             set -u
-            mkdir -p '$REMOTE_DIR'
-            cd '$REMOTE_DIR'
+            mkdir -p '$rd'
+            cd '$rd'
             # Background CPU sampler running for the whole rolling window
             # (mpstat if present, /proc/stat fallback otherwise). Same
             # filename + header format as the parallel/sequential modes,
             # so parse-cpu and make-heatmap consume it unchanged.
             {
-                echo \"# host=$src\"
+                echo \"# host=$q_src\"
                 if command -v mpstat >/dev/null 2>&1; then
                     LC_ALL=C S_TIME_FORMAT=ISO mpstat -P ALL 1 $IPERF_TOTAL_TIME 2>&1
                 else
-                    echo \"# fallback=proc_stat host=$src samples=$IPERF_TOTAL_TIME\"
+                    echo \"# fallback=proc_stat host=$q_src samples=$IPERF_TOTAL_TIME\"
                     for _ in \$(seq 1 $IPERF_TOTAL_TIME); do
                         date '+%F %T'
                         head -n1 /proc/stat
                         sleep 1
                     done
                 fi
-            } > \"cpu_${src_safe}_$RUN_ID.log\" 2>&1 &
+            } > \"cpu_${q_safe}_$q_rid.log\" 2>&1 &
             # Resolve --bind once for this host. The value is a substring
             # matched against 'ip -o -4 addr show'; the first matching
             # line's IPv4 is what we bind to.
-            BIND_RAW=\"$IPERF_BIND\"
+            BIND_RAW=\"$(_dqin "$IPERF_BIND")\"
             BIND_ARG=\"\"
             BIND_IP=\"\"
             BIND_IFACE=\"\"
             if [ -n \"\$BIND_RAW\" ]; then
                 _bind_line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
                 [ -n \"\$_bind_line\" ] || {
-                    echo \"ERROR: $src: no interface matched '\$BIND_RAW'\" >&2
+                    echo \"ERROR: $q_src: no interface matched '\$BIND_RAW'\" >&2
                     exit 1
                 }
                 BIND_IFACE=\$(echo \"\$_bind_line\" | awk '{print \$2}')
                 BIND_IP=\$(echo \"\$_bind_line\"    | awk '{print \$4}' | cut -d/ -f1)
                 BIND_ARG=\"-B \$BIND_IP\"
-                echo \"[bind] $src: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP\"
+                echo \"[bind] $q_src: '\$BIND_RAW' -> iface=\$BIND_IFACE ip=\$BIND_IP\"
             fi
             PEERS=( $peers )
             # Same hard per-test cap as the generated run scripts: a probe
@@ -1987,7 +2115,7 @@ _run_rolling() {
             # window, but skip the probe loop -- an empty PEERS array
             # would divide by zero at target-pick time.
             if [ \${#PEERS[@]} -eq 0 ]; then
-                echo \"[rolling] $src: no enabled outbound pairs; sampling CPU only\"
+                echo \"[rolling] $q_src: no enabled outbound pairs; sampling CPU only\"
                 wait
                 exit 0
             fi
@@ -2020,21 +2148,21 @@ _run_rolling() {
                 target_safe=\$(printf '%s' \"\$target\" | tr ':/[] \\t' '_______')
                 seq=\$((seq + 1))
                 counts[\"\$target\"]=\$((counts[\"\$target\"] + 1))
-                outfile=\"iperf_test_${src_safe}_to_\${target_safe}_\${seq}_$RUN_ID.log\"
+                outfile=\"iperf_test_${q_safe}_to_\${target_safe}_\${seq}_$q_rid.log\"
                 # Stagger launches and run iperf in background so multiple
                 # flows can be in flight at once.
                 (
                     sleep 0.\$((100 + RANDOM % 900))
-                    cmd=\"\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C\"
-                    echo \"# pair_a=$src pair_b=\$target conn_ip=\$conn_ip run_id=$RUN_ID duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
+                    cmd=\"\${TIMEOUT_CMD:+\$TIMEOUT_CMD }iperf -c \$conn_ip -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $(_dqin "$IPERF_EXTRA_ARGS") \$BIND_ARG -y C\"
+                    echo \"# pair_a=$q_src pair_b=\$target conn_ip=\$conn_ip run_id=$q_rid duration=$IPERF_DURATION port=$IPERF_PORT parallel=$IPERF_STREAMS full_duplex=0 bind_iface=\$BIND_IFACE bind_ip=\$BIND_IP test_start=\$(date +%s)\" > \"\$outfile\"
                     echo \"# cmd: \$cmd\" >> \"\$outfile\"
-                    \$TIMEOUT_CMD iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C >> \"\$outfile\" 2>&1
+                    \$TIMEOUT_CMD iperf -c \"\$conn_ip\" -p $IPERF_PORT -t $IPERF_DURATION -P $IPERF_STREAMS $IPERF_EXTRA_ARGS_Q \$BIND_ARG -y C >> \"\$outfile\" 2>&1
                     rc=\$?
                     if [ \"\$rc\" -ne 0 ] || grep -qE 'connect failed|Connection refused|Connection timed out|bind failed|No route to host|read failed|write failed' \"\$outfile\"; then
                         err_tail=\$(grep -E 'connect failed|Connection (refused|timed out)|bind failed|No route to host|read failed|write failed' \"\$outfile\" | head -n1)
                         [ -z \"\$err_tail\" ] && err_tail=\"exit_status=\$rc\"
                         echo \"# exit_status: \$rc\" >> \"\$outfile\"
-                        echo \"[FAIL] $src -> \$target [\$conn_ip] seq=\$seq: \$err_tail\" >&2
+                        echo \"[FAIL] $q_src -> \$target [\$conn_ip] seq=\$seq: \$err_tail\" >&2
                         echo \"       cmd: \$cmd\" >&2
                     fi
                 ) &
@@ -2092,8 +2220,8 @@ _run_one_round() {
         local hostlog="$LOGS_DIR/run_${safe}.log"
         local script="$REMOTE_DIR/run_iperf_${safe}_${RUN_ID}.sh"
         local arg=""
-        [ -n "$target" ] && arg=" '$target'"
-        ssh_run "$src" "'$script' $start_time$arg" > "$hostlog" 2>&1 &
+        [ -n "$target" ] && arg=" '$(_sqin "$target")'"
+        ssh_run "$src" "'$(_sqin "$script")' $start_time$arg" > "$hostlog" 2>&1 &
         pids+=("$!")
     done
     local p
@@ -2111,20 +2239,25 @@ _worker_collect_results() {
 
     # Files to grab are scoped to this RUN_ID so we never accidentally
     # pull files from a concurrent or older run that shares $REMOTE_DIR.
+    # Every value is quoted (see _shq). A tarball left over from an earlier
+    # collect is removed first, so only one built now can be fetched.
+    local hs rid tr_q
+    hs=$(_sqin "$host_safe"); rid=$(_sqin "$RUN_ID"); tr_q=$(_sqin "$tarball_remote")
     if ! ssh_run "$host" "
-        cd '$REMOTE_DIR' 2>/dev/null || exit 1
-        listfile='_iperf_files_${host_safe}_${RUN_ID}.list'
+        cd '$(_sqin "$REMOTE_DIR")' 2>/dev/null || exit 1
+        rm -f '$tr_q'
+        listfile='_iperf_files_${hs}_${rid}.list'
         {
-            ls iperf_test_*_${RUN_ID}.log 2>/dev/null || true
-            ls 'iperf_server_${host_safe}_${RUN_ID}.log' 2>/dev/null || true
-            ls 'iperf_run_${host_safe}_${RUN_ID}.status' 2>/dev/null || true
-            ls 'cpu_${host_safe}_${RUN_ID}.log' 2>/dev/null || true
+            ls iperf_test_*_$(_bare "$RUN_ID").log 2>/dev/null || true
+            ls 'iperf_server_${hs}_${rid}.log' 2>/dev/null || true
+            ls 'iperf_run_${hs}_${rid}.status' 2>/dev/null || true
+            ls 'cpu_${hs}_${rid}.log' 2>/dev/null || true
         } > \"\$listfile\"
         if [ -s \"\$listfile\" ]; then
-            tar -czf '$tarball_remote' -T \"\$listfile\"
+            tar -czf '$tr_q' -T \"\$listfile\"
         fi
         rm -f \"\$listfile\"
-        test -f '$tarball_remote'
+        test -f '$tr_q'
     " 2>/dev/null; then
         warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
         return 0  # empty is normal for the lex-last host; not a failure
@@ -2140,8 +2273,31 @@ _worker_collect_results() {
     # Don't gate on tar's exit code -- it returns 1 on harmless warnings
     # (e.g. clock skew between hosts producing future-dated timestamps)
     # but the files are still extracted. Surface any tar output verbatim.
-    local tarout
-    tarout=$(tar -xzf "$tarball_local" -C "$RESULTS_DIR" 2>&1)
+    #
+    # The tarball comes from the host, so it is unpacked into a scratch
+    # directory first, and only what a run writes is moved into the
+    # results: regular files named like a test log, server log, status or
+    # cpu file. A symlink (parse-csv would read whatever it points at), a
+    # directory, or a file such as iperf_pivot.txt stays behind.
+    local tarout xdir
+    xdir=$(mktemp -d "$RESULTS_DIR/.extract-XXXXXX") || { warn "  $host: mktemp failed"; return 1; }
+    tarout=$(tar -xzf "$tarball_local" -C "$xdir" 2>&1)
+    local xf xbase skipped=0
+    for xf in "$xdir"/* "$xdir"/.[!.]* "$xdir"/..?*; do
+        [ -e "$xf" ] || [ -L "$xf" ] || continue
+        xbase=${xf##*/}
+        case "$xbase" in
+            iperf_test_*.log|iperf_server_*.log|iperf_run_*.status|cpu_*.log)
+                if [ -f "$xf" ] && [ ! -L "$xf" ]; then
+                    mv -f -- "$xf" "$RESULTS_DIR/$xbase"
+                    continue
+                fi ;;
+        esac
+        skipped=$((skipped + 1))
+    done
+    rm -rf -- "$xdir"
+    [ "$skipped" -eq 0 ] \
+        || warn "  $host: ignored $skipped unexpected tarball member(s); only regular log, status and cpu files are kept"
     if [ -n "$tarout" ]; then
         # tar warnings (e.g. clock skew) are noise but worth keeping at -v.
         vlog "  $host: $client_count client logs + server log + status (tar: $tarout)"
@@ -2149,7 +2305,7 @@ _worker_collect_results() {
         vlog "  $host: $client_count client logs + server log + status"
     fi
     rm -f "$tarball_local"
-    ssh_run "$host" "rm -f '$tarball_remote'" 2>/dev/null || true
+    ssh_run "$host" "rm -f '$(_sqin "$tarball_remote")'" 2>/dev/null || true
 }
 
 cmd_collect_results() {
@@ -2181,7 +2337,7 @@ cmd_stop_servers() {
 #------------------------------------------------------------------------------
 _worker_cleanup() {
     local host="$1"
-    ssh_run "$host" "rm -rf '$REMOTE_DIR'"
+    ssh_run "$host" "rm -rf '$(_sqin "$REMOTE_DIR")'"
 }
 
 cmd_cleanup() {
@@ -4832,7 +4988,8 @@ cmd_stop() {
 # success unless nothing is left.
 _worker_clean_verify() {
     local host="$1"
-    if ssh_run "$host" "rm -rf '$REMOTE_DIR' && [ ! -e '$REMOTE_DIR' ]"; then
+    local rd; rd=$(_sqin "$REMOTE_DIR")
+    if ssh_run "$host" "rm -rf '$rd' && [ ! -e '$rd' ]"; then
         printf '%-30s CLEAN\n' "$host"
     else
         printf '%-30s LEFTOVER (%s still exists or could not be removed)\n' "$host" "$REMOTE_DIR"

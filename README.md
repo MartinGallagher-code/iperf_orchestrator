@@ -87,7 +87,7 @@ workflow):
 | `status` | One line per host: probes, daemons, and live test progress. |
 | `summarize` | Collect results; render CSV, pivot, heatmap; print the summary and what to do next. |
 | `stop` | Stop the daemons (test logs stay on the hosts). |
-| `clean` | Stop, then delete the remote work dir everywhere — verified gone. |
+| `clean` | Stop, then delete the remote work dir everywhere — verified gone. It runs `rm -rf` on whatever `--remote-dir` (or the plan's `remote_dir=`) names, and does not ask first; see **Shared-FS safety**. |
 
 Not sure what to ask for? `./iperf-orchestrator.sh hints` turns a goal into
 the command that gets you there. The classic one-liner still works too:
@@ -218,7 +218,16 @@ preserves any setting you don't override.
 
 Three more keys are read if you add them by hand, though `gen` does not write
 them: `ssh_jobs=`, `start_delay=` and `output=` (the results directory). Values
-cannot contain whitespace. `--test-timeout`, `--single-server`, `--python`,
+cannot contain whitespace.
+
+**When a plan is loaded.** Every command loads `./iperf_plan.conf` from the
+current directory whenever that file exists, without saying so, unless
+`--plan FILE` or `$IPERF_PLAN` names another plan. Its settings then apply
+like flags you typed, `remote_dir=` and `ssh_user=` included. So run
+commands in a directory whose plan you know: `clean` in a directory that
+holds someone else's plan deletes whatever that plan's `remote_dir=` names,
+on that plan's hosts, as that plan's user. `status` prints the plan it
+loaded. `--test-timeout`, `--single-server`, `--python`,
 `--run-id` and the `--overlay-*` flags are per-run choices, not plan
 settings: pass them (or their environment variables) each time.
 
@@ -277,7 +286,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory (see **Shared-FS safety**) |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**) |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 | `SSH_OPTS` | *(env only)* | `-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30` | options passed to every `ssh`/`scp` (`BatchMode=yes` is always added) |
 
@@ -454,7 +463,7 @@ The bar chart annotates each host's bar with peak CPU. Three patterns to watch f
 For each host, one ssh + one scp + one local untar — instead of N-1 individual scp calls. At N=100 that's roughly 300 SSH/SCP operations across the whole pipeline instead of 5,000.
 
 ### Hostname sanitization in filenames
-Server-list entries like `2001:db8::1` or `[fe80::1]` are sanitized when used in filenames (`iperf_test_<src>_to_<dst>_<run-id>.log`, `cpu_<host>_<run-id>.log`, `run_<host>_<run-id>.sh`, the per-host tarballs): colons, slashes, square brackets and whitespace become `_`, so the path is well-formed on every filesystem. The real name travels in each file's header (`# pair_a=…`, `# host=…`) and the parsers read it from there, so the CSV shows hosts exactly as the server list names them, and an IPv6 address no longer produces broken paths or silently dropped logs.
+Server-list entries like `2001:db8::1` or `[fe80::1]` are sanitized when used in filenames (`iperf_test_<src>_to_<dst>_<run-id>.log`, `cpu_<host>_<run-id>.log`, `run_<host>_<run-id>.sh`, the per-host tarballs): colons, slashes, square brackets and whitespace become `_`, so the path is well-formed on every filesystem. The real name travels in each file's header (`# pair_a=…`, `# host=…`) and the parsers read it from there, so the CSV shows hosts exactly as the server list names them, and an IPv6 address no longer produces broken paths or silently dropped logs. Either spelling works for the transfers too: `ssh` is given the bare address (it cannot resolve `[fe80::1]`), and `scp` the bracketed one (it splits `user@2001:db8::1:/path` at the first colon, at host `2001`). Before 2.6.4 a bracketed entry failed at `ssh` and a bare one sent `scp` to the wrong host.
 
 ### Heatmap auto-degradation
 Cell annotations, axis labels, and figure size adapt to N:
@@ -791,6 +800,16 @@ ls results/
 
 **Cleanup is not scoped the same way.** `cleanup`, `clean`, and the last step of `all` and `run` all run `rm -rf "$REMOTE_DIR"` on every host. On a shared filesystem that removes the directory for everyone, including the files of any other run still using it. Give concurrent runs their own `--remote-dir`, or use `start` / `summarize` / `stop` and clean up once every run sharing the directory has finished.
 
+**What exactly is deleted.** The path in `REMOTE_DIR`, as written, with `rm -rf`, as the SSH user — and nothing checks it first. Only `cleanup` asks for `--yes`; `clean`, `all` and `run` do not ask. A `REMOTE_DIR` of `/home/alice`, or any directory the tool did not make, is deleted like any other; `/` itself survives only because GNU `rm` refuses it; and an empty `--remote-dir=` deletes nothing yet `clean` still reports every host clean. Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
+
+**On a host other people use**, the default `/tmp/iperf_orchestrator` is a name anyone can create first. If another user owns that directory (or can write to it), they can replace a run script before it runs, or leave a symlink where `distribute-scripts` writes, and the SSH user's file at the other end of it is overwritten. Use a `--remote-dir` in the SSH user's own home on such hosts.
+
+### What reaches the hosts
+
+Every value the orchestrator puts into a command a host runs — host names, `--remote-dir`, `--run-id`, `--bind` / `--server-bind`, the `-b` / `-l` / `-w` / `-M` values, and the same settings from a plan file — is quoted so it arrives as the literal value it is. A quote, `;`, `$(...)`, a backtick or a newline in one is part of the value, never a second command. (Before 2.6.4 they were pasted in unquoted, and any of those ran on every host.) No value is refused for its characters; a value made only of ordinary characters is sent exactly as before, and an iperf value with spaces in it is still split into words, as it always was. A remote path that holds characters a shell would read (`$`, quotes, spaces, …) is copied over `ssh` + `cat` instead of `scp`, because `scp` before OpenSSH 9.0 hands the remote path to the remote shell.
+
+The SSH destination always comes after `--`, so an `--ssh-user` that starts with `-` cannot be read by `ssh` as an option. `collect-results` keeps only regular files named like a test log, server log, status or CPU file from each host's tarball; anything else in it (a symlink, a directory, a file such as `iperf_pivot.txt`) is left out, with a warning. A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new one is built, so it is never fetched again.
+
 <!-- docs:end -->
 ---
 
@@ -907,7 +926,7 @@ iperf_run_<host>_<run-id>.status
 cpu_<host>_<run-id>.log
 ```
 
-Hostnames are sanitized: `:`, `/`, `[`, `]`, whitespace are replaced with `_` so bracketed-IPv6 names like `[fe80::1]` produce safe filenames. The unsanitized name is preserved inside file headers (`# pair_a=...`, `# host=...`).
+Hostnames are sanitized: `:`, `/`, `[`, `]`, whitespace are replaced with `_` so bracketed-IPv6 names like `[fe80::1]` produce safe filenames. The unsanitized name is preserved inside file headers (`# pair_a=...`, `# host=...`). On the wire, `ssh` gets an IPv6 address bare and `scp` gets it in brackets, whichever way the server list writes it.
 
 <!-- docs:end -->
 ---

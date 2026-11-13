@@ -88,15 +88,18 @@ test_distribute_scripts_dies_when_no_server_list() {
 
 test_distribute_scripts_uses_remote_dir_flag() {
     prep_workflow a b
-    run_with_fakes --remote-dir=/custom/remote distribute-scripts >/dev/null
-    grep -q "mkdir -p '/custom/remote'" "$FAKE_SSH_LOG" || {
+    # Inside the test's temp dir, so the sandbox ssh (run_tests.sh
+    # --sandbox) can really create it.
+    local rd="$TEST_TMPDIR/custom/remote"
+    run_with_fakes --remote-dir="$rd" distribute-scripts >/dev/null
+    grep -qF "mkdir -p '$rd'" "$FAKE_SSH_LOG" || {
         echo "expected --remote-dir to propagate to mkdir target" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }
     grep -E '^scp' "$FAKE_SSH_LOG" | awk -F'\t' '{print $3}' \
-        | grep -qE "/custom/remote/run_iperf_a_${IPERF_RUN_ID}\.sh" || {
-        echo "expected scp dst at /custom/remote/run_iperf_a_${IPERF_RUN_ID}.sh" >&2
+        | grep -qF "$rd/run_iperf_a_${IPERF_RUN_ID}.sh" || {
+        echo "expected scp dst at $rd/run_iperf_a_${IPERF_RUN_ID}.sh" >&2
         return 1
     }
 }
