@@ -443,6 +443,9 @@ test_collect_over_ssh_for_a_path_with_shell_characters() {
 test_scp_from_gets_bare_ipv6_in_brackets() {
     install_fake_ssh
     write_server_list 2001:db8::1 >/dev/null
+    # Something to collect, for when install_fake_ssh is the sandbox
+    # (run_tests.sh --sandbox) and the remote side really runs.
+    mkdir -p "$REMOTE_DIR" && echo x > "$REMOTE_DIR/iperf_test_2001_db8__1_to_h2_$IPERF_RUN_ID.log"
     orch create-scripts >/dev/null
     orch collect-results
     local srcs; srcs=$(awk -F'\t' '$1 == "scp" {print $2}' "$FAKE_SSH_LOG")
