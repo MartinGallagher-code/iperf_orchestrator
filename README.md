@@ -286,7 +286,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**) |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 | `SSH_OPTS` | *(env only)* | `-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30` | options passed to every `ssh`/`scp` (`BatchMode=yes` is always added) |
 
@@ -806,9 +806,9 @@ ls results/
 
 ### What reaches the hosts
 
-Every value the orchestrator puts into a command a host runs — host names, `--remote-dir`, `--run-id`, `--bind` / `--server-bind`, the `-b` / `-l` / `-w` / `-M` values, and the same settings from a plan file — is quoted so it arrives as the literal value it is. A quote, `;`, `$(...)`, a backtick or a newline in one is part of the value, never a second command. (Before 2.6.4 they were pasted in unquoted, and any of those ran on every host.) No value is refused for its characters; a value made only of ordinary characters is sent exactly as before, and an iperf value with spaces in it is still split into words, as it always was. A remote path that holds characters a shell would read (`$`, quotes, spaces, …) is copied over `ssh` + `cat` instead of `scp`, because `scp` before OpenSSH 9.0 hands the remote path to the remote shell.
+Every value the orchestrator puts into a command a host runs — host names, `--remote-dir`, `--run-id`, `--bind` / `--server-bind`, the `-b` / `-l` / `-w` / `-M` values, and the same settings from a plan file — is quoted so it arrives as the literal value it is. A quote, `;`, `$(...)`, a backtick or a newline in one is part of the value, never a second command. (Before 2.6.4 they were pasted in unquoted, and any of those ran on every host.) No value is refused for its characters; a value made only of ordinary characters is sent exactly as before, and an iperf value with spaces in it is still split into words, as it always was. This holds with bash 4.2 to 5.2 on the orchestrator and on the hosts, and in multibyte locales such as GBK. A remote path that holds characters a shell would read (`$`, quotes, spaces, …) is copied over `ssh` + `cat` instead of `scp`, because `scp` before OpenSSH 9.0 hands the remote path to the remote shell.
 
-The SSH destination always comes after `--`, so an `--ssh-user` that starts with `-` cannot be read by `ssh` as an option. `collect-results` keeps only regular files named like a test log, server log, status or CPU file from each host's tarball; anything else in it (a symlink, a directory, a file such as `iperf_pivot.txt`) is left out, with a warning. A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new one is built, so it is never fetched again.
+The SSH destination always comes after `--`, so an `--ssh-user` that starts with `-` cannot be read by `ssh` as an option. `collect-results` keeps only regular files from each host's tarball: this run's test logs, and that host's own server log, status and CPU files. Anything else in it (a symlink, a directory, another host's CPU file, a file such as `iperf_pivot.txt`) is left out, with a warning. A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new one is built, so it is never fetched again.
 
 <!-- docs:end -->
 ---

@@ -27,7 +27,9 @@ version on PyPI.
   made only of ordinary characters is written exactly as before: for ordinary
   input the generated run scripts and every remote command are byte-for-byte
   what 2.6.3 sent. An iperf value with spaces is still split into words, as
-  it always was.
+  it always was. The quoting holds with bash 4.2 to 5.2 on either side, in
+  multibyte locales such as GBK (where a backtick can hide inside a
+  character), and for values that end in a newline.
 - **A host name's `$(...)` no longer runs under bash before 5.2.** Rolling
   mode counted each peer's probes with `$((counts["$target"] + 1))`, and `gen
   --grid` and `hints` summed a pair grid with `$((... GRID_TX_COUNT[$gh]))`.
@@ -63,8 +65,9 @@ version on PyPI.
   unpacked straight into the local results directory, so a host could plant
   a symlink there (which `parse-csv` would then read, wherever it pointed),
   a directory, or a forged file such as `iperf_pivot.txt`. It is now unpacked
-  into a scratch directory, and only regular files named like a test log,
-  server log, status or CPU file are kept; the rest are counted in a warning.
+  into a scratch directory, and only regular files are kept: this run's test
+  logs, and the host's own server log, status and CPU files. The rest are
+  counted in a warning.
   A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new
   one is built, so it is never fetched again.
 - **SIGTERM during a test round stops at once.** The interrupt handler's
@@ -73,9 +76,19 @@ version on PyPI.
   (by `timeout`, `kill` or a service manager) took until the round ended:
   23 s of a 30 s round. The handler now ends its own ssh jobs first, and the
   host fan-out waits only for its own workers.
+- **`collect-results` works with a relative `--remote-dir`.** It named the
+  tarball by its full path after changing into that directory, so it never
+  built one, reported "nothing to collect" and exited 0.
+- **Ctrl-C or SIGTERM during `all`/`run`'s collect and process steps stops
+  the daemons.** `run-tests` cleared the interrupt handler when it finished,
+  including the one `all` had set, so an interrupt after the tests left the
+  daemons running and exited 143.
+- **`--dry-run` and `-v` show the transfer actually made**: `scp` with an
+  IPv6 address in brackets, or `ssh ... cat` where a path goes that way.
 - **`create-scripts` fails when it cannot write a run script.** It used to
   print the shell's error and report success, so `run-tests` went on with no
-  scripts. A `--run-id` containing `/` was one way to get there.
+  scripts. A `--run-id` containing `/` was one way to get there. Likewise
+  when it cannot make one executable.
 
 ### Added
 
@@ -88,11 +101,12 @@ version on PyPI.
   `pgrep` without touching real processes. `tests/run_tests.sh --sandbox`
   runs the whole suite on it, and CI does so once per run; every existing
   test passes on it.
-- **`tests/test_adversarial.sh`**: 27 tests of hostile input through every
-  fleet command; all but one (a guard that ordinary values are unchanged)
-  fail on 2.6.3. **`tests/test_adversarial_mutations.sh`**
-  reverts each fix in a copy of the script and shows that its test then
-  fails.
+- **`tests/test_adversarial.sh`**: 41 tests of hostile input through every
+  fleet command; all but two (guards that ordinary values and trailing
+  newlines come through unchanged) fail on 2.6.3.
+  **`tests/test_adversarial_mutations.sh`** reverts each of 53 fixes in a
+  copy of the script and shows that the test guarding it then fails. CI also
+  runs the adversarial tests under bash 4.2's rules (`BASH_COMPAT=42`).
 
 ### Changed
 
@@ -130,6 +144,10 @@ changes behaviour (shared_tools tickets, project iperf_orchestrator):
   hosts until their window ends.
 - IO-008: `start-servers`, `distribute-scripts` and `cleanup` exit 0 when
   they report host failures.
+- IO-009: a run id matches another run whose id ends in `_<that id>`, so
+  `--run-id baseline` deletes and collects run `tuned_baseline`'s files.
+- IO-010: the analysis steps' embedded Python imports modules from the
+  current directory.
 
 ## [2.6.3] - 2026-11-13
 

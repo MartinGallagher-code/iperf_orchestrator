@@ -465,19 +465,32 @@ _iperf_extra_args() {
 #                 only [A-Za-z0-9._/:,+=@%^-] characters; else _shq
 #   _cmt  VALUE   for a '#' comment line: newlines become spaces
 #
-# _dqin_to VAR VALUE is _dqin into a variable, without a subshell, for
-# the loops that run once per pair of hosts (N^2 at fleet scale).
+# _sqin_to and _dqin_to VAR VALUE set VAR instead of printing, with no
+# subshell: for the loops that run once per pair of hosts (N^2 at fleet
+# scale), and wherever the result is not the end of a quoted word, since
+# "$(...)" would drop a value's trailing newlines ('/x/keep<newline>' must
+# not become '/x/keep'). _shq, _dqin and _bare always end in a quote or
+# hold no newline, so they are safe in "$(...)".
+#
+# Byte by byte (LC_ALL=C): in GBK, Big5 or Shift_JIS a backtick or a
+# backslash can be the second byte of a character, and a locale-aware
+# match would not see it. The ' -> '\'' replacement comes from a variable:
+# bash 4.2 kept the backslashes of a literal one, giving \'\'\'.
 #------------------------------------------------------------------------------
-_sqin() { printf '%s' "${1//\'/\'\\\'\'}"; }
-_shq()  { printf "'%s'" "$(_sqin "$1")"; }
+_SQ_ESC="'\\''"
+_sqin_to() { local LC_ALL=C; printf -v "$1" '%s' "${2//\'/$_SQ_ESC}"; }
+_sqin() { local __q; _sqin_to __q "$1"; printf '%s' "$__q"; }
+_shq()  { local __q; _sqin_to __q "$1"; printf "'%s'" "$__q"; }
 _dqin_to() {
+    local LC_ALL=C __q
     case "$2" in
-        *[\"\$\`\\]*|*$'\n'*|*$'\r'*) printf -v "$1" "\"'%s'\"" "${2//\'/\'\\\'\'}" ;;
+        *[\"\$\`\\]*|*$'\n'*|*$'\r'*) _sqin_to __q "$2"; printf -v "$1" "\"'%s'\"" "$__q" ;;
         *) printf -v "$1" '%s' "$2" ;;
     esac
 }
-_dqin() { local _dq; _dqin_to _dq "$1"; printf '%s' "$_dq"; }
+_dqin() { local __d; _dqin_to __d "$1"; printf '%s' "$__d"; }
 _bare() {
+    local LC_ALL=C
     case "$1" in
         ''|*[!A-Za-z0-9._/:,+=@%^-]*) _shq "$1" ;;
         *) printf '%s' "$1" ;;
@@ -751,6 +764,7 @@ _scp_host() {
 # the remote shell, where a '$(...)' or ';' in --remote-dir or --run-id
 # would run; such a path goes over ssh + cat instead, quoted.
 _scp_plain_path() {
+    local LC_ALL=C
     case "$1" in
         ''|*[!A-Za-z0-9._/:,+=@%^~-]*) return 1 ;;
     esac
@@ -771,37 +785,52 @@ ssh_run() {
 
 scp_to() {
     # scp_to <local_src> <host> <remote_dst>
+    # -v and --dry-run show the transport and host form actually used.
     local src="$1" host="$2" dst="$3"
-    vlog "scp $src -> $SSH_USER@$host:$dst"
-    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
-        echo "DRY-RUN scp $src -> $SSH_USER@$host:$dst"
-        return 0
-    fi
     if ! _scp_plain_path "$dst"; then
+        local cmd; cmd="cat > $(_shq "$dst")"
+        vlog "ssh $SSH_USER@$host: $cmd < $src"
+        if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+            echo "DRY-RUN ssh $SSH_USER@$host -- $cmd < $src"
+            return 0
+        fi
         # shellcheck disable=SC2086
-        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "cat > $(_shq "$dst")" < "$src"
+        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "$cmd" < "$src"
         return
     fi
+    local sh; sh=$(_scp_host "$host")
+    vlog "scp $src -> $SSH_USER@$sh:$dst"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN scp $src -> $SSH_USER@$sh:$dst"
+        return 0
+    fi
     # shellcheck disable=SC2086
-    scp $SSH_BATCH_OPTS -- "$src" "$SSH_USER@$(_scp_host "$host"):$dst" >/dev/null
+    scp $SSH_BATCH_OPTS -- "$src" "$SSH_USER@$sh:$dst" >/dev/null
 }
 
 scp_from() {
     # scp_from <host> <remote_src> <local_dst>
     local host="$1" src="$2" dst="$3"
-    vlog "scp $SSH_USER@$host:$src -> $dst"
-    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
-        echo "DRY-RUN scp $SSH_USER@$host:$src -> $dst"
-        return 0
-    fi
     if ! _scp_plain_path "$src"; then
+        local cmd; cmd="cat $(_shq "$src")"
+        vlog "ssh $SSH_USER@$host: $cmd > $dst"
+        if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+            echo "DRY-RUN ssh $SSH_USER@$host -- $cmd > $dst"
+            return 0
+        fi
         # shellcheck disable=SC2086
-        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "cat $(_shq "$src")" > "$dst" 2>/dev/null \
+        ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "$cmd" > "$dst" 2>/dev/null \
             || { rm -f -- "$dst"; return 1; }
         return 0
     fi
+    local sh; sh=$(_scp_host "$host")
+    vlog "scp $SSH_USER@$sh:$src -> $dst"
+    if [ "${IPERF_DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN scp $SSH_USER@$sh:$src -> $dst"
+        return 0
+    fi
     # shellcheck disable=SC2086
-    scp $SSH_BATCH_OPTS -- "$SSH_USER@$(_scp_host "$host"):$src" "$dst" >/dev/null 2>&1
+    scp $SSH_BATCH_OPTS -- "$SSH_USER@$sh:$src" "$dst" >/dev/null 2>&1
 }
 
 #------------------------------------------------------------------------------
@@ -930,7 +959,7 @@ _resolve_peer_bind_ips() {
         fi
         (
             ssh_run "${hosts[$i]}" "
-                BIND_RAW='$(_sqin "$pattern")'
+                BIND_RAW=$(_shq "$pattern")
                 _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
                 [ -n \"\$_line\" ] || exit 1
                 echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1
@@ -1384,8 +1413,8 @@ _worker_run_progress() {
     local safe; safe=$(_sanitize_host "$host")
     local out
     if ! out=$(ssh_run "$host" "
-            cd '$(_sqin "$REMOTE_DIR")' 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
-            st='$(_sqin "iperf_run_${safe}_${run}.status")'
+            cd $(_shq "$REMOTE_DIR") 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
+            st=$(_shq "iperf_run_${safe}_${run}.status")
             logs=\$(ls iperf_test_$(_bare "$safe")_to_*_$(_bare "$run").log 2>/dev/null | wc -l | tr -d ' ')
             if [ -f \"\$st\" ]; then
                 printf '%s|%s\n' \"\$logs\" \"\$(tail -n 1 \"\$st\")\"
@@ -1567,8 +1596,8 @@ _worker_start_server() {
     # of silently falling back to a 0.0.0.0 listener.
     ssh_run "$host" "
         set -e
-        mkdir -p '$(_sqin "$REMOTE_DIR")'
-        BIND_RAW='$(_sqin "$IPERF_SERVER_BIND")'
+        mkdir -p $(_shq "$REMOTE_DIR")
+        BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
         BIND_FLAG=''
         if [ -n \"\$BIND_RAW\" ]; then
             _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
@@ -1921,11 +1950,11 @@ _worker_distribute_script() {
     # the same $REMOTE_DIR aren't collateral damage. The run id is quoted
     # as well: a '*' or a space in it must not widen what rm matches.
     local rd rid
-    rd=$(_sqin "$REMOTE_DIR"); rid=$(_bare "$RUN_ID")
+    _sqin_to rd "$REMOTE_DIR"; rid=$(_bare "$RUN_ID")
     local clean_glob="'$rd'/iperf_test_*_$rid.log '$rd'/iperf_run_*_$rid.status"
     if ssh_run "$host" "mkdir -p '$rd' && rm -f $clean_glob" \
        && scp_to "$script" "$host" "$REMOTE_DIR/$remote_name" \
-       && ssh_run "$host" "chmod +x '$(_sqin "$REMOTE_DIR/$remote_name")'"; then
+       && ssh_run "$host" "chmod +x $(_shq "$REMOTE_DIR/$remote_name")"; then
         vlog "  OK: $host"
     else
         warn "  FAILED: $host"
@@ -1992,6 +2021,11 @@ cmd_run_tests() {
         cmd_create_scripts
         cmd_distribute_scripts
     fi
+    # Install the interrupt handler, unless a caller (all, run) already
+    # has: then leave it in place at the end too, or a Ctrl-C during that
+    # caller's collect and process steps would no longer stop the daemons.
+    local own_trap=1
+    [ -n "$(trap -p INT)" ] && own_trap=0
     trap '_orchestrator_signal_cleanup' INT TERM
     local n_hosts; n_hosts=$(read_servers | wc -l)
     [ "$n_hosts" -ge 2 ] || die "run-tests needs at least 2 hosts (got $n_hosts)"
@@ -2025,7 +2059,8 @@ cmd_run_tests() {
     esac
 
     printf '%s\n' "$mode" > "$RESULTS_DIR/.run_mode"
-    trap - INT TERM
+    [ "$own_trap" = 1 ] && trap - INT TERM
+    return 0
 }
 
 # Rolling probe: each host runs an independent loop for IPERF_TOTAL_TIME
@@ -2058,7 +2093,7 @@ _run_rolling() {
         # goes in through the quoting helpers (see _shq).
         local q_src q_safe q_rid rd
         q_src=$(_dqin "$src"); q_safe=$(_dqin "$src_safe"); q_rid=$(_dqin "$RUN_ID")
-        rd=$(_sqin "$REMOTE_DIR")
+        _sqin_to rd "$REMOTE_DIR"
         local hostlog="$LOGS_DIR/rolling_${src_safe}.log"
         ssh_run "$src" "
             set -u
@@ -2224,8 +2259,8 @@ _run_one_round() {
         local hostlog="$LOGS_DIR/run_${safe}.log"
         local script="$REMOTE_DIR/run_iperf_${safe}_${RUN_ID}.sh"
         local arg=""
-        [ -n "$target" ] && arg=" '$(_sqin "$target")'"
-        ssh_run "$src" "'$(_sqin "$script")' $start_time$arg" > "$hostlog" 2>&1 &
+        [ -n "$target" ] && arg=" $(_shq "$target")"
+        ssh_run "$src" "$(_shq "$script") $start_time$arg" > "$hostlog" 2>&1 &
         pids+=("$!")
     done
     local p
@@ -2244,11 +2279,14 @@ _worker_collect_results() {
     # Files to grab are scoped to this RUN_ID so we never accidentally
     # pull files from a concurrent or older run that shares $REMOTE_DIR.
     # Every value is quoted (see _shq). A tarball left over from an earlier
-    # collect is removed first, so only one built now can be fetched.
+    # collect is removed first, so only one built now can be fetched. After
+    # the cd the tarball is named relative to REMOTE_DIR: with a relative
+    # --remote-dir its full path would point one level too deep.
     local hs rid tr_q
-    hs=$(_sqin "$host_safe"); rid=$(_sqin "$RUN_ID"); tr_q=$(_sqin "$tarball_remote")
+    _sqin_to hs "$host_safe"; _sqin_to rid "$RUN_ID"
+    _sqin_to tr_q "_results_${host_safe}_${RUN_ID}.tar.gz"
     if ! ssh_run "$host" "
-        cd '$(_sqin "$REMOTE_DIR")' 2>/dev/null || exit 1
+        cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 1
         rm -f '$tr_q'
         listfile='_iperf_files_${hs}_${rid}.list'
         {
@@ -2286,12 +2324,15 @@ _worker_collect_results() {
     local tarout xdir
     xdir=$(mktemp -d "$RESULTS_DIR/.extract-XXXXXX") || { warn "  $host: mktemp failed"; return 1; }
     tarout=$(tar -xzf "$tarball_local" -C "$xdir" 2>&1)
+    # A host's server log, status and cpu files carry its own name; test
+    # logs may be any host's (on a shared REMOTE_DIR every host lists them
+    # all), but only this run's.
     local xf xbase skipped=0
     for xf in "$xdir"/* "$xdir"/.[!.]* "$xdir"/..?*; do
         [ -e "$xf" ] || [ -L "$xf" ] || continue
         xbase=${xf##*/}
         case "$xbase" in
-            iperf_test_*.log|iperf_server_*.log|iperf_run_*.status|cpu_*.log)
+            iperf_test_*_"$RUN_ID".log|"iperf_server_${host_safe}_${RUN_ID}.log"|"iperf_run_${host_safe}_${RUN_ID}.status"|"cpu_${host_safe}_${RUN_ID}.log")
                 if [ -f "$xf" ] && [ ! -L "$xf" ]; then
                     mv -f -- "$xf" "$RESULTS_DIR/$xbase"
                     continue
@@ -2309,7 +2350,7 @@ _worker_collect_results() {
         vlog "  $host: $client_count client logs + server log + status"
     fi
     rm -f "$tarball_local"
-    ssh_run "$host" "rm -f '$(_sqin "$tarball_remote")'" 2>/dev/null || true
+    ssh_run "$host" "rm -f $(_shq "$tarball_remote")" 2>/dev/null || true
 }
 
 cmd_collect_results() {
@@ -2341,7 +2382,7 @@ cmd_stop_servers() {
 #------------------------------------------------------------------------------
 _worker_cleanup() {
     local host="$1"
-    ssh_run "$host" "rm -rf '$(_sqin "$REMOTE_DIR")'"
+    ssh_run "$host" "rm -rf $(_shq "$REMOTE_DIR")"
 }
 
 cmd_cleanup() {
@@ -4994,7 +5035,7 @@ cmd_stop() {
 # success unless nothing is left.
 _worker_clean_verify() {
     local host="$1"
-    local rd; rd=$(_sqin "$REMOTE_DIR")
+    local rd; _sqin_to rd "$REMOTE_DIR"
     if ssh_run "$host" "rm -rf '$rd' && [ ! -e '$rd' ]"; then
         printf '%-30s CLEAN\n' "$host"
     else

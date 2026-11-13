@@ -241,7 +241,8 @@ SHIM
 #     (touch a file inside the sandbox), never anything destructive.
 #
 # SANDBOX_IPERF_SECONDS=N makes every iperf -c sleep N seconds first
-# (for interrupting a run mid-test).
+# (for interrupting a run mid-test). SANDBOX_HOST_LC_ALL=LOCALE runs the
+# hosts' side in LOCALE while the orchestrator keeps its own.
 install_sandbox_ssh() {
     export SANDBOX_ROOT="${SANDBOX_ROOT:-$TEST_TMPDIR}"
     export SANDBOX_BIN="$FAKE_BIN/sandbox-bin"
@@ -271,8 +272,10 @@ _slog() { local tool="\$1"; shift; printf '%s\t%s\t%s\n' "\$tool" "\$_host" "\$(
 # The daemon registry for this host. A test written for install_fake_ssh
 # marks a daemon as running by touching iperf_running_<host>; read that
 # as one daemon on the default port, so those tests run here unchanged.
+# Only while the host has no registry at all: once pkill has emptied it,
+# a flag file not yet removed must not bring the daemon back.
 _reg="\$SANDBOX_ROOT/daemons/\$_hostkey"
-if [ -f "\$FAKE_BIN/iperf_running_\$_host" ] && [ ! -s "\$_reg" ]; then
+if [ -f "\$FAKE_BIN/iperf_running_\$_host" ] && [ ! -e "\$_reg" ]; then
     printf '12345\tiperf -p 5001 -s -D\n' > "\$_reg"
 fi
 # _inside PATH: true when PATH (resolved, need not exist) is inside the sandbox.
@@ -312,6 +315,7 @@ mkdir -p "$root" && cd "$root" || exit 255
 # Not exec: this process stands for the local ssh client, the bash below
 # for the remote side, so killing one leaves the other running -- as with
 # a real ssh, whose remote command outlives a killed client.
+[ -n "${SANDBOX_HOST_LC_ALL:-}" ] && export LC_ALL="$SANDBOX_HOST_LC_ALL"
 HOME="$root" SANDBOX_HOST="$host" PATH="$SANDBOX_BIN:$PATH" bash -c "$remote_cmd"
 SHIM
     chmod +x "$FAKE_BIN/ssh"

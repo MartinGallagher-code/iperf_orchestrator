@@ -203,22 +203,73 @@ test_newline_in_run_id_cannot_add_a_line_to_run_script() {
     fi
 }
 
-# Every fleet command, one hostile value in every place a value goes.
+# Every fleet command, a hostile value in every place a value goes. No
+# spaces in the payloads: _sanitize_host turns a space into '_', and a
+# payload that sanitizing breaks would hide a missing quote. REMOTE_DIR is
+# absolute (shared by the hosts, as on NFS), so collect-results really
+# collects and every step after it runs.
 test_no_fleet_command_runs_a_hostile_value() {
     install_sandbox_ssh
-    write_server_list h1 'h2$(touch MARK_any_host)' >/dev/null
-    export REMOTE_DIR='work$(touch MARK_any_rd)'"';touch MARK_any_rd2;'"
-    local rid='r$(touch MARK_any_rid)'
-    local cmd
-    for cmd in check-iperf check-servers start-servers create-scripts distribute-scripts \
+    write_server_list h1 'h2$(>MARK_any_h2)' "h3'\$(>MARK_any_h3)'" >/dev/null
+    # Quotes in pairs: a value with one quote makes a reverted '...' site a
+    # syntax error rather than a command, and the test would miss it.
+    export REMOTE_DIR="$TEST_TMPDIR/rd'\$(>MARK_any_rd)'x"
+    local rid="r'\$(>MARK_any_rid)'q" cmd
+    for cmd in check-iperf check-servers "--server-bind eth0 start-servers" \
+               "--server-bind nosuch start-servers" create-scripts distribute-scripts \
                "run-tests parallel" "run-tests sequential-host" "run-tests sequential-pair" \
                "run-tests rolling" status collect-results stop-servers "cleanup --yes" clean; do
         # shellcheck disable=SC2086
-        orch --run-id "$rid" --start-delay 0 --duration 1 --total-time 1 $cmd
+        orch --run-id "$rid" --start-delay 0 --duration 1 --total-time 3 $cmd
         assert_no_marker || { echo "  (after: $cmd)" >&2; return 1; }
+        if [ "$cmd" = collect-results ]; then
+            # Every mode above wrote logs under this run id; any count but 0.
+            assert_contains "$RUN_OUT" " client logs total" || return 1
+            assert_not_contains "$RUN_OUT" "Collected 0 client logs" "collect-results must really collect" || return 1
+        fi
     done
-    orch --run-id "$rid" --start-delay 0 --duration 1 --single-server 'h2$(touch MARK_any_host)' run-tests sequential-host
+    orch --run-id "$rid" --start-delay 0 --duration 1 --single-server 'h2$(>MARK_any_h2)' run-tests sequential-host
     assert_no_marker || { echo "  (after: --single-server)" >&2; return 1; }
+}
+
+# --bind on a compromised host: the address its `ip` prints goes into every
+# other host's run script (and the rolling loop) as the address to test.
+test_compromised_hosts_ip_output_stays_literal() {
+    sandbox_two_hosts h1 h2
+    cat > "$SANDBOX_BIN/ip" <<'SHIM'
+#!/usr/bin/env bash
+. "$SANDBOX_BIN/.prelude"
+if [ "$_host" = h2 ]; then
+    echo '2: eth0    inet 10.0.0.2"$(>MARK_ip)"/24 scope global eth0'
+else
+    echo '2: eth0    inet 10.0.0.1/24 scope global eth0'
+fi
+SHIM
+    orch --bind eth0 --start-delay 0 --duration 1 run-tests parallel
+    assert_no_marker || return 1
+    orch --bind eth0 --duration 1 --total-time 3 run-tests rolling
+    assert_no_marker
+}
+
+# A --bind pattern is a grep regex, so a hostile one can still match an
+# interface; then it is written into the run scripts and the rolling loop.
+test_hostile_bind_pattern_that_matches_stays_literal() {
+    sandbox_two_hosts h1 h2
+    local pat='eth0\|$(>MARK_br)'
+    orch --bind "$pat" --start-delay 0 --duration 1 run-tests parallel
+    assert_no_marker || return 1
+    assert_contains "$(iperf_argv_from h1)" "-B 10.99.0." "the pattern should still bind" || return 1
+    orch --bind "$pat" --duration 1 --total-time 3 run-tests rolling
+    assert_no_marker
+}
+
+# The iperf values also go into the logged "# cmd:" line, inside "...".
+test_extra_args_substitution_stays_literal_in_logged_cmd() {
+    sandbox_two_hosts h1 h2
+    orch --bandwidth '1g$(>MARK_cmd)' --start-delay 0 --duration 1 run-tests parallel
+    assert_no_marker || return 1
+    orch --bandwidth '1g$(>MARK_cmd)' --duration 1 --total-time 3 run-tests rolling
+    assert_no_marker
 }
 
 # ---- Transport --------------------------------------------------------------
@@ -375,6 +426,163 @@ test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh() {
     assert_eq 0 "$left" "local ssh processes still running after exit" || return 1
 }
 
+# ---- Added after the independent attack ------------------------------------
+
+test_collect_over_ssh_for_a_path_with_shell_characters() {
+    sandbox_two_hosts h1 h2
+    export REMOTE_DIR="$TEST_TMPDIR/rd'\$(>MARK_sf)"
+    orch --start-delay 0 --duration 1 run-tests parallel
+    orch collect-results
+    assert_no_marker || return 1
+    assert_contains "$RUN_OUT" "Collected 2 client logs" || return 1
+    if awk -F'\t' '$1 == "scp"' "$FAKE_SSH_LOG" | grep -qF 'MARK_sf'; then
+        echo "scp was given a remote path holding \$(...)" >&2; return 1
+    fi
+}
+
+test_scp_from_gets_bare_ipv6_in_brackets() {
+    install_fake_ssh
+    write_server_list 2001:db8::1 >/dev/null
+    orch create-scripts >/dev/null
+    orch collect-results
+    local srcs; srcs=$(awk -F'\t' '$1 == "scp" {print $2}' "$FAKE_SSH_LOG")
+    assert_contains "$srcs" "testuser@[2001:db8::1]:" "collect-results' scp of a bare IPv6 host" || return 1
+}
+
+test_create_scripts_fails_when_chmod_fails() {
+    install_fake_ssh
+    write_server_list h1 h2 >/dev/null
+    printf '#!/bin/sh\necho "chmod: Operation not permitted" >&2\nexit 1\n' > "$FAKE_BIN/chmod"
+    chmod +x "$FAKE_BIN/chmod"
+    orch create-scripts
+    assert_ne 0 "$RUN_RC" "create-scripts made no script executable and must not report success" || return 1
+    assert_contains "$RUN_OUT" "could not make" || return 1
+}
+
+# parallel_hosts runs inside run-tests and the interrupt handler, next to
+# other background jobs; it must wait for its own workers only.
+test_parallel_hosts_waits_only_for_its_own_workers() {
+    write_server_list h1 h2 >/dev/null
+    # shellcheck disable=SC2034  # read by parallel_hosts (sourced orchestrator)
+    SERVER_LIST_FILE="$IPERF_SERVERS"
+    _adv_quick() { :; }
+    sleep 6 &
+    local other=$! t0=$SECONDS
+    parallel_hosts _adv_quick
+    local took=$((SECONDS - t0))
+    kill "$other" 2>/dev/null; wait "$other" 2>/dev/null
+    [ "$took" -le 3 ] || { echo "parallel_hosts waited ${took}s for a job that was not its own" >&2; return 1; }
+}
+
+# "$(...)" drops trailing newlines: '/x/keep<newline>' must not become
+# '/x/keep', a different directory.
+test_trailing_newline_in_remote_dir_is_kept() {
+    sandbox_two_hosts h1
+    local root; root=$(sandbox_host_root h1)
+    mkdir -p "$root/keep/data" "$root/keep"$'\n'
+    REMOTE_DIR=$'keep\n' orch cleanup --yes
+    [ -d "$root/keep/data" ] || { echo "cleanup deleted 'keep', not 'keep<newline>'" >&2; return 1; }
+    [ ! -e "$root/keep"$'\n' ] || { echo "the named directory survived" >&2; return 1; }
+}
+
+# The orchestrator itself on bash 4.2 (CentOS 7): a literal '\'' in a
+# ${var//\'/...} replacement kept its backslashes there.
+test_quoting_holds_under_bash_4_2_rules() {
+    sandbox_two_hosts h1 h2
+    BASH_COMPAT=42 REMOTE_DIR="work';>MARK_42;#" orch cleanup --yes
+    assert_no_marker || return 1
+    BASH_COMPAT=42 orch --run-id "r'\$(>MARK_42r)'" create-scripts
+    BASH_COMPAT=42 orch --run-id "r'\$(>MARK_42r)'" distribute-scripts
+    assert_no_marker
+}
+
+# In GBK (also Big5, Shift_JIS) a backtick can be the second byte of a
+# character, so a locale-aware check on the orchestrator misses it while
+# a host in C or UTF-8 sees a backtick.
+test_backtick_in_a_gbk_locale_stays_literal() {
+    command -v localedef >/dev/null || { echo "(no localedef: skipped)"; return 0; }
+    local loc="$TEST_TMPDIR/loc"; mkdir -p "$loc"
+    localedef -i zh_CN -f GBK "$loc/zh_CN.GBK" >/dev/null 2>&1 \
+        || { echo "(no zh_CN/GBK locale sources: skipped)"; return 0; }
+    # 0x81 0x60 is one GBK character, so here both backticks hide.
+    sandbox_two_hosts h1 $'h2\x81`>MARK_gbk\x81`'
+    LOCPATH="$loc" LC_ALL=zh_CN.GBK SANDBOX_HOST_LC_ALL=C orch --start-delay 0 --duration 1 run-tests parallel
+    assert_no_marker
+}
+
+# A compromised host's tarball may hold any test log of this run (on a
+# shared REMOTE_DIR each host lists them all), but its own server log,
+# status and cpu files only, and nothing of another run.
+test_collect_keeps_only_this_hosts_cpu_status_and_server_files() {
+    sandbox_two_hosts h1 h2
+    mkdir -p "$REMOTE_DIR" && echo ok > "$REMOTE_DIR/iperf_test_h1_to_h2_$IPERF_RUN_ID.log"
+    local craft="$TEST_TMPDIR/craft"; mkdir -p "$craft"
+    echo good   > "$craft/iperf_test_h1_to_h2_$IPERF_RUN_ID.log"
+    echo forged > "$craft/cpu_h2_$IPERF_RUN_ID.log"
+    echo forged > "$craft/iperf_run_h2_$IPERF_RUN_ID.status"
+    echo forged > "$craft/iperf_server_h2_$IPERF_RUN_ID.log"
+    echo forged > "$craft/iperf_test_h2_to_h1_otherrun.log"
+    tar -czf "$TEST_TMPDIR/evil.tar.gz" -C "$craft" .
+    cat > "$SANDBOX_BIN/tar" <<SHIM
+#!/usr/bin/env bash
+[ "\$SANDBOX_HOST" = h1 ] && [ "\$1" = "-czf" ] && exec cp "$TEST_TMPDIR/evil.tar.gz" "\$2"
+exec $(command -v tar) "\$@"
+SHIM
+    chmod +x "$SANDBOX_BIN/tar"
+    orch create-scripts >/dev/null
+    orch collect-results
+    local rd="$RESULTS_BASE/$IPERF_RUN_ID" f
+    [ -f "$rd/iperf_test_h1_to_h2_$IPERF_RUN_ID.log" ] || { echo "the test log was not kept" >&2; return 1; }
+    for f in "cpu_h2_$IPERF_RUN_ID.log" "iperf_run_h2_$IPERF_RUN_ID.status" \
+             "iperf_server_h2_$IPERF_RUN_ID.log" iperf_test_h2_to_h1_otherrun.log; do
+        [ ! -e "$rd/$f" ] || { echo "h1's tarball planted $f" >&2; return 1; }
+    done
+}
+
+# A relative --remote-dir (relative to the login directory, like scp's
+# paths): collect-results named the tarball by its full path after cd-ing
+# into it, so it never built one and reported nothing to collect.
+test_relative_remote_dir_collects() {
+    sandbox_two_hosts h1 h2
+    REMOTE_DIR=work orch --start-delay 0 --duration 1 run-tests parallel
+    REMOTE_DIR=work orch collect-results
+    assert_contains "$RUN_OUT" "Collected 2 client logs" || return 1
+}
+
+# all/run: run-tests used to clear the interrupt handler when it finished,
+# so a SIGTERM during collect or process left the daemons running.
+test_sigterm_during_collect_in_all_still_stops_daemons() {
+    sandbox_two_hosts h1 h2
+    cat > "$SANDBOX_BIN/tar" <<SHIM
+#!/usr/bin/env bash
+[ "\$1" = "-czf" ] && { touch "$TEST_TMPDIR/in_collect"; sleep 20; }
+exec $(command -v tar) "\$@"
+SHIM
+    chmod +x "$SANDBOX_BIN/tar"
+    PATH="$FAKE_BIN:$PATH" bash "$ORCH" --start-delay 0 --duration 1 all --keep-going \
+        > "$TEST_TMPDIR/all.out" 2>&1 &
+    local pid=$! rc
+    for _ in $(seq 1 300); do [ -e "$TEST_TMPDIR/in_collect" ] && break; sleep 0.1; done
+    [ -e "$TEST_TMPDIR/in_collect" ] || { kill "$pid"; echo "all never reached collect" >&2; cat "$TEST_TMPDIR/all.out" >&2; return 1; }
+    kill -TERM "$pid"; wait "$pid"; rc=$?
+    command -v pkill >/dev/null && pkill -f "$TEST_TMPDIR" 2>/dev/null
+    assert_eq 130 "$rc" "exit status after SIGTERM during collect" || { cat "$TEST_TMPDIR/all.out" >&2; return 1; }
+    local left; left=$(cat "$SANDBOX_ROOT"/daemons/* 2>/dev/null | grep -c .)
+    assert_eq 0 "$left" "daemons left running" || return 1
+}
+
+test_dry_run_shows_the_real_transport() {
+    install_fake_ssh
+    write_server_list 2001:db8::1 h2 >/dev/null
+    orch create-scripts >/dev/null
+    orch --dry-run distribute-scripts
+    assert_contains "$RUN_OUT" "DRY-RUN scp" || return 1
+    assert_contains "$RUN_OUT" "testuser@[2001:db8::1]:" "dry run should show scp's bracketed form" || return 1
+    REMOTE_DIR="$TEST_TMPDIR/d\$(x)" orch --dry-run distribute-scripts
+    assert_contains "$RUN_OUT" "-- cat > '" "dry run should show the ssh + cat copy" || return 1
+    assert_not_contains "$RUN_OUT" "DRY-RUN scp" || return 1
+}
+
 # ---- Runner ---------------------------------------------------------------------
 
 ADV_TESTS=(
@@ -405,6 +613,20 @@ ADV_TESTS=(
     test_collect_does_not_fetch_a_stale_tarball
     test_create_scripts_fails_when_it_cannot_write_a_script
     test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh
+    test_compromised_hosts_ip_output_stays_literal
+    test_hostile_bind_pattern_that_matches_stays_literal
+    test_extra_args_substitution_stays_literal_in_logged_cmd
+    test_collect_over_ssh_for_a_path_with_shell_characters
+    test_scp_from_gets_bare_ipv6_in_brackets
+    test_create_scripts_fails_when_chmod_fails
+    test_parallel_hosts_waits_only_for_its_own_workers
+    test_trailing_newline_in_remote_dir_is_kept
+    test_quoting_holds_under_bash_4_2_rules
+    test_backtick_in_a_gbk_locale_stays_literal
+    test_collect_keeps_only_this_hosts_cpu_status_and_server_files
+    test_relative_remote_dir_collects
+    test_sigterm_during_collect_in_all_still_stops_daemons
+    test_dry_run_shows_the_real_transport
 )
 
 for t in "${ADV_TESTS[@]}"; do
