@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.3] - 2026-11-13
+
+### Changed
+
+- **`CLAUDE.md` names this repository in its ticket command** (shared_tools
+  ticket ST-029). Step 3 of "Every task is a ticket" still read
+  `ticket.py new <this repository's name> ...`, the snippet's placeholder;
+  it now reads `ticket.py new iperf_orchestrator ...`, the name this
+  project is registered under on the shared ticket board, as the other
+  projects' copies already do. Nothing the tool does changes.
+
 ## [2.6.2] - 2026-11-10
 
 ### Changed
