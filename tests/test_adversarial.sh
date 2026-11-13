@@ -26,7 +26,7 @@ assert_no_marker() {
     local found
     found=$(find "$TEST_TMPDIR" -name 'MARK_*' 2>/dev/null)
     [ -z "$found" ] && return 0
-    printf 'INJECTED: a hostile value ran on a host; marker(s):\n%s\n' "$found" >&2
+    printf 'INJECTED: a hostile value ran as a command (on a host, or here); marker(s):\n%s\n' "$found" >&2
     printf -- '--- orchestrator output ---\n%s\n' "${RUN_OUT:-}" >&2
     return 1
 }
@@ -159,6 +159,38 @@ test_rolling_hostile_bandwidth_stays_literal() {
     orch --duration 1 --total-time 3 --bandwidth '1g;touch MARK_rbw;true' run-tests rolling
     assert_no_marker || return 1
     assert_contains "$(iperf_argv_from h1)" "-b 1g\\;touch MARK_rbw\\;true " || return 1
+}
+
+# Bash before 5.2 expands an associative-array subscript a second time
+# inside $((...)), so a host name's $(...) ran there even once quoted.
+# BASH_COMPAT=50 makes a newer bash do the same (CI's Python 3.6 image has
+# bash 5.1 and caught it); it applies to the sandboxed hosts and to the
+# orchestrator itself.
+test_rolling_hostile_host_stays_literal_on_older_bash() {
+    sandbox_two_hosts h1 'h2$(touch MARK_rh50)'
+    BASH_COMPAT=50 orch --duration 1 --total-time 3 run-tests rolling
+    assert_no_marker || return 1
+    assert_contains "$(iperf_argv_from h1)" "-c h2\\\$\\(touch\\ MARK_rh50\\)" || return 1
+}
+
+grid_with_hostile_host() {
+    install_fake_ssh
+    # No whitespace: the grid reader strips it from a row's name.
+    printf '%s\n' 'src\dst,h1,h2$(:>MARK_grid)' 'h1,,x' 'h2$(:>MARK_grid),x,' > "$IPERF_SERVERS"
+}
+
+test_grid_host_name_stays_literal_in_hints_on_older_bash() {
+    grid_with_hostile_host
+    BASH_COMPAT=50 orch hints
+    assert_no_marker || return 1
+    assert_contains "$RUN_OUT" "2 directed tests" || return 1
+}
+
+test_grid_host_name_stays_literal_in_gen_on_older_bash() {
+    grid_with_hostile_host
+    BASH_COMPAT=50 orch gen --grid
+    assert_no_marker || return 1
+    assert_contains "$RUN_OUT" "2 enabled pair(s)" || return 1
 }
 
 test_newline_in_run_id_cannot_add_a_line_to_run_script() {
@@ -359,6 +391,9 @@ ADV_TESTS=(
     test_bandwidth_with_spaces_still_splits_into_words
     test_rolling_hostile_host_stays_literal
     test_rolling_hostile_bandwidth_stays_literal
+    test_rolling_hostile_host_stays_literal_on_older_bash
+    test_grid_host_name_stays_literal_in_hints_on_older_bash
+    test_grid_host_name_stays_literal_in_gen_on_older_bash
     test_newline_in_run_id_cannot_add_a_line_to_run_script
     test_no_fleet_command_runs_a_hostile_value
     test_ssh_destination_follows_double_dash

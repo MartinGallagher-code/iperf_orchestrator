@@ -60,6 +60,15 @@ MUTATIONS=$(cat <<'TABLE'
 ### test_rolling_hostile_bandwidth_stays_literal
 --- -P $IPERF_STREAMS $IPERF_EXTRA_ARGS_Q \$BIND_ARG -y C
 +++ -P $IPERF_STREAMS $IPERF_EXTRA_ARGS \$BIND_ARG -y C
+### test_rolling_hostile_host_stays_literal_on_older_bash
+---                 counts[\"\$target\"]=\$((c + 1))
++++                 counts[\"\$target\"]=\$((counts[\"\$target\"] + 1))
+### test_grid_host_name_stays_literal_in_hints_on_older_bash
+---                 edges=$(( edges + ${GRID_TX_COUNT[$gh]:-0} ))
++++                 edges=$(( edges + GRID_TX_COUNT[$gh] ))
+### test_grid_host_name_stays_literal_in_gen_on_older_bash
+---                 edges=$(( edges + ${GRID_TX_COUNT[$gh2]:-0} ))
++++                 edges=$(( edges + GRID_TX_COUNT[$gh2] ))
 ### test_newline_in_run_id_cannot_add_a_line_to_run_script
 --- # Run ID:      $(_cmt "$RUN_ID")
 +++ # Run ID:      $RUN_ID

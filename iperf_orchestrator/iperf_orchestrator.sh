@@ -2147,7 +2147,11 @@ _run_rolling() {
                 [ -z \"\$conn_ip\" ] && conn_ip=\"\$target\"
                 target_safe=\$(printf '%s' \"\$target\" | tr ':/[] \\t' '_______')
                 seq=\$((seq + 1))
-                counts[\"\$target\"]=\$((counts[\"\$target\"] + 1))
+                # Read the count first: bash before 5.2 expands an
+                # associative subscript a second time inside \$((...)), so a
+                # peer named 'h\$(cmd)' would run cmd there.
+                c=\${counts[\"\$target\"]}
+                counts[\"\$target\"]=\$((c + 1))
                 outfile=\"iperf_test_${q_safe}_to_\${target_safe}_\${seq}_$q_rid.log\"
                 # Stagger launches and run iperf in background so multiple
                 # flows can be in flight at once.
@@ -4925,7 +4929,9 @@ cmd_gen() {
         if [ "$_GRID_PRESENT" = "1" ]; then
             edges=0
             for gh2 in "${!GRID_TX_COUNT[@]}"; do
-                edges=$(( edges + GRID_TX_COUNT[$gh2] ))
+                # ${...} first: bash before 5.2 expands an associative
+                # subscript again inside $((...)), running a host name's $(...).
+                edges=$(( edges + ${GRID_TX_COUNT[$gh2]:-0} ))
             done
         fi
         shape="grid, $edges enabled pair(s)"
@@ -5080,7 +5086,8 @@ EOF
             edges=0
             local gh
             for gh in "${!GRID_TX_COUNT[@]}"; do
-                edges=$(( edges + GRID_TX_COUNT[$gh] ))
+                # ${...} first; see cmd_gen.
+                edges=$(( edges + ${GRID_TX_COUNT[$gh]:-0} ))
             done
         fi
         local seq_secs=$(( edges * IPERF_DURATION ))

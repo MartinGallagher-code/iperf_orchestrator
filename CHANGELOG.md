@@ -28,6 +28,16 @@ version on PyPI.
   input the generated run scripts and every remote command are byte-for-byte
   what 2.6.3 sent. An iperf value with spaces is still split into words, as
   it always was.
+- **A host name's `$(...)` no longer runs under bash before 5.2.** Rolling
+  mode counted each peer's probes with `$((counts["$target"] + 1))`, and `gen
+  --grid` and `hints` summed a pair grid with `$((... GRID_TX_COUNT[$gh]))`.
+  Bash before 5.2 (5.1 is Ubuntu 22.04's) expands an associative-array
+  subscript a second time inside `$((...))`, so a peer named `h2$(cmd)` ran
+  `cmd` on every host in rolling mode, and a grid host name ran it on the
+  orchestrator's own machine — even with the value quoted. The value is now
+  read with `${...}` first and the arithmetic done on a plain number. CI's
+  Python 3.6 image (bash 5.1) caught it; `BASH_COMPAT=50` reproduces it on a
+  newer bash, and the tests use that.
 - **A `--run-id` with a space or a `*` no longer deletes other files.**
   `distribute-scripts` clears this run's old logs with an `rm -f` glob built
   from the run id. `--run-id 'nightly run'` deleted `~/run.log` on every
@@ -78,8 +88,9 @@ version on PyPI.
   `pgrep` without touching real processes. `tests/run_tests.sh --sandbox`
   runs the whole suite on it, and CI does so once per run; every existing
   test passes on it.
-- **`tests/test_adversarial.sh`**: 24 tests of hostile input through every
-  fleet command, each of which fails on 2.6.3. **`tests/test_adversarial_mutations.sh`**
+- **`tests/test_adversarial.sh`**: 27 tests of hostile input through every
+  fleet command; all but one (a guard that ordinary values are unchanged)
+  fail on 2.6.3. **`tests/test_adversarial_mutations.sh`**
   reverts each fix in a copy of the script and shows that its test then
   fails.
 
