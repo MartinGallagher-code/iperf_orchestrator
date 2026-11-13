@@ -48,7 +48,7 @@ which keeps every project's tickets as files and moves each one Backlog → In P
    repository:
 
    ~~~bash
-   <shared_tools clone>/scripts/ticket.py new <this repository's name> "Imperative title" --request "the request, in the user's own words"
+   <shared_tools clone>/scripts/ticket.py new iperf_orchestrator "Imperative title" --request "the request, in the user's own words"
    ~~~
 
 **Every change moves the version**, however small: a pull request into `main` raises
