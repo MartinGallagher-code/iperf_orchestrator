@@ -241,6 +241,27 @@ MUTATIONS=$(cat <<'TABLE'
 ### test_status_counts_only_this_runs_logs
 --- [ -f \"\$_iof\" ] && _iorunlog \"\$_iof\" && logs=
 +++ [ -f \"\$_iof\" ] && logs=
+### test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts
+---         _validate_server_list && parallel_hosts _worker_stop_run || true
++++         true
+### test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts
+---                 *INTERRUPTED*) printf
++++                 *INTERRUPTED-NOT*) printf
+### test_sigterm_mid_rolling_stops_the_loops_on_the_hosts
+---                 *) echo \"\$_sid\" > \"\$_sidf\" &&
++++                 *) true &&
+### test_stale_sid_file_never_signals_another_session
+---     s+="case \"\$_ioargs\" in *$script_mark*|*$f*) "
++++     s+="case x in *) "
+### test_stop_run_stops_the_runs_own_session
+--- '\$3 == s {print \$1}'
++++ '\$2 == s {print \$1}'
+### test_finished_run_leaves_no_sid_file_and_clean_removes_one
+--- iperf_run_*.status iperf_run_*.sid iperf_server_*.log
++++ iperf_run_*.status iperf_server_*.log
+### test_finished_run_leaves_no_sid_file_and_clean_removes_one
+---     *) echo "\$_sid" > "\$SID_FILE" && trap 'rm -f "\$SID_FILE"' EXIT ;;
++++     *) echo "\$_sid" > "\$SID_FILE" ;;
 TABLE
 )
 export MUTATIONS
@@ -308,6 +329,12 @@ while IFS= read -r t; do
         test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh)
             # Likewise without procps (pgrep/pkill).
             { command -v pgrep && command -v pkill; } >/dev/null || skip=1 ;;
+        test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts|\
+        test_sigterm_mid_rolling_stops_the_loops_on_the_hosts|\
+        test_stale_sid_file_never_signals_another_session|\
+        test_stop_run_stops_the_runs_own_session)
+            # Likewise without procps or setsid (IO-007), or timeout.
+            { command -v pgrep && command -v pkill && command -v setsid && command -v timeout; } >/dev/null || skip=1 ;;
         test_backtick_in_a_gbk_locale_stays_literal)
             # Likewise without a GBK locale to build.
             { command -v localedef && [ -e /usr/share/i18n/charmaps/GBK.gz ] \

@@ -47,8 +47,66 @@ A run no longer touches another run's files whose run id ends in its own
   new check. The protection those mutations used to undo is now
   redundant, so they would have survived. Those tests also plant a test
   log so the check is exercised, and try a `$(...)` run id as well as a
-  `;` one. `test_collect_does_not_fetch_a_stale_tarball` lists both hosts
-  so its stale log is one this run would otherwise keep.
+  `;` one.
+- Tests whose logs named a host missing from their server list now list
+  it, because a log between unlisted hosts is no longer collected:
+  `test_collect_does_not_fetch_a_stale_tarball`,
+  `test_collect_keeps_only_regular_run_files`,
+  `test_scp_from_gets_bare_ipv6_in_brackets`, and the `test_collect_results.sh`
+  fixtures (`<host>_to_peer` is now `<host>_to_<a listed host>`).
+  `test_distribute_scripts_removes_only_this_runs_stale_files` checks the
+  new selection instead of the old globs.
+## [2.8.3] - 2026-11-16
+
+Ctrl-C now stops the run on the hosts, not only on this machine
+(shared_tools ticket IO-007, found by IO-001's adversarial pass).
+
+### Fixed
+
+- **An interrupted run no longer carries on on the hosts.** On Ctrl-C or
+  SIGTERM during `start`, `run-tests`, `all` or `run`, the orchestrator
+  ended its own ssh jobs and stopped the daemons. A real ssh does not end
+  the remote command when its client dies, though. Every host's run
+  script ran on to the end of its window, sampling CPU and launching
+  clients that then failed against the stopped daemons, and wrote `DONE`,
+  so `status` showed a run that never completed as done. In rolling mode
+  the loop went on launching probes for the rest of `--total-time`. Now:
+  - The run script and the rolling loop each record their session id as
+    they start, in `iperf_run_<host>_<run-id>.sid` in `REMOTE_DIR`, and
+    remove it when they end. sshd gives every remote command a session of
+    its own.
+  - After an interrupt, the handler stops every process in that session
+    on every host: SIGTERM, then SIGKILL for anything left after two
+    seconds. It acts only if the session's leader still names this run's
+    script or `.sid` file, so a stale file whose id has been reused never
+    gets anything else signalled.
+  - It then appends `INTERRUPTED` to the host's status file, and `status`
+    shows it.
+  - It stops the session, not the process group, because coreutils
+    `timeout` (which wraps each iperf client) moves the client into a
+    process group of its own.
+- `iperf_run_*.sid` is one of the tool's own files, so `clean` and
+  `cleanup` remove one left behind rather than refusing the directory.
+
+### Tests
+
+- The test sandbox's ssh stand-in runs the remote side in a session of
+  its own (`setsid`), as sshd does.
+- `tests/test_adversarial.sh`: five new tests, all of which fail on 2.8.1.
+  - SIGTERM in the middle of a parallel round leaves nothing running on
+    the hosts, and `status` shows `INTERRUPTED`.
+  - The same holds in the middle of a rolling run.
+  - A `.sid` file naming a session that is not this run's leaves that
+    session alone.
+  - This run's session is stopped whole, including a child under
+    `timeout` in a process group of its own.
+  - A finished run leaves no `.sid` file, and `clean` removes one.
+- Each new test has a mutation in `tests/test_adversarial_mutations.sh`,
+  seven in all.
+- `test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh` now
+  removes the session files before the interrupt, so it still checks that
+  the orchestrator ends its own ssh jobs even when the hosts cannot be
+  stopped. Otherwise its existing mutation would survive.
 
 ## [2.8.2] - 2026-11-16
 
