@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.8.4"
+ORCH_VERSION="2.10.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -109,6 +109,9 @@ _plan_default() {
     local var="$1" val="$2"
     if [ -z "${!var+x}" ]; then
         printf -v "$var" '%s' "$val"
+        # Remember what the plan gave, so a destructive command can say
+        # which of its settings came from the plan (shared_tools IO-005).
+        printf -v "_PLAN_GAVE_$var" '%s' "$val"
     fi
 }
 
@@ -152,6 +155,43 @@ _load_plan_settings() {
     if grep -qE '^[^#[:space:]]' "$f"; then
         _plan_default IPERF_SERVERS "$f"
     fi
+}
+
+# _plan_name: the plan as the user would type it (./iperf_plan.conf for the
+# one picked up from the current directory).
+_plan_name() {
+    case "$PLAN_FILE" in
+        */*) _cmt "$PLAN_FILE" ;;
+        *)   printf './%s' "$(_cmt "$PLAN_FILE")" ;;
+    esac
+}
+
+# _plan_gave VAR: true when VAR still holds the value the plan gave it (a
+# flag given after the plan was read replaces it, and then it is not the
+# plan's).
+_plan_gave() {
+    local g="_PLAN_GAVE_$1"
+    [ -n "${!g+x}" ] && [ "${!1-}" = "${!g}" ]
+}
+
+# _plan_origin: for a destructive command's message, which of REMOTE_DIR,
+# the SSH user and the host list came from the plan, and which plan:
+# " (remote_dir=, ssh_user= and the host list from the plan ./iperf_plan.conf)".
+# Nothing when none did (shared_tools IO-005).
+_plan_origin() {
+    local parts=() what
+    _plan_gave REMOTE_DIR && parts+=("remote_dir=")
+    _plan_gave SSH_USER && parts+=("ssh_user=")
+    if [ -n "${_PLAN_GAVE_IPERF_SERVERS+x}" ] && [ "$SERVER_LIST_FILE" = "$_PLAN_GAVE_IPERF_SERVERS" ]; then
+        parts+=("the host list")
+    fi
+    case ${#parts[@]} in
+        0) return 0 ;;
+        1) what="${parts[0]}" ;;
+        2) what="${parts[0]} and ${parts[1]}" ;;
+        *) what="${parts[0]}, ${parts[1]} and ${parts[2]}" ;;
+    esac
+    printf ' (%s from the plan %s)' "$what" "$(_plan_name)"
 }
 
 if [ -n "$PLAN_FILE" ]; then
@@ -1281,7 +1321,8 @@ MODES:
     rolling              random rolling probes for --total-time; any fleet size
 
 COMMON FLAGS (all become plan defaults once 'gen' has run):
-    --plan FILE                plan file (default ./$PLAN_FILE_DEFAULT)
+    --plan FILE                plan file (default ./$PLAN_FILE_DEFAULT, announced
+                               on stderr when picked up from there)
     --servers, -s FILE         server list (one host per line; '#' comments)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --total-time SECONDS       wall-time for rolling mode (default $IPERF_TOTAL_TIME)
@@ -1325,7 +1366,8 @@ USAGE:
 GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --plan FILE                Plan file written by 'gen' (default: \$IPERF_PLAN
                                env, else ./$PLAN_FILE_DEFAULT whenever it exists --
-                               loaded silently, by every command).
+                               loaded by every command, which then says so on
+                               stderr; --quiet hides that line).
                                Holds the host list plus every setting below;
                                precedence: CLI flag > env var > plan > default.
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
@@ -2723,10 +2765,10 @@ cmd_cleanup() {
     done
     _require_removable_remote_dir cleanup
     if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ] && [ "$seen_yes" -ne 1 ]; then
-        die "cleanup will delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host (only if it holds nothing but the files this tool writes). Pass --yes to confirm."
+        die "cleanup will delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host (only if it holds nothing but the files this tool writes)$(_plan_origin). Pass --yes to confirm."
     fi
     _validate_server_list
-    log "Removing $REMOTE_DIR on every host (only the files this tool writes, then the directory)..."
+    log "Removing $REMOTE_DIR on every host (only the files this tool writes, then the directory)$(_plan_origin)..."
     parallel_hosts _worker_cleanup
     [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "cleanup: ${#PARALLEL_FAILED[@]} failure(s)"
 }
@@ -5154,7 +5196,7 @@ cmd_all() {
     log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
     log "Run ID: $RUN_ID"
     log "Results dir: $RESULTS_DIR"
-    log "At the end: delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host -- only the files this tool writes there, then the directory; anything else in it stops the delete."
+    log "At the end: delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host$(_plan_origin) -- only the files this tool writes there, then the directory; anything else in it stops the delete."
 
     _all_gate() {
         local step="$1"
@@ -5398,7 +5440,7 @@ cmd_clean() {
     _validate_server_list
     if [ "$seen_yes" -ne 1 ]; then
         local what
-        what="stop the iperf daemons and delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host in $SERVER_LIST_FILE (only if it holds nothing but the files this tool writes)"
+        what="stop the iperf daemons and delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host in $SERVER_LIST_FILE (only if it holds nothing but the files this tool writes)$(_plan_origin)"
         if [ -t 0 ] && [ -t 2 ]; then
             printf 'clean will %s. Continue? [y/N] ' "$what" >&2
             IFS= read -r ans || ans=""
@@ -5410,7 +5452,7 @@ cmd_clean() {
             die "clean will $what. Pass --yes to confirm (on a terminal it asks instead)."
         fi
     fi
-    log "Stopping daemons and removing $REMOTE_DIR on every host..."
+    log "Stopping daemons and removing $REMOTE_DIR on every host$(_plan_origin)..."
     cmd_stop_servers
     parallel_hosts _worker_clean_verify
     if [ ${#PARALLEL_FAILED[@]} -gt 0 ]; then
@@ -5517,6 +5559,18 @@ shift || true
 # error for every command except `gen`, which is how the file gets created.
 if [ -n "${_PLAN_MISSING:-}" ] && [ "$cmd" != "gen" ]; then
     die "plan file not found: $_PLAN_MISSING (run '$PROG gen' to create it)"
+fi
+
+# A plan nobody named, picked up because ./iperf_plan.conf exists, is said
+# out loud (shared_tools IO-005): it sets every setting, remote_dir= and
+# ssh_user= included, and a directory can hold someone else's plan. On
+# stderr, so output piped elsewhere is unchanged; --quiet hides it.
+if [ "$_PLAN_EXPLICIT" = 0 ] && [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ] \
+   && [ "${IPERF_VERBOSITY:-1}" -ge 1 ]; then
+    case "$cmd" in
+        ""|help|-h|--help|help-advanced|--help-advanced|version|--version) ;;
+        *) echo "[$(ts)] Using plan $(_plan_name) from the current directory (--plan FILE or IPERF_PLAN picks another)" >&2 ;;
+    esac
 fi
 
 case "$cmd" in
