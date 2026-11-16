@@ -279,7 +279,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_MODE` | *(plan `mode=` key)* | `parallel` | default run mode when none is passed |
 | `IPERF_SERVERS` | `--servers`, `-s` | plan hosts, else `<script-dir>/servers.txt` | server list path |
 | `RESULTS_BASE` | `--output`, `-o` | `<script-dir>/results` | base directory for run subdirs |
-| `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address |
+| `IPERF_RUN_ID` | `--run-id` | auto-timestamp on write; `latest` symlink on read | which run subdir to address: letters, digits, `.`, `_` and `-` (see **Values that are refused**) |
 | `IPERF_PORT` | `--port` | `5001` | iperf2 listening port |
 | `IPERF_DURATION` | `--duration`, `-d` | `10` | seconds per test |
 | `IPERF_TEST_TIMEOUT` | `--test-timeout` | `duration + 30` | hard cap per iperf -c, enforced with coreutils `timeout` on the remote host; `0` disables |
@@ -297,7 +297,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_SERVER_BIND` | `--server-bind` | the `--bind` pattern | bind each `iperf -s` daemon to its matching NIC too |
 | `IPERF_DRY_RUN` | `--dry-run`, `-n` | `0` | print SSH/SCP commands instead of executing |
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
-| `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
+| `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user: letters, digits, `.`, `_`, `@` and `-` (see **Values that are refused**) |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
 | `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, and `cleanup`, `clean`, `all` and `run` delete only those files and then the directory: they refuse an empty value, `/`, a top-level directory, a value starting with `~`, one with a `..` component, the login directory, a home directory, and a directory holding anything the tool did not write (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory. Before writing to it or running a script from it, each host checks that it is a real directory (not a symlink), owned by the SSH user and not writable by group or others, and fails if not; a new one is created mode `700` |
 | `IPERF_ALLOW_SHARED_REMOTE_DIR` | `--allow-shared-remote-dir` | `0` | `1` lets `REMOTE_DIR` be group-writable, for a directory a group shares on NFS; the symlink, owner and other-write checks still apply |
@@ -415,7 +415,7 @@ Since 2.9.0 a host failure shows in the exit status, not only in a `WARN` line, 
 - `run-tests` exits **1** without running a round when `distribute-scripts` failed on any host, unless `--keep-going`.
 - `all` and `start` stop with exit 1 at the first step with a host failure, unless `--keep-going`; `clean` exits 1 when a host still has leftovers.
 - `summarize` and `process` go on to analyse whatever `collect-results` brought back. A host that could not be collected from does not by itself make them fail; the `WARN` line names it, and the analysis steps fail as before when there is nothing to analyse.
-- Anything refused before a host is contacted (a bad value, a missing server list) exits 1, an unknown command 2.
+- A setting refused at startup exits **2**: a number that is not one, a value outside the characters in **Values that are refused**, an unknown flag or command. Anything else refused before a host is contacted (a missing server list, a host name that cannot be one, a `--remote-dir` the tool will not delete) exits **1**.
 
 #### `--dry-run`, `--verbose`, `--quiet`
 
@@ -845,9 +845,25 @@ If another user already holds `/tmp/iperf_orchestrator` on a host, that host now
 
 ### What reaches the hosts
 
-Every value the orchestrator puts into a command a host runs — host names, `--remote-dir`, `--run-id`, `--bind` / `--server-bind`, the `-b` / `-l` / `-w` / `-M` values, and the same settings from a plan file — is quoted so it arrives as the literal value it is. A quote, `;`, `$(...)`, a backtick or a newline in one is part of the value, never a second command. (Before 2.6.4 they were pasted in unquoted, and any of those ran on every host.) No value is refused for its characters; a value made only of ordinary characters is sent exactly as before, and an iperf value with spaces in it is still split into words, as it always was. This holds with bash 4.2 to 5.2 on the orchestrator and on the hosts, and in multibyte locales such as GBK. A remote path that holds characters a shell would read (`$`, quotes, spaces, …) is copied over `ssh` + `cat` instead of `scp`, because `scp` before OpenSSH 9.0 hands the remote path to the remote shell.
+Every value the orchestrator puts into a command a host runs — host names, `--remote-dir`, `--run-id`, `--bind` / `--server-bind`, the `-b` / `-l` / `-w` / `-M` values, and the same settings from a plan file — is quoted so it arrives as the literal value it is. A quote, `;`, `$(...)`, a backtick or a newline in one is part of the value, never a second command. (Before 2.6.4 they were pasted in unquoted, and any of those ran on every host.) Since 2.11.0 a value that can never be valid is also refused before any host is contacted (**Values that are refused**, below); the quoting stays, for a `--bind` pattern, which is not checked, and for anything a host itself prints. A value made only of ordinary characters is sent exactly as before, and an iperf value with spaces in it is still split into words, as it always was. This holds with bash 4.2 to 5.2 on the orchestrator and on the hosts, and in multibyte locales such as GBK. A remote path that holds characters a shell would read (`$`, quotes, spaces, …) is copied over `ssh` + `cat` instead of `scp`, because `scp` before OpenSSH 9.0 hands the remote path to the remote shell.
 
 The SSH destination always comes after `--`, so an `--ssh-user` that starts with `-` cannot be read by `ssh` as an option. `collect-results` keeps only regular files from each host's tarball: this run's test logs, and that host's own server log, status and CPU files. Anything else in it (a symlink, a directory, another host's CPU file, a file such as `iperf_pivot.txt`) is left out, with a warning. A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new one is built, so it is never fetched again.
+
+### Values that are refused
+
+Since 2.11.0 a value that can never be a run id, a path, a user name, an iperf value or a host is refused before any command runs and before any host is contacted. Until then every value was accepted and quoted, so none of these could run anything on a host, but some did harm or failed late: `--run-id ../../x` wrote its run two levels above `--output` and pointed `latest` at it, an empty `--remote-dir=` was taken, and a host name with a quote or a space failed only when `ssh` tried it.
+
+| Value | Set by | Accepted |
+|---|---|---|
+| run id | `--run-id`, `IPERF_RUN_ID` | letters, digits, `.`, `_` and `-`; not `.` or `..` |
+| remote work dir | `--remote-dir`, `REMOTE_DIR`, plan `remote_dir=` | anything but empty or a control character (a newline, a tab, …) |
+| SSH user | `--ssh-user`, `SSH_USER`, plan `ssh_user=` | letters, digits, `.`, `_`, `@` and `-`; not starting with `-` |
+| iperf values | `--bandwidth`, `--length`, `--window`, `--mss`, their `IPERF_*` variables and plan keys | letters, digits, `.`, `,`, `:`, `+` and `-`, in words separated by spaces (split into words, as always) |
+| host | server-list and plan host lines, `--single-server` | letters, digits, `.`, `_`, `:`, `%` and `-`; an IPv6 address may be in one pair of `[ ]` (`[fe80::1%eth0]`) |
+
+A refused setting stops the command with exit status 2 and names the value and every place it can be set. A refused host stops every command that contacts hosts (`status` included) with exit status 1 and lists every entry it refused; `gen` writes no plan from such a list. `--bind` and `--server-bind` are patterns matched against `ip addr` output, not values, and are not checked. `help` and `version` still run whatever is set.
+
+A run that an earlier version made with an id outside the set (`--run-id 'nightly run'`) can still be followed through `latest`, but no longer named with `--run-id`: rename its directory under `results/` to address it.
 
 <!-- docs:end -->
 ---
