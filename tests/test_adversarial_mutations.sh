@@ -239,8 +239,8 @@ MUTATIONS=$(cat <<'TABLE'
 ---     s+="case \"\$_ioargs\" in *$script_mark*|*$f*) "
 +++     s+="case x in *) "
 ### test_stop_run_stops_the_runs_own_session
---- ps -e -o pid=,sid= 2>/dev/null | awk
-+++ ps -e -o pid=,pgid= 2>/dev/null | awk
+--- '\$3 == s {print \$1}'
++++ '\$2 == s {print \$1}'
 ### test_finished_run_leaves_no_sid_file_and_clean_removes_one
 --- iperf_run_*.status iperf_run_*.sid iperf_server_*.log
 +++ iperf_run_*.status iperf_server_*.log

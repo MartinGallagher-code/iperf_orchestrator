@@ -2221,9 +2221,12 @@ _worker_stop_run() {
     s="cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 0; [ -f $f ] || exit 0; "
     s+="_iosid=\$(head -n 1 $f); rm -f $f; "
     s+="case \"\$_iosid\" in ''|*[!0-9]*|0|1) _iosid='' ;; esac; "
-    # The processes in session \$_iosid: ps where it can say, /proc otherwise.
-    s+="_iosess() { ps -e -o pid=,sid= 2>/dev/null | awk -v s=\"\$_iosid\" '\$2 == s {print \$1}' | grep . "
-    s+="|| for _iop in /proc/[0-9]*; do [ \"\$(sed 's/.*) //' \"\$_iop/stat\" 2>/dev/null | cut -d' ' -f4)\" = \"\$_iosid\" ] && echo \"\${_iop#/proc/}\"; done; }; "
+    # The processes in session \$_iosid. Every process as "pid pgid sid",
+    # from ps, or from /proc where there is no ps; then those whose session
+    # (not process group: timeout makes groups of its own) is the run's.
+    s+="_iosess() { if command -v ps >/dev/null 2>&1; then ps -e -o pid=,pgid=,sid= 2>/dev/null; "
+    s+="else for _iop in /proc/[0-9]*; do echo \"\${_iop#/proc/} \$(sed 's/.*) //' \"\$_iop/stat\" 2>/dev/null | cut -d' ' -f3,4)\"; done; fi "
+    s+="| awk -v s=\"\$_iosid\" '\$3 == s {print \$1}'; }; "
     s+="if [ -n \"\$_iosid\" ]; then "
     s+="_ioargs=\$(tr '\\0' ' ' < /proc/\$_iosid/cmdline 2>/dev/null) || _ioargs=\$(ps -o args= -p \"\$_iosid\" 2>/dev/null); "
     s+="case \"\$_ioargs\" in *$script_mark*|*$f*) "
