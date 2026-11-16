@@ -87,7 +87,7 @@ workflow):
 | `status` | One line per host: probes, daemons, and live test progress. |
 | `summarize` | Collect results; render CSV, pivot, heatmap; print the summary and what to do next. |
 | `stop` | Stop the daemons (test logs stay on the hosts). |
-| `clean` | Stop, then delete the remote work dir everywhere — verified gone. It runs `rm -rf` on whatever `--remote-dir` (or the plan's `remote_dir=`) names, and does not ask first; see **Shared-FS safety**. |
+| `clean --yes` | Stop, then delete the remote work dir everywhere — verified gone. It asks first: without `--yes` it prompts on a terminal and refuses anywhere else. It deletes only the files this tool writes there and then the empty directory, and refuses a `--remote-dir` that cannot be the tool's own (empty, `/`, `~`, a home directory, a directory holding anything else); see **Shared-FS safety**. |
 
 Not sure what to ask for? `./iperf-orchestrator.sh hints` turns a goal into
 the command that gets you there. The classic one-liner still works too:
@@ -145,7 +145,8 @@ PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
                          --watch redraws every N seconds until ctrl-c
   summarize              process + pivot + results-summary (with what-next hints)
   stop                   stop-servers, plus the next steps spelled out
-  clean                  stop + remove $REMOTE_DIR everywhere, then verify
+  clean [--yes]          stop + remove $REMOTE_DIR everywhere, then verify
+                         (asks first; --yes skips the question)
   run [MODE] [--for N] [--keep-going]
                          all + results-summary; --for pins total-time (rolling)
                          or per-test duration (other modes)
@@ -162,7 +163,7 @@ EXECUTION:
                          parallel | sequential-host | sequential-pair | rolling.
   collect-results        Pull logs back as a tar archive per host
   stop-servers           Kill iperf -s on every host
-  cleanup --yes          Remove $REMOTE_DIR on every host
+  cleanup --yes          Remove $REMOTE_DIR on every host (its own files only)
 
 ANALYSIS:
   parse-csv              Parse iperf2 CSV logs into iperf_results.csv (2 rows per test)
@@ -224,9 +225,10 @@ cannot contain whitespace.
 current directory whenever that file exists, without saying so, unless
 `--plan FILE` or `$IPERF_PLAN` names another plan. Its settings then apply
 like flags you typed, `remote_dir=` and `ssh_user=` included. So run
-commands in a directory whose plan you know: `clean` in a directory that
-holds someone else's plan deletes whatever that plan's `remote_dir=` names,
-on that plan's hosts, as that plan's user. `status` prints the plan it
+commands in a directory whose plan you know: `clean --yes` in a directory
+that holds someone else's plan deletes that plan's `remote_dir=`, on that
+plan's hosts, as that plan's user (only if it holds nothing but this tool's
+files: see **Shared-FS safety**). `status` prints the plan it
 loaded. `--test-timeout`, `--single-server`, `--python`,
 `--run-id` and the `--overlay-*` flags are per-run choices, not plan
 settings: pass them (or their environment variables) each time.
@@ -286,7 +288,7 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory. Before writing to it or running a script from it, each host checks that it is a real directory (not a symlink), owned by the SSH user and not writable by group or others, and fails if not; a new one is created mode `700` |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, and `cleanup`, `clean`, `all` and `run` delete only those files and then the directory: they refuse an empty value, `/`, a top-level directory, a value starting with `~`, one with a `..` component, the login directory, a home directory, and a directory holding anything the tool did not write (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory. Before writing to it or running a script from it, each host checks that it is a real directory (not a symlink), owned by the SSH user and not writable by group or others, and fails if not; a new one is created mode `700` |
 | `IPERF_ALLOW_SHARED_REMOTE_DIR` | `--allow-shared-remote-dir` | `0` | `1` lets `REMOTE_DIR` be group-writable, for a directory a group shares on NFS; the symlink, owner and other-write checks still apply |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 | `SSH_OPTS` | *(env only)* | `-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30` | options passed to every `ssh`/`scp` (`BatchMode=yes` is always added) |
@@ -799,9 +801,16 @@ ls results/
 
 `REMOTE_DIR` (default `/tmp/iperf_orchestrator`) can point at a shared filesystem (NFS home, GPFS, etc.) while a run is in flight. Every remote-side file the orchestrator creates embeds both the sanitized hostname and the run-id, so hosts sharing the directory, and simultaneous or back-to-back runs, never overwrite each other's files.
 
-**Cleanup is not scoped the same way.** `cleanup`, `clean`, and the last step of `all` and `run` all run `rm -rf "$REMOTE_DIR"` on every host. On a shared filesystem that removes the directory for everyone, including the files of any other run still using it. Give concurrent runs their own `--remote-dir`, or use `start` / `summarize` / `stop` and clean up once every run sharing the directory has finished.
+**Cleanup is not scoped by run.** `cleanup`, `clean`, and the last step of `all` and `run` remove every file the tool writes in `REMOTE_DIR` (any run's) and then the directory. On a shared filesystem that removes the directory for everyone, including the files of any other run still using it. Give concurrent runs their own `--remote-dir`, or use `start` / `summarize` / `stop` and clean up once every run sharing the directory has finished.
 
-**What exactly is deleted.** The path in `REMOTE_DIR`, as written, with `rm -rf`, as the SSH user — and nothing checks it first. Only `cleanup` asks for `--yes`; `clean`, `all` and `run` do not ask. A `REMOTE_DIR` of `/home/alice`, or any directory the tool did not make, is deleted like any other; `/` itself survives only because GNU `rm` refuses it; and an empty `--remote-dir=` deletes nothing yet `clean` still reports every host clean. Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
+**What exactly is deleted, and what is refused** (since 2.8.0). Before 2.8.0 these commands ran `rm -rf "$REMOTE_DIR"` and nothing checked the value: `--remote-dir /home/alice clean` deleted a home directory. Now:
+
+- **They ask.** `cleanup` and `clean` need `--yes`; on a terminal `clean` asks instead (`y` to go on), and anywhere else it refuses without contacting a host. `all` and `run` say at the start which directory they will delete at the end.
+- **Refused before any host is contacted:** an empty `REMOTE_DIR`; `/` (or `//`, `/./`); a top-level directory such as `/tmp` or `/home`; anything starting with `~` (the hosts get the value quoted, so `~` is never expanded); a value with a `..` component; the login directory itself (`.`); a home directory by its shape (`…/home/<user>`, `…/Users/<user>`, `/root`, `/var/root`); and this machine's `$HOME` or a directory above it. The command fails with the reason and exits non-zero.
+- **Refused on the host, removing nothing there:** a `REMOTE_DIR` that fails the ownership checks below (a symlink, another user's, writable by others); one that is, or holds, the SSH user's home directory or any home directory in the host's password database; and one holding anything the tool does not write there. The tool's own names are `run_iperf_*.sh`, `.run_iperf_*.tmp`, `iperf_test_*.log`, `iperf_run_*.status`, `iperf_server_*.log`, `cpu_*.log`, `_results_*.tar.gz` and `_iperf_files_*.list`, as plain files or symlinks (a symlink is removed, never followed). The error lists what else is there; move it out, or pick another `--remote-dir`.
+- **Otherwise** those files are removed and then the empty directory (`rmdir`), so nothing the tool did not write can be deleted. A `REMOTE_DIR` that does not exist is left alone. `clean` then checks that the directory is gone and reports `LEFTOVER` (and fails) on any host where it is not.
+
+Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
 
 **On a host other people use**, the default `/tmp/iperf_orchestrator` is a name anyone can create first. If another user owned that directory (or could write to it), they could replace a run script before it ran, or leave a symlink where `distribute-scripts` writes, so that the SSH user's file at the other end of it was overwritten. Since 2.7.0 every host checks `REMOTE_DIR` first:
 

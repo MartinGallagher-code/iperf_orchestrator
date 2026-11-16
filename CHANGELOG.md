@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-11-16
+
+`clean`, `cleanup`, `all` and `run` ask before deleting, and delete only a
+remote work dir that can be the tool's own, and in it only the tool's own
+files (shared_tools ticket IO-004, found by IO-001's adversarial pass).
+
+### Changed
+
+- **`clean` asks first.** It needs `--yes`, like `cleanup`; on a terminal
+  it asks instead (`y` to go on), and anywhere else (a script, cron, a
+  pipe) it refuses without contacting a host. **A script that ran a bare
+  `clean` must now pass `clean --yes`.** `all` and `run` say at the start
+  which `REMOTE_DIR` they will delete at the end.
+- **Values that can never be the tool's own work dir are refused before
+  any host is contacted**, by `clean`, `cleanup`, `all` and `run`: an
+  empty `REMOTE_DIR`, `/`, a top-level directory (`/tmp`, `/home`), a
+  value starting with `~`, a `..` component, the login directory (`.`),
+  a home directory by its shape (`.../home/<user>`, `.../Users/<user>`,
+  `/root`, `/var/root`), and this machine's `$HOME` or a directory above
+  it. IO-001 had deleted everything in a user's home directory with
+  `--ssh-user victim --remote-dir /home/victim clean`, and an empty
+  `--remote-dir=` deleted nothing yet reported every host `CLEAN`.
+- **No more `rm -rf`.** On each host the removal first runs the IO-003
+  check (a real directory, owned by the SSH user, not writable by
+  others), then refuses, removing nothing, a directory that is or holds
+  the SSH user's home or any home in the host's password database, and a
+  directory holding anything the tool does not write there. Otherwise it
+  removes the tool's own files (`run_iperf_*.sh`, `.run_iperf_*.tmp`,
+  `iperf_test_*.log`, `iperf_run_*.status`, `iperf_server_*.log`,
+  `cpu_*.log`, `_results_*.tar.gz`, `_iperf_files_*.list`) and then the
+  empty directory with `rmdir`. **This refuses directories that were
+  deleted before**: one holding a file of your own, or one another user
+  owns; and a `REMOTE_DIR` that is a symlink is now refused rather than
+  the link removed.
+- The README (commands table, `REMOTE_DIR` row, "Shared-FS safety"),
+  `--help`, `--help-advanced` and the shell completions say what is
+  refused.
+
+### Tests
+
+- `tests/test_adversarial.sh`: five new sandbox tests (unsafe values
+  refused by all four commands with no host contacted; a home directory
+  on the host; a directory holding a file the tool did not write, for
+  `clean`, `cleanup`, `all` and `run`; `clean` without `--yes` off a
+  terminal; a real run's directory removed completely), each with a
+  mutation in `tests/test_adversarial_mutations.sh`.
+
 ## [2.7.0] - 2026-11-16
 
 The remote work dir is checked on every host before anything is written

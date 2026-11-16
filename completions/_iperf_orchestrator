@@ -11,7 +11,7 @@ _iperf_orchestrator() {
         'start:Start iperf2 daemons everywhere and run the tests'
         'summarize:Collect results, render CSV/pivot/heatmap, print hints'
         'stop:Stop the iperf2 daemons (logs stay on the hosts)'
-        'clean:Stop + delete the remote work dir everywhere, verified'
+        'clean:Stop + delete the remote work dir everywhere, verified (asks; --yes)'
         'run:start + summarize + stop + clean in one shot'
         'hints:What you want to know -> the command for it'
         'status:Probe hosts, list runs, show live progress'
@@ -136,8 +136,8 @@ _iperf_orchestrator() {
                         '--keep-going[continue past per-host failures]' \
                         '--help[show help]'
                     ;;
-                cleanup)
-                    _arguments '--yes[confirm rm -rf on every host]' '--help[show help]'
+                cleanup|clean)
+                    _arguments '--yes[confirm deleting REMOTE_DIR on every host]' '--help[show help]'
                     ;;
                 status)
                     _arguments '--watch[redraw every N seconds]:seconds:' '--help[show help]'
