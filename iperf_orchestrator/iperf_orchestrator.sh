@@ -248,6 +248,18 @@ START_DELAY="${START_DELAY:-30}"           # seconds in future for synchronized 
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+# The analysis steps run Python read from a heredoc (`"$PYTHON_BIN" - ...`)
+# and doctor runs `"$PYTHON_BIN" -c ...`. For both, Python puts the current
+# directory first on sys.path, so a glob.py or csv.py in the directory the
+# tool is run from would be imported in place of the standard library's and
+# run on this machine (shared_tools IO-010). Every heredoc therefore starts
+# with the line below, which drops that entry before anything else is
+# imported, and the -c probes start with it too. -I would do it, but it also
+# drops user site-packages, where matplotlib often lives, and -P needs 3.11.
+# A PYTHONPATH the user sets is left alone: Python makes its entries
+# absolute, so they are the user's own choice of directory.
+PY_NO_CWD='import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]'
+
 # Overlay export (`export-overlay`): the datacenter layout viewer's results
 # format -- one `test  target  value` sample per line, painted over a .dc
 # floor plan. Nothing is exported unless asked for: `export-overlay` writes
@@ -2614,6 +2626,7 @@ cmd_parse_csv() {
     fi
 
     "$PYTHON_BIN" - "$RESULTS_DIR" "$csv" "$active_list" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import os, sys, csv, glob
 
 results_dir, out_csv = sys.argv[1], sys.argv[2]
@@ -2979,6 +2992,7 @@ cmd_parse_cpu() {
     fi
 
     "$PYTHON_BIN" - "$RESULTS_DIR" "$cpu_csv" "$active_list" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import os, sys, csv, glob, re
 
 results_dir, out_csv = sys.argv[1], sys.argv[2]
@@ -3277,6 +3291,7 @@ cmd_make_pivot() {
 
     "$PYTHON_BIN" - "$csv" "$pivot" \
         "$meta_run_at" "$meta_mode" "$meta_n_hosts" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import csv, sys
 from collections import Counter, defaultdict
 
@@ -3544,6 +3559,7 @@ cmd_make_heatmap() {
 
     "$PYTHON_BIN" - "$csv" "$png" "$cpu_csv" \
         "$meta_run_at" "$meta_mode" "$meta_duration" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import csv, sys, os
 from collections import defaultdict
 
@@ -3841,9 +3857,9 @@ _doctor_check_python_module() {
     if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
         return 1
     fi
-    if "$PYTHON_BIN" -c "import $mod" 2>/dev/null; then
+    if "$PYTHON_BIN" -c "$PY_NO_CWD; import $mod" 2>/dev/null; then
         local pyver
-        pyver=$("$PYTHON_BIN" -c "import $mod; print(getattr($mod, '__version__', '?'))" 2>/dev/null)
+        pyver=$("$PYTHON_BIN" -c "$PY_NO_CWD; import $mod; print(getattr($mod, '__version__', '?'))" 2>/dev/null)
         log "  OK  python -m $mod   $pyver"
         return 0
     fi
@@ -3862,6 +3878,7 @@ cmd_results_summary() {
     command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
 
     "$PYTHON_BIN" - "$csv" "$cpu_csv" "$PROG" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import csv, sys, os, statistics, textwrap
 
 in_csv = sys.argv[1]
@@ -4106,6 +4123,7 @@ cmd_export_overlay() {
         "$ORCH_VERSION" "$mode" "$expected" "$IPERF_OVERLAY_LINE_RATE" \
         "$IPERF_OVERLAY_TEST_PREFIX" "$IPERF_OVERLAY_RUN" "$IPERF_OVERLAY_WINDOW" \
         "$peer_counts" "$IPERF_BANDWIDTH" <<'PYEOF'
+import sys; sys.path[:] = [p for p in sys.path if p not in ("", ".")]  # PY_NO_CWD (IO-010)
 import csv, io, json, os, sys
 from collections import Counter
 

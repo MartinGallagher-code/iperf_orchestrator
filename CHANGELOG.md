@@ -7,8 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [2.8.2] - 2026-11-16
 
 A test that failed at random no longer does (shared_tools ticket IO-011).
-Nothing in the tool itself changed. 2.8.1 is IO-010, in its own pull
-request.
+Nothing in the tool itself changed.
 
 ### Fixed
 
@@ -35,6 +34,41 @@ request.
   that `rm` without `-f` of a missing name still fails. It includes a
   mutation check: with the fix taken out of a copy of the helper, the race
   test fails.
+## [2.8.1] - 2026-11-16
+
+The analysis steps no longer import Python modules from the directory the
+tool is run from (shared_tools ticket IO-010, found by IO-001's
+adversarial pass).
+
+### Fixed
+
+- **A `glob.py` or `csv.py` in the current directory no longer runs.**
+  `parse-csv`, `parse-cpu`, `make-pivot`, `make-heatmap`,
+  `results-summary` and `export-overlay` each run Python read from a
+  heredoc (`python3 - ...`), and `doctor` probes numpy and matplotlib
+  with `python3 -c "import ..."`. For both, Python puts the current
+  directory first on `sys.path`, so a module planted there under a
+  standard-library name (or as `numpy.py`) was imported in its place and
+  ran on this machine: in a directory holding a one-line `glob.py`,
+  `parse-csv` ran it and then failed with "module 'glob' has no
+  attribute 'glob'", and `doctor` reported a planted `numpy.py` as numpy.
+  Each heredoc now starts by dropping that entry, before anything else
+  is imported, and so do the `doctor` probes. It works on Python 3.6
+  (no `-P`), and `-I` was not used because it would also drop user
+  site-packages, where matplotlib is often installed. A `PYTHONPATH` you
+  set is still honoured.
+
+### Tests
+
+- `tests/test_no_cwd_imports.sh`: each analysis step and `doctor`, run
+  from a directory holding planted `csv.py`, `glob.py`, `re.py`,
+  `json.py`, `statistics.py`, `textwrap.py`, `collections.py`,
+  `matplotlib.py` and `numpy.py`, succeeds and runs none of them (all
+  seven failed on 2.8.0); an absolute `PYTHONPATH` entry still works; and
+  every `PYEOF` heredoc starts with the guard. Each test has a mutation
+  in `tests/test_no_cwd_imports_mutations.sh` that undoes the fix for
+  that step (or, for the `PYTHONPATH` test, runs the step with `-I`) and
+  shows the test fails.
 
 ## [2.8.0] - 2026-11-16
 
