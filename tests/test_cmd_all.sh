@@ -72,6 +72,7 @@ args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) shift; [ $# -gt 0 ] && shift ;;
+        --) shift ;;
         -[a-zA-Z]) shift ;;
         *) args+=("$1"); shift ;;
     esac

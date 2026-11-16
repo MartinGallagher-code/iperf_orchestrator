@@ -49,6 +49,7 @@ args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) shift; [ $# -gt 0 ] && shift ;;
+        --) shift ;;
         -[a-zA-Z]) shift ;;
         *) args+=("$1"); shift ;;
     esac
@@ -61,6 +62,13 @@ printf 'scp\t%s\t%s\n' "$src" "$dst" >> "$LOG"
 trans() {
     local p="$1"
     case "$p" in
+        *@\[*\]:*)
+            # scp's form of an IPv6 literal; the pseudo-remote dir is keyed
+            # on the bare address, as ssh is given it.
+            local host="${p#*@\[}"; host="${host%%\]:*}"
+            local path="${p#*\]:}"
+            echo "$path" | sed -e "s|@FAKE_REMOTE_DIR@|$TEST_TMPDIR/remote-$host|g"
+            ;;
         *@*:*)
             local host="${p%%:*}"; host="${host#*@}"
             local path="${p#*:}"
@@ -180,13 +188,13 @@ test_collect_results_handles_empty_remote_dir() {
 
 test_collect_results_uses_sanitized_hostname_in_tarball() {
     # Bracketed IPv6 hostname -> tarball uses sanitized name. The
-    # pseudo-remote dir is keyed on the unsanitized hostname (matching
-    # how the orchestrator addresses the host), but the files inside
-    # use the sanitized form.
+    # pseudo-remote dir is keyed on the host as ssh is given it -- the bare
+    # address, since ssh cannot resolve '[fe80::1]' (2.6.4) -- but the
+    # files inside use the sanitized form.
     install_smart_fake_ssh
     write_server_list '[fe80::1]' >/dev/null
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
-    local d="$TEST_TMPDIR/remote-[fe80::1]"
+    local d="$TEST_TMPDIR/remote-fe80::1"
     mkdir -p "$d"
     : > "$d/iperf_server__fe80__1__${IPERF_RUN_ID}.log"
     : > "$d/iperf_run__fe80__1__${IPERF_RUN_ID}.status"

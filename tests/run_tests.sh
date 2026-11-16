@@ -11,6 +11,9 @@
 #   tests/run_tests.sh                  # run everything
 #   tests/run_tests.sh test_state.sh    # run a single file
 #   tests/run_tests.sh -v               # verbose (show test stdout)
+#   tests/run_tests.sh --sandbox        # every install_fake_ssh installs the
+#                                       # sandbox ssh, which really runs each
+#                                       # remote command (test_helper.bash)
 
 set -u
 
@@ -29,6 +32,7 @@ files=()
 for arg in "$@"; do
     case "$arg" in
         -v|--verbose) VERBOSE=1 ;;
+        --sandbox) export FAKE_SSH_MODE=sandbox ;;
         *) files+=("$arg") ;;
     esac
 done
@@ -52,6 +56,7 @@ failed_files=()
 echo "iperf-orchestrator test suite"
 echo "  orchestrator: $ORCH"
 echo "  test files:   $total_files"
+[ "${FAKE_SSH_MODE:-}" = "sandbox" ] && echo "  fake ssh:     sandbox (remote commands really run)"
 echo
 
 for f in "${files[@]}"; do

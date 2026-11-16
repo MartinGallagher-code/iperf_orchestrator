@@ -4,6 +4,151 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.4] - 2026-11-13
+
+An adversarial pass over everything the tool runs on a fleet's hosts
+(shared_tools ticket IO-001). Every defect below was reproduced for real,
+over ssh against a throwaway sshd, and every one is also in 2.5.0, the
+version on PyPI.
+
+### Fixed
+
+- **A value can no longer run commands on the hosts.** Host names,
+  `--remote-dir`, `--run-id`, `--bind` / `--server-bind` and the `-b` / `-l`
+  / `-w` / `-M` values — and the same settings in a plan file — were pasted
+  into the ssh snippets and the generated run scripts unquoted (or between
+  bare single quotes). A quote, `;`, `$(...)`, a backtick or a newline in any
+  of them ran as a command on every host, as the SSH user: for example
+  `--remote-dir "/tmp/x';touch /tmp/X;'" cleanup --yes`, a server-list line
+  `h2$(id)` (run by every other host's run script), `--bandwidth
+  '1g;cmd;true'`, or a newline in `--run-id`, which added a line to every run
+  script. Each value now goes through one set of POSIX quoting helpers and
+  reaches the host as the literal value it is. Nothing is refused, and a value
+  made only of ordinary characters is written exactly as before: for ordinary
+  input the generated run scripts and every remote command are byte-for-byte
+  what 2.6.3 sent. An iperf value with spaces is still split into words, as
+  it always was. The quoting holds with bash 4.2 to 5.2 on either side, in
+  multibyte locales such as GBK (where a backtick can hide inside a
+  character), and for values that end in a newline.
+- **A host name's `$(...)` no longer runs under bash before 5.2.** Rolling
+  mode counted each peer's probes with `$((counts["$target"] + 1))`, and `gen
+  --grid` and `hints` summed a pair grid with `$((... GRID_TX_COUNT[$gh]))`.
+  Bash before 5.2 (5.1 is Ubuntu 22.04's) expands an associative-array
+  subscript a second time inside `$((...))`, so a peer named `h2$(cmd)` ran
+  `cmd` on every host in rolling mode, and a grid host name ran it on the
+  orchestrator's own machine — even with the value quoted. The value is now
+  read with `${...}` first and the arithmetic done on a plain number. CI's
+  Python 3.6 image (bash 5.1) caught it; `BASH_COMPAT=50` reproduces it on a
+  newer bash, and the tests use that.
+- **A `--run-id` with a space or a `*` no longer deletes other files.**
+  `distribute-scripts` clears this run's old logs with an `rm -f` glob built
+  from the run id. `--run-id 'nightly run'` deleted `~/run.log` on every
+  host, and `--run-id '*'` deleted every other run's logs in a shared
+  `REMOTE_DIR`.
+- **A remote path with shell characters is no longer handed to `scp`.**
+  `scp` before OpenSSH 9.0 (and `scp -O`) passes the remote path to the
+  remote shell, so a `$(...)` in `--remote-dir` or `--run-id` ran on the host.
+  Such a path is now copied over `ssh` + `cat`, quoted. Ordinary paths still
+  go over `scp`.
+- **The SSH destination follows `--`.** An `--ssh-user` (or a plan's
+  `ssh_user=`) starting with `-`, such as `-oProxyCommand=...`, was read by
+  `ssh` and `scp` as an option, and a ProxyCommand runs on the orchestrator's
+  own machine. OpenSSH 9.6 happens to stop it for the orchestrator's commands,
+  which its hostname check rejects (it does run for a one-word command);
+  older clients have no such check.
+- **IPv6 server-list entries work in both spellings, as the README says.** A
+  bracketed `[fe80::1]` failed at `ssh`, which does not strip brackets. A
+  bare `2001:db8::1` sent `scp` to host `2001` (`0.0.7.209`), so
+  `distribute-scripts` and `collect-results` could not reach it. `ssh` now
+  gets the bare address and `scp` the bracketed one.
+- **`collect-results` keeps only what a run writes.** A host's tarball was
+  unpacked straight into the local results directory, so a host could plant
+  a symlink there (which `parse-csv` would then read, wherever it pointed),
+  a directory, or a forged file such as `iperf_pivot.txt`. It is now unpacked
+  into a scratch directory, and only regular files are kept: this run's test
+  logs, and the host's own server log, status and CPU files. The rest are
+  counted in a warning.
+  A tarball left in `REMOTE_DIR` by an earlier collect is deleted before a new
+  one is built, so it is never fetched again.
+- **SIGTERM during a test round stops at once.** The interrupt handler's
+  `stop-servers` waited on every background job of the process, including
+  the round's own ssh sessions, so a SIGTERM sent to the orchestrator alone
+  (by `timeout`, `kill` or a service manager) took until the round ended:
+  23 s of a 30 s round. The handler now ends its own ssh jobs first, and the
+  host fan-out waits only for its own workers.
+- **`collect-results` works with a relative `--remote-dir`.** It named the
+  tarball by its full path after changing into that directory, so it never
+  built one, reported "nothing to collect" and exited 0.
+- **Ctrl-C or SIGTERM during `all`/`run`'s collect and process steps stops
+  the daemons.** `run-tests` cleared the interrupt handler when it finished,
+  including the one `all` had set, so an interrupt after the tests left the
+  daemons running and exited 143.
+- **`--dry-run` and `-v` show the transfer actually made**: `scp` with an
+  IPv6 address in brackets, or `ssh ... cat` where a path goes that way.
+- **`create-scripts` fails when it cannot write a run script.** It used to
+  print the shell's error and report success, so `run-tests` went on with no
+  scripts. A `--run-id` containing `/` was one way to get there. Likewise
+  when it cannot make one executable.
+
+### Added
+
+- **A sandbox ssh for the test suite** (`install_sandbox_ssh` in
+  `tests/test_helper.bash`). The old fake `ssh` matched a command's text and
+  exited 0, so 463 passing tests could not show what a remote command did. The
+  sandbox really runs every remote command and generated run script, in a
+  root of its own per fake host, with stand-ins that keep `rm`, `mkdir` and
+  `chmod` inside the test's temp dir and model iperf daemons, `pkill` and
+  `pgrep` without touching real processes. `tests/run_tests.sh --sandbox`
+  runs the whole suite on it, and CI does so once per run; every existing
+  test passes on it.
+- **`tests/test_adversarial.sh`**: 41 tests of hostile input through every
+  fleet command; all but two (guards that ordinary values and trailing
+  newlines come through unchanged) fail on 2.6.3.
+  **`tests/test_adversarial_mutations.sh`** reverts each of 53 fixes in a
+  copy of the script and shows that the test guarding it then fails. CI also
+  runs the adversarial tests under bash 4.2's rules (`BASH_COMPAT=42`).
+
+### Changed
+
+- **The README and `--help` say what `clean` and `cleanup` delete**, and that
+  `clean` does not ask first; that `./iperf_plan.conf` is loaded by every
+  command whenever it exists; what reaches the hosts, and how; and that the
+  default `/tmp/iperf_orchestrator` is a name any user of a shared host can
+  create first.
+- Two existing tests used `--remote-dir /custom/remote` and `/var/myremote`;
+  they now use a directory inside the test's temp dir, so the sandbox can
+  create it. Two test shims for `scp` learnt to skip `--`, and the bracketed
+  IPv6 test in `test_collect_results.sh` keys its fake host on the bare
+  address, as `ssh` now receives it.
+
+### Known issues
+
+Found by the same pass and left for the owner to decide, because each fix
+changes behaviour (shared_tools tickets, project iperf_orchestrator):
+
+- IO-003 (high): another user on a host can create the default
+  `/tmp/iperf_orchestrator` first, then swap a run script or plant a symlink
+  that `distribute-scripts` writes through.
+- IO-004 (high): `clean` deletes whatever `REMOTE_DIR` names without asking,
+  including a home directory; an empty `--remote-dir=` reports every host
+  clean.
+- IO-005: `./iperf_plan.conf` is loaded silently by every command, so
+  `clean` in a directory holding someone else's plan deletes what that plan
+  names.
+- IO-002: no value is refused for its characters (`--run-id ../..` writes
+  outside the results directory).
+- IO-006: `stop` kills any iperf daemon on the port, including one the tool
+  did not start; `start-servers` reports success for a daemon that failed to
+  bind; `check-servers` reports any iperf, whatever its port.
+- IO-007: Ctrl-C leaves the run scripts and rolling loops running on the
+  hosts until their window ends.
+- IO-008: `start-servers`, `distribute-scripts` and `cleanup` exit 0 when
+  they report host failures.
+- IO-009: a run id matches another run whose id ends in `_<that id>`, so
+  `--run-id baseline` deletes and collects run `tuned_baseline`'s files.
+- IO-010: the analysis steps' embedded Python imports modules from the
+  current directory.
+
 ## [2.6.3] - 2026-11-13
 
 ### Changed
