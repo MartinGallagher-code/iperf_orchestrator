@@ -286,7 +286,8 @@ IPERF_DURATION=60 ./iperf-orchestrator.sh all          # env var still works
 | `IPERF_VERBOSITY` | `--verbose`/`-v`, `--quiet`/`-q` | `1` | `-v` prints every ssh/scp invocation; `-q` suppresses non-WARN/ERROR logs |
 | `SSH_USER` | `--ssh-user`, `-u` | `$USER` | SSH login user |
 | `START_DELAY` | `--start-delay` | `30` | seconds in the future to schedule the synchronized start |
-| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory |
+| `REMOTE_DIR` | `--remote-dir` | `/tmp/iperf_orchestrator` | remote working dir; every remote-side file embeds `<host>_<run-id>`, but `cleanup`, `clean`, `all` and `run` delete the whole directory, exactly as given and without checking what it is (see **Shared-FS safety**); a relative path is relative to the SSH user's login directory. Before writing to it or running a script from it, each host checks that it is a real directory (not a symlink), owned by the SSH user and not writable by group or others, and fails if not; a new one is created mode `700` |
+| `IPERF_ALLOW_SHARED_REMOTE_DIR` | `--allow-shared-remote-dir` | `0` | `1` lets `REMOTE_DIR` be group-writable, for a directory a group shares on NFS; the symlink, owner and other-write checks still apply |
 | `PYTHON_BIN` | `--python` | `python3` | Python interpreter for analysis steps |
 | `SSH_OPTS` | *(env only)* | `-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30` | options passed to every `ssh`/`scp` (`BatchMode=yes` is always added) |
 
@@ -802,7 +803,13 @@ ls results/
 
 **What exactly is deleted.** The path in `REMOTE_DIR`, as written, with `rm -rf`, as the SSH user — and nothing checks it first. Only `cleanup` asks for `--yes`; `clean`, `all` and `run` do not ask. A `REMOTE_DIR` of `/home/alice`, or any directory the tool did not make, is deleted like any other; `/` itself survives only because GNU `rm` refuses it; and an empty `--remote-dir=` deletes nothing yet `clean` still reports every host clean. Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
 
-**On a host other people use**, the default `/tmp/iperf_orchestrator` is a name anyone can create first. If another user owns that directory (or can write to it), they can replace a run script before it runs, or leave a symlink where `distribute-scripts` writes, and the SSH user's file at the other end of it is overwritten. Use a `--remote-dir` in the SSH user's own home on such hosts.
+**On a host other people use**, the default `/tmp/iperf_orchestrator` is a name anyone can create first. If another user owned that directory (or could write to it), they could replace a run script before it ran, or leave a symlink where `distribute-scripts` writes, so that the SSH user's file at the other end of it was overwritten. Since 2.7.0 every host checks `REMOTE_DIR` first:
+
+- `start-servers` (and so `start`), `distribute-scripts`, `run-tests` in every mode and `collect-results` each check it on every host before writing to it or running a script from it. It must be a real directory (not a symlink, and not a path ending in `/` that leads through one), owned by the SSH user (`id -u` on the host), and not writable by its group or by others. If it is not, that host fails with an error naming the directory, its owner and its mode, and nothing is written there or run from it. The other hosts go on, as with any per-host failure (`all` and `start` stop unless `--keep-going`).
+- A `REMOTE_DIR` that does not exist yet is created with `mkdir -m 700`, so only the SSH user can use it. Its parent directories, if any are missing, get the login shell's umask, as before.
+- A run script is copied to a temporary name in `REMOTE_DIR` and then renamed over its real name, after anything already standing at that name is removed, so a symlink planted there is replaced, never followed.
+
+If another user already holds `/tmp/iperf_orchestrator` on a host, that host now fails instead of being used: pick a `--remote-dir` of your own (one in the SSH user's home is safest), or remove the directory. A directory that was made group- or world-writable by hand needs `chmod go-w`. **On a shared filesystem** where `REMOTE_DIR` is deliberately group-writable (an NFS directory a team shares), pass `--allow-shared-remote-dir` (or set `IPERF_ALLOW_SHARED_REMOTE_DIR=1`): it lifts the group-write check only. The directory must still be the SSH user's own, not a symlink, and not writable by others, and anyone in the group can still swap a script, so use it only with a group you trust.
 
 ### What reaches the hosts
 

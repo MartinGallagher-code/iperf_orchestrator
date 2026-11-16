@@ -37,15 +37,25 @@ test_distribute_scripts_uploads_one_per_host() {
 test_distribute_scripts_each_destination_includes_host_and_run_id() {
     prep_workflow a b
     run_with_fakes distribute-scripts >/dev/null
-    # Every scp destination should match run_iperf_<host>_<run-id>.sh
+    # Every scp goes to a temp name, .run_iperf_<host>_<run-id>.sh.<n>.tmp,
+    # which is then renamed onto run_iperf_<host>_<run-id>.sh (IO-003).
     local dests
     dests=$(grep -E '^scp' "$FAKE_SSH_LOG" | awk -F'\t' '{print $3}')
-    echo "$dests" | grep -qE "/run_iperf_a_${IPERF_RUN_ID}\.sh$" || {
-        echo "expected /run_iperf_a_${IPERF_RUN_ID}.sh dst" >&2
+    echo "$dests" | grep -qE "/\.run_iperf_a_${IPERF_RUN_ID}\.sh\.[0-9]+\.[0-9]+\.tmp$" || {
+        echo "expected /.run_iperf_a_${IPERF_RUN_ID}.sh.<n>.tmp dst" >&2
         echo "$dests" >&2
         return 1
     }
-    echo "$dests" | grep -qE "/run_iperf_b_${IPERF_RUN_ID}\.sh$" || return 1
+    echo "$dests" | grep -qE "/\.run_iperf_b_${IPERF_RUN_ID}\.sh\.[0-9]+\.[0-9]+\.tmp$" || return 1
+    local h
+    for h in a b; do
+        grep -E "^ssh"$'\t'"$h"$'\t'".*mv -f -- " "$FAKE_SSH_LOG" \
+            | grep -qE "/run_iperf_${h}_${IPERF_RUN_ID}\.sh'$" || {
+            echo "expected $h's script renamed onto run_iperf_${h}_${IPERF_RUN_ID}.sh" >&2
+            cat "$FAKE_SSH_LOG" >&2
+            return 1
+        }
+    done
 }
 
 test_distribute_scripts_chmods_remote_script() {
@@ -92,14 +102,14 @@ test_distribute_scripts_uses_remote_dir_flag() {
     # --sandbox) can really create it.
     local rd="$TEST_TMPDIR/custom/remote"
     run_with_fakes --remote-dir="$rd" distribute-scripts >/dev/null
-    grep -qF "mkdir -p '$rd'" "$FAKE_SSH_LOG" || {
+    grep -F "_iod='$rd'" "$FAKE_SSH_LOG" | grep -qF "mkdir -p -m 700" || {
         echo "expected --remote-dir to propagate to mkdir target" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }
     grep -E '^scp' "$FAKE_SSH_LOG" | awk -F'\t' '{print $3}' \
-        | grep -qF "$rd/run_iperf_a_${IPERF_RUN_ID}.sh" || {
-        echo "expected scp dst at $rd/run_iperf_a_${IPERF_RUN_ID}.sh" >&2
+        | grep -qF "$rd/.run_iperf_a_${IPERF_RUN_ID}.sh." || {
+        echo "expected scp dst at $rd/.run_iperf_a_${IPERF_RUN_ID}.sh.<tmp>" >&2
         return 1
     }
 }

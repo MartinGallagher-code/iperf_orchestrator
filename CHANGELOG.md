@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-11-16
+
+The remote work dir is checked on every host before anything is written
+to it or run from it (shared_tools ticket IO-003, found by IO-001's
+adversarial pass).
+
+### Changed
+
+- **A `REMOTE_DIR` that another user owns or can write to is refused.**
+  The default `/tmp/iperf_orchestrator` is a name any user on a host can
+  create first, and nothing checked who owned it. IO-001 showed, over
+  ssh, another user's 0777 directory with a symlink at a run script's
+  name: `distribute-scripts` exited 0 having overwritten the SSH user's
+  file at the other end and made it executable; and such a user could
+  swap a run script before `run-tests` ran it as the SSH user. Now
+  `start-servers` (and `start`), `distribute-scripts`, `run-tests` (every
+  mode, checked again right before each script runs) and
+  `collect-results` first check, on each host, that `REMOTE_DIR` is a real
+  directory (not a symlink), owned by the SSH user and not writable by
+  group or others. If it is not, that host fails with an error naming
+  the directory, its owner and its mode, and nothing is written there or
+  run from it; the other hosts go on, as with any per-host failure.
+  **This refuses directories that worked before**: one another user owns,
+  and one made group- or world-writable by hand (`chmod go-w` it).
+- **A new `REMOTE_DIR` is created private**, `mkdir -m 700`. The default
+  stays `/tmp/iperf_orchestrator`.
+- **A run script is written to a temporary name and renamed into place**,
+  after whatever stood at its name is removed, so a symlink planted there
+  is replaced, never followed.
+
+### Added
+
+- **`--allow-shared-remote-dir`** (or `IPERF_ALLOW_SHARED_REMOTE_DIR=1`)
+  lets `REMOTE_DIR` be group-writable, for a directory a group shares on
+  NFS. It lifts that one check: the directory must still be the SSH
+  user's, not a symlink, and not writable by others.
+- Seven sandbox tests in `tests/test_adversarial.sh`, each shown failing
+  on 2.6.4, with mutations in `tests/test_adversarial_mutations.sh`.
+
 ## [2.6.4] - 2026-11-13
 
 An adversarial pass over everything the tool runs on a fleet's hosts

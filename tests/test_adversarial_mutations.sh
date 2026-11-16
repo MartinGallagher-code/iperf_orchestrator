@@ -98,8 +98,8 @@ MUTATIONS=$(cat <<'TABLE'
 ---         _sqin_to rd "$REMOTE_DIR"
 +++         rd=$REMOTE_DIR
 ### test_no_fleet_command_runs_a_hostile_value
----         ssh_run "$src" "$(_shq "$script") $start_time$arg" > "$hostlog" 2>&1 &
-+++         ssh_run "$src" "'$script' $start_time$arg" > "$hostlog" 2>&1 &
+--- $(_shq "$script") $start_time$arg" > "$hostlog" 2>&1 &
++++ '$script' $start_time$arg" > "$hostlog" 2>&1 &
 ### test_ssh_destination_follows_double_dash
 ---     ssh $SSH_BATCH_OPTS -- "$SSH_USER@$(_ssh_host "$host")" "$@"
 +++     ssh $SSH_BATCH_OPTS "$SSH_USER@$(_ssh_host "$host")" "$@"
@@ -181,6 +181,36 @@ MUTATIONS=$(cat <<'TABLE'
 ### test_dry_run_shows_the_real_transport
 ---     local sh; sh=$(_scp_host "$host")
 +++     local sh; sh=$host
+### test_world_writable_remote_dir_with_planted_symlink_is_refused
+--- if [ -n \"\$_iobad\" ]; then echo
++++ if false; then echo
+### test_run_tests_refuses_a_script_in_a_writable_remote_dir
+--- "$(_remote_dir_guard "$src")$(_shq
++++ "$(_shq
+### test_start_servers_refuses_a_world_writable_remote_dir
+---         $(_remote_dir_guard "$host" create)
++++         mkdir -p $(_shq "$REMOTE_DIR")
+### test_fresh_remote_dir_is_created_private_and_works
+--- mkdir -p -m 700 -- 
++++ mkdir -p -- 
+### test_remote_dir_owned_by_another_user_is_refused
+--- [ \"\$_iou\" = \"\$_ioid\" ] || _iobad=
++++ true || _iobad=
+### test_remote_dir_that_is_a_symlink_is_refused
+--- if [ -L \"\$_iod\" ] || [ ! -d \"\$_iod\" ]; then
++++ if [ ! -d \"\$_iod\" ]; then
+### test_remote_dir_that_is_a_symlink_is_refused
+---     while [ "${#d}" -gt 1 ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
++++     :
+### test_shared_remote_dir_opt_out_relaxes_group_write_only
+--- rm -f -- $q_dst && mv -f -- $q_tmp $q_dst"; then
++++ cat $q_tmp > $q_dst && chmod +x $q_dst"; then
+### test_shared_remote_dir_opt_out_relaxes_group_write_only
+--- case \"\$_iom\" in ????????w*)
++++ case \"\$_iom\" in ????????X*)
+### test_shared_remote_dir_opt_out_relaxes_group_write_only
+--- if [ \"\$_ioshared\" != 1 ]; then
++++ if [ \"\$_ioshared\" != 0 ]; then
 TABLE
 )
 export MUTATIONS
