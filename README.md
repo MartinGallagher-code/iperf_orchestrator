@@ -167,8 +167,10 @@ SETUP:
 
 EXECUTION:
   start-servers          Start iperf2 -s on every host (--port, default 5001)
-  run-tests [MODE]       Run the tests. Auto-runs create-scripts and
-                         distribute-scripts for non-rolling modes. MODE is
+  run-tests [MODE] [--keep-going]
+                         Run the tests. Auto-runs create-scripts and
+                         distribute-scripts for non-rolling modes, and stops if
+                         distribution failed on a host unless --keep-going. MODE is
                          parallel | sequential-host | sequential-pair | rolling.
   collect-results        Pull logs back as a tar archive per host
   stop-servers           Kill iperf -s on every host
@@ -401,9 +403,19 @@ for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
 Every connection uses `BatchMode=yes`, so any host still requiring a password will simply fail rather than prompt.
 
-#### `--keep-going` for `all`, `run` and `start`
+#### `--keep-going` for `all`, `run`, `start` and `run-tests`
 
-`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). Without it, the first step that records per-host failures aborts the pipeline. `run` passes the flag through to `all`, and `start --keep-going` runs the tests even when some hosts failed to start their daemon.
+`all --keep-going` continues past per-host failures (a single host failing `start-servers` no longer aborts the whole pipeline). Without it, the first step that records per-host failures aborts the pipeline. `run` passes the flag through to `all`, and `start --keep-going` runs the tests even when some hosts failed to start their daemon. `run-tests` stops when `distribute-scripts` (which it runs first) failed on any host; `run-tests --keep-going` runs the round on the hosts that got their script (since 2.9.0).
+
+#### Exit status
+
+Since 2.9.0 a host failure shows in the exit status, not only in a `WARN` line, so a script or CI job calling the step commands can tell success from failure:
+
+- `start-servers`, `stop-servers`, `distribute-scripts`, `collect-results` and `cleanup` exit **1** when any host failed, after doing what they could on the rest. The `WARN` line names the hosts that failed. `stop` follows `stop-servers`.
+- `run-tests` exits **1** without running a round when `distribute-scripts` failed on any host, unless `--keep-going`.
+- `all` and `start` stop with exit 1 at the first step with a host failure, unless `--keep-going`; `clean` exits 1 when a host still has leftovers.
+- `summarize` and `process` go on to analyse whatever `collect-results` brought back. A host that could not be collected from does not by itself make them fail; the `WARN` line names it, and the analysis steps fail as before when there is nothing to analyse.
+- Anything refused before a host is contacted (a bad value, a missing server list) exits 1, an unknown command 2.
 
 #### `--dry-run`, `--verbose`, `--quiet`
 
