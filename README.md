@@ -856,7 +856,7 @@ The first design considered something like a GPIO-style "everyone signal ready" 
 N-1 sequential scp calls per host at N=100 is ~80 minutes of pure SSH handshake overhead. One tar + one scp + one local untar per host is closer to a few minutes. Same data, ~17× faster, and the tarball naming naturally namespaces server-side log files (which were originally going to collide on extract).
 
 ### Embedded Python for analysis
-The bash script runs locally only; on remote hosts the only assumption is iperf2 (and ideally mpstat). The CSV parser, pivot generator, and matplotlib renderer are embedded as heredoc Python in the orchestrator. This keeps it one file you can scp and run, no `pip install -e .` ceremony.
+The bash script runs locally only; on remote hosts the only assumption is iperf2 (and ideally mpstat). The CSV parser, pivot generator, and matplotlib renderer are embedded as heredoc Python in the orchestrator. This keeps it one file you can scp and run, no `pip install -e .` ceremony. Each heredoc starts by taking the current directory off `sys.path` (and so do `doctor`'s module probes), so a `glob.py` or `csv.py` in the directory you run the tool from is never imported in place of the standard library's (since 2.8.1); a `PYTHONPATH` you set is still honoured.
 
 ### Fail open, not closed, on individual hosts
 `set -e` is intentionally **not** set. The orchestrator tracks failures per host and per step, warns about them, and keeps going so one bad host doesn't abort a 100-host run. Each step's success criterion is "did *enough* of it work to make the next step useful," not "did every single host succeed."
