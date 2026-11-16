@@ -32,17 +32,17 @@ MUTATIONS=$(cat <<'TABLE'
 ---                 BIND_RAW=$(_shq "$pattern")
 +++                 BIND_RAW='$pattern'
 ### test_run_id_metacharacters_stay_literal_in_collect
----             ls iperf_test_*_$(_bare "$RUN_ID").log 2>/dev/null || true
-+++             ls iperf_test_*_${RUN_ID}.log 2>/dev/null || true
+--- local rsuf; rsuf=$(_shq "_${run}.log")
++++ local rsuf; rsuf="_${run}.log"
 ### test_run_id_with_a_space_does_not_delete_files_on_the_host
----     _sqin_to rd "$REMOTE_DIR"; rid=$(_bare "$RUN_ID")
-+++     _sqin_to rd "$REMOTE_DIR"; rid=$RUN_ID
+--- local rsuf; rsuf=$(_shq "_${run}.log")
++++ local rsuf; rsuf="_${run}.log"
 ### test_run_id_glob_does_not_delete_other_runs_logs
----     _sqin_to rd "$REMOTE_DIR"; rid=$(_bare "$RUN_ID")
-+++     _sqin_to rd "$REMOTE_DIR"; rid=$RUN_ID
+--- local rsuf; rsuf=$(_shq "_${run}.log")
++++ local rsuf; rsuf="_${run}.log"
 ### test_status_progress_keeps_run_id_literal
----             logs=\$(ls iperf_test_$(_bare "$safe")_to_*_$(_bare "$run").log 2>/dev/null | wc -l | tr -d ' ')
-+++             logs=\$(ls iperf_test_${safe}_to_*_${run}.log 2>/dev/null | wc -l | tr -d ' ')
+--- local rsuf; rsuf=$(_shq "_${run}.log")
++++ local rsuf; rsuf="_${run}.log"
 ### test_sequential_pair_target_stays_literal
 ---         [ -n "$target" ] && arg=" $(_shq "$target")"
 +++         [ -n "$target" ] && arg=" '$target'"
@@ -170,8 +170,8 @@ MUTATIONS=$(cat <<'TABLE'
 ---     local LC_ALL=C __q
 +++     local __q
 ### test_collect_keeps_only_this_hosts_cpu_status_and_server_files
----             iperf_test_*_"$RUN_ID".log|"iperf_server_${host_safe}_${RUN_ID}.log"|"iperf_run_${host_safe}_${RUN_ID}.status"|"cpu_${host_safe}_${RUN_ID}.log")
-+++             iperf_test_*.log|iperf_server_*.log|iperf_run_*.status|cpu_*.log)
+---             "iperf_server_${host_safe}_${RUN_ID}.log"|"iperf_run_${host_safe}_${RUN_ID}.status"|"cpu_${host_safe}_${RUN_ID}.log")
++++             iperf_server_*.log|iperf_run_*.status|cpu_*.log)
 ### test_relative_remote_dir_collects
 ---     _sqin_to tr_q "_results_${host_safe}_${RUN_ID}.tar.gz"
 +++     _sqin_to tr_q "$tarball_remote"
@@ -226,6 +226,21 @@ MUTATIONS=$(cat <<'TABLE'
 ### test_clean_removes_the_tools_own_files_and_the_dir
 ---     s+="rmdir -- \"\$_iod\" 2>/dev/null ||
 +++     s+="true ||
+### test_distribute_leaves_a_longer_run_ids_files_alone
+--- case \"\$_ios\" in ''|*[!0-9]*) continue ;; esac; 
++++ 
+### test_distribute_leaves_a_longer_run_ids_files_alone
+--- rm -f --$statuses );
++++ rm -f -- iperf_run_*_$(_bare "$RUN_ID").status );
+### test_collect_takes_only_this_runs_logs
+--- [ -f \"\$_iof\" ] && _iorunlog \"\$_iof\" && printf
++++ [ -f \"\$_iof\" ] && printf
+### test_collect_drops_another_runs_log_from_a_hostile_tarball
+---                 _iorunlog "$xbase" && keep=1 ;;
++++                 keep=1 ;;
+### test_status_counts_only_this_runs_logs
+--- [ -f \"\$_iof\" ] && _iorunlog \"\$_iof\" && logs=
++++ [ -f \"\$_iof\" ] && logs=
 TABLE
 )
 export MUTATIONS

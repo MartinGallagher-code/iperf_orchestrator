@@ -89,14 +89,15 @@ SHIM
 }
 
 # Pre-populate a per-host fake-remote directory with realistic logs.
-# Filenames must embed <host>_<run-id> -- the worker only globs files
-# matching the active RUN_ID.
+# Filenames must embed <host>_<run-id>, and a test log's two hosts must
+# both be in the server list: the worker takes only this run's logs
+# between listed hosts (IO-009).
 seed_host_logs() {
-    local host="$1"
+    local host="$1" peer="${2:-$1}"
     local d="$TEST_TMPDIR/remote-$host"
     mkdir -p "$d"
-    cat > "$d/iperf_test_${host}_to_peer_${IPERF_RUN_ID}.log" <<EOF
-# pair_a=$host pair_b=peer duration=10 port=5001 parallel=1 test_start=1700000000
+    cat > "$d/iperf_test_${host}_to_${peer}_${IPERF_RUN_ID}.log" <<EOF
+# pair_a=$host pair_b=$peer duration=10 port=5001 parallel=1 test_start=1700000000
 20260101120000.000,10.0.0.1,54321,10.0.0.2,5001,3,0.0-10.0,1250000000,1000000000
 20260101120000.000,10.0.0.2,5001,10.0.0.1,54321,3,0.0-10.0,1100000000,880000000
 EOF
@@ -110,8 +111,11 @@ prep_workflow() {
     write_server_list "$@" >/dev/null
     # collect-results needs a results dir already present.
     mkdir -p "$RESULTS_BASE/$IPERF_RUN_ID"
+    local h p peer
     for h in "$@"; do
-        seed_host_logs "$h"
+        peer=$h
+        for p in "$@"; do [ "$p" != "$h" ] && { peer=$p; break; }; done
+        seed_host_logs "$h" "$peer"
     done
     : > "$FAKE_SSH_LOG"
 }
