@@ -388,8 +388,17 @@ for a in "$@"; do
     if [ "$end" = 0 ] && [ "$a" = "--" ]; then end=1; continue; fi
     if [ "$end" = 0 ] && [ "${a#-}" != "$a" ] && [ "$a" != "-" ]; then opts+=("$a"); else ops+=("$a"); fi
 done
+force=0
+for o in ${opts[@]+"${opts[@]}"}; do
+    case "$o" in --force) force=1 ;; --*) ;; -*f*) force=1 ;; esac
+done
 rc=0 ok=()
 for p in ${ops[@]+"${ops[@]}"}; do
+    # Like rm -f: an operand that does not exist is nothing to do. Checked
+    # before _inside, whose realpath cannot resolve a relative path once
+    # this shell's current directory is gone -- as when another host
+    # sharing REMOTE_DIR has just removed it (shared_tools IO-011).
+    if [ "$force" = 1 ] && [ ! -e "$p" ] && [ ! -L "$p" ]; then continue; fi
     if [ -z "$p" ] || _inside "$p"; then ok+=("$p"); continue; fi
     _slog rm-refused "$(realpath -m -- "$p")"
     echo "sandbox rm: refused to remove $p (outside the sandbox)" >&2
