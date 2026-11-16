@@ -86,6 +86,9 @@ pull requests.
   was inside the sandbox. The missing check now comes second, so a
   vanished `-f` operand is nothing to do, as with a real `rm -f`.
   `tests/test_sandbox_rm.sh` (IO-011) still covers it.
+- The tests read a process's command line from `/proc` first and `ps`
+  only without it, as the tool does: the Python 3.6 job runs in a slim
+  image with no `ps`.
 - `test_ssh_gets_bracketed_ipv6_without_brackets` reads hosts only from
   the `ssh` lines of the stand-in's call log: `check-servers` now sends a
   command of several lines, and its later lines are not calls.

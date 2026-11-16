@@ -39,6 +39,17 @@ setup_orch_env() {
     mkdir -p "$IPERF_DIR"
 }
 
+# proc_args PID: its command line, nothing once it is gone (or a zombie).
+# /proc first, as the tool does: slim images such as python:3.6-slim (the
+# Python 3.6 CI job) have no ps.
+proc_args() {
+    if [ -r "/proc/$1/cmdline" ]; then
+        tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline"
+    else
+        ps -o args= -p "$1" 2>/dev/null
+    fi
+}
+
 teardown_orch_env() {
     # Sandbox daemons a test left up (start-servers without stop-servers)
     # are real processes: stop them, and only them.
@@ -46,7 +57,7 @@ teardown_orch_env() {
         local pid
         for pid in $(cut -f1 "$TEST_TMPDIR"/daemons/* 2>/dev/null); do
             case "$pid" in ''|*[!0-9]*) continue ;; esac
-            case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+            case "$(proc_args "$pid")" in
                 *"$TEST_TMPDIR"/*/iperf*) kill "$pid" 2>/dev/null ;;
             esac
         done

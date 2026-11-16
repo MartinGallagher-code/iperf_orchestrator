@@ -38,7 +38,7 @@ registry() { cat "$SANDBOX_ROOT/daemons/$1" 2>/dev/null; }
 pidfile() { printf '%s/iperf_daemon_%s_%s.pid' "$REMOTE_DIR" "$1" "${2:-5001}"; }
 # A pid is up while its command line is still a stand-in iperf (a zombie's
 # is empty).
-is_up() { case "$(ps -o args= -p "$1" 2>/dev/null)" in *iperf*) return 0 ;; esac; return 1; }
+is_up() { case "$(proc_args "$1")" in *iperf*) return 0 ;; esac; return 1; }
 
 test_stop_leaves_an_operators_daemon_on_the_same_port() {
     sandbox_two_hosts
