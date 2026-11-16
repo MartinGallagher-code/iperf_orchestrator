@@ -46,6 +46,43 @@ IO-005, found by IO-001's adversarial pass; the owner chose "announce it").
   silent. All pass plain and with `--sandbox`.
 - `tests/test_plan_announce_mutations.sh`: a mutation per test, 7 of 7
   killed.
+## [2.9.0] - 2026-11-16
+
+Fleet commands exit non-zero when a host fails (shared_tools ticket
+IO-008, found by IO-001's adversarial pass; the owner chose this).
+
+### Changed
+
+- **A host failure now shows in the exit status, not only in a `WARN`.**
+  Before, `start-servers`, `stop-servers`, `distribute-scripts`,
+  `collect-results` and `cleanup` printed "WARN: ... N failure(s)" and
+  exited 0, so a script or CI job calling them could not tell success
+  from failure. Each now exits 1 when any host failed, after doing what
+  it could on the rest. The `WARN` line also names the hosts. `stop`
+  follows `stop-servers`.
+  **A script that relied on these exiting 0 after a `WARN` will now see
+  the failure.**
+- **`run-tests` stops when `distribute-scripts` failed.** It used to go
+  on to "Mode: parallel" with the hosts that never got their script, run
+  nothing on them, and exit 0. Now it exits 1 before starting a round.
+  `run-tests --keep-going` (new) runs the round on the hosts that got
+  their script. Called from `all`, `start` or `run`, it follows their
+  own `--keep-going`.
+- **`collect-results` tells an unreachable host from an empty one.** ssh's
+  exit status 255 (could not connect) is now a failure for that host. A
+  host with nothing to pack is still not one.
+- The README has a new **Exit status** section, and `run-tests` and its
+  `--keep-going` are in `--help` and the README's flag notes.
+
+### Tests
+
+- `tests/test_exit_codes.sh` covers each of the five step commands,
+  `stop`, and `run-tests` (with and without `--keep-going`), with one
+  host unreachable. All eight fail on 2.8.4. It also checks that every
+  step still exits 0 when every host succeeds. Every test passes both
+  under the plain stand-in ssh and under the sandbox.
+- `tests/test_exit_codes_mutations.sh` undoes each part of the fix and
+  shows the test that guards it fails (10 of 10).
 
 ## [2.8.4] - 2026-11-16
 

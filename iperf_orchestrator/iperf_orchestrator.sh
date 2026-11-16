@@ -1124,6 +1124,20 @@ parallel_hosts() {
     rm -rf "$tmpdir"
 }
 
+# _fleet_failed MESSAGE: after a parallel_hosts fan-out, warn MESSAGE and
+# name the hosts that failed, and return 1, when any did (shared_tools
+# IO-008). The step commands (start-servers, stop-servers,
+# distribute-scripts, collect-results, cleanup) end with it, so a script
+# or CI job calling one sees a host failure in the exit status, not only
+# in a WARN line. Returns 0, saying nothing, when every host succeeded.
+_fleet_failed() {
+    [ "${#PARALLEL_FAILED[@]}" -eq 0 ] && return 0
+    local h list=""
+    for h in "${PARALLEL_FAILED[@]}"; do list+="${list:+, }$(_cmt "$h")"; done
+    warn "$1 ($list)"
+    return 1
+}
+
 #------------------------------------------------------------------------------
 # Peer data-plane IP resolution
 #
@@ -1512,7 +1526,8 @@ EXECUTION:
     start-servers          Start iperf -p \$PORT -s -D on every host
     create-scripts         Generate per-host client run scripts (called by run-tests)
     distribute-scripts     Copy each host's run script to that host (called by run-tests)
-    run-tests [MODE]       Run the tests. Auto-runs create-scripts and
+    run-tests [MODE] [--keep-going]
+                           Run the tests. Auto-runs create-scripts and
                            distribute-scripts for parallel/sequential modes. MODE:
                              parallel         all hosts run simultaneously after a
                                               synchronized start (default)
@@ -1889,7 +1904,7 @@ cmd_start_servers() {
     _validate_server_list
     log "Starting iperf2 -s on port $IPERF_PORT (parallel x$IPERF_SSH_JOBS)..."
     parallel_hosts _worker_start_server
-    [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "start-servers: ${#PARALLEL_FAILED[@]} failure(s)"
+    _fleet_failed "start-servers: ${#PARALLEL_FAILED[@]} failure(s)"
 }
 
 #------------------------------------------------------------------------------
@@ -2275,11 +2290,8 @@ cmd_distribute_scripts() {
     log "Distributing run scripts to each host (parallel x$IPERF_SSH_JOBS)..."
     parallel_hosts _worker_distribute_script
 
-    if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
-        vlog "All run scripts distributed"
-    else
-        warn "distribute-scripts had ${#PARALLEL_FAILED[@]} failure(s)"
-    fi
+    _fleet_failed "distribute-scripts had ${#PARALLEL_FAILED[@]} failure(s)" || return 1
+    vlog "All run scripts distributed"
 }
 
 #------------------------------------------------------------------------------
@@ -2348,7 +2360,16 @@ _orchestrator_signal_cleanup() {
 }
 
 cmd_run_tests() {
-    local mode="${1:-${IPERF_MODE:-parallel}}"
+    # --keep-going, or a caller's (all, start, run) own keep_going, lets
+    # the round go ahead when distributing the scripts failed on a host.
+    local kg="${keep_going:-0}" mode="" a
+    for a in "$@"; do
+        case "$a" in
+            --keep-going) kg=1 ;;
+            *) [ -n "$mode" ] || mode="$a" ;;
+        esac
+    done
+    mode="${mode:-${IPERF_MODE:-parallel}}"
     case "$mode" in
         parallel|sequential-host|sequential-pair|rolling) ;;
         *) die "unknown mode: $mode (expected parallel|sequential-host|sequential-pair|rolling)" ;;
@@ -2368,7 +2389,16 @@ cmd_run_tests() {
         _resolve_peer_bind_ips "$IPERF_BIND"
     else
         cmd_create_scripts
-        cmd_distribute_scripts
+        # A host without its script cannot run the round, so stop here
+        # rather than go on to "Mode: parallel" and run nothing on it
+        # (shared_tools IO-008), unless told to keep going.
+        if ! cmd_distribute_scripts; then
+            if [ "$kg" = "1" ]; then
+                warn "run-tests: continuing without the host(s) that failed distribute-scripts (--keep-going)"
+            else
+                die "run-tests: distribute-scripts failed on ${#PARALLEL_FAILED[@]} host(s); fix them and re-run, or pass --keep-going to test the rest"
+            fi
+        fi
     fi
     # Install the interrupt handler, unless a caller (all, run) already
     # has: then leave it in place at the end too, or a Ctrl-C during that
@@ -2646,7 +2676,8 @@ _worker_collect_results() {
     local hs rid tr_q
     _sqin_to hs "$host_safe"; _sqin_to rid "$RUN_ID"
     _sqin_to tr_q "_results_${host_safe}_${RUN_ID}.tar.gz"
-    if ! ssh_run "$host" "
+    local rc=0
+    ssh_run "$host" "
         $(_remote_dir_guard "$host")
         cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 1
         rm -f '$tr_q'
@@ -2665,7 +2696,15 @@ _worker_collect_results() {
         fi
         rm -f \"\$listfile\"
         test -f '$tr_q'
-    " 2>/dev/null; then
+    " 2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        # ssh exits 255 when it could not reach the host at all: that host
+        # failed, and collect-results says so in its exit status (IO-008).
+        # Any other status is the remote side finding nothing to pack.
+        if [ "$rc" -eq 255 ]; then
+            warn "  $host: could not connect (ssh exit 255); nothing collected"
+            return 1
+        fi
         warn "  $host: nothing to collect (empty REMOTE_DIR or tar failed)"
         return 0  # empty is normal for the lex-last host; not a failure
     fi
@@ -2733,9 +2772,8 @@ cmd_collect_results() {
     total=$(ls "$RESULTS_DIR"/iperf_test_*.log 2>/dev/null | wc -l)
     if [ ${#PARALLEL_FAILED[@]} -eq 0 ]; then
         log "Collected $total client logs total"
-    else
-        warn "collect-results: ${#PARALLEL_FAILED[@]} host(s) had transfer failures"
     fi
+    _fleet_failed "collect-results: ${#PARALLEL_FAILED[@]} host(s) had transfer failures"
 }
 
 #------------------------------------------------------------------------------
@@ -2747,6 +2785,7 @@ cmd_stop_servers() {
     _validate_server_list
     log "Stopping iperf2 servers on port $IPERF_PORT..."
     parallel_hosts _worker_stop_server
+    _fleet_failed "stop-servers: ${#PARALLEL_FAILED[@]} failure(s)"
 }
 
 #------------------------------------------------------------------------------
@@ -2770,7 +2809,7 @@ cmd_cleanup() {
     _validate_server_list
     log "Removing $REMOTE_DIR on every host (only the files this tool writes, then the directory)$(_plan_origin)..."
     parallel_hosts _worker_cleanup
-    [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "cleanup: ${#PARALLEL_FAILED[@]} failure(s)"
+    _fleet_failed "cleanup: ${#PARALLEL_FAILED[@]} failure(s)"
 }
 
 #------------------------------------------------------------------------------
@@ -5405,10 +5444,12 @@ cmd_summarize() {
 #------------------------------------------------------------------------------
 # stop: stop-servers under its mx name, with the next steps spelled out.
 cmd_stop() {
-    cmd_stop_servers
+    local rc=0
+    cmd_stop_servers || rc=1
     log "Test logs are still on the hosts:"
     log "  $PROG summarize   # collect + analyze them"
     log "  $PROG clean       # stop + delete every trace"
+    return "$rc"
 }
 
 #------------------------------------------------------------------------------
