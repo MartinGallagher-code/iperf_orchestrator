@@ -414,6 +414,12 @@ test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh() {
         [ "$(wc -l < "$SANDBOX_ROOT/iperf_clients.log")" -ge 2 ] && break
         sleep 0.1
     done
+    # Since IO-007 the handler also stops the run on the hosts, which ends
+    # these ssh jobs too. Take away what it needs for that (the session
+    # files), so this test still sees the local half alone: the
+    # orchestrator must stop its own ssh jobs even when the hosts cannot
+    # be stopped.
+    rm -f "$REMOTE_DIR"/iperf_run_*.sid
     local t0=$SECONDS rc
     kill -TERM "$pid"
     wait "$pid"; rc=$?
@@ -825,6 +831,129 @@ test_clean_removes_the_tools_own_files_and_the_dir() {
     [ ! -e "$REMOTE_DIR" ] || { echo "REMOTE_DIR survived: $(ls -A "$REMOTE_DIR")" >&2; return 1; }
 }
 
+# ---- Ctrl-C stops the run on the hosts (shared_tools IO-007) --------------
+
+# pgrep/pkill to see and clear what is left, setsid so the sandbox's remote
+# side has a process group of its own, as under a real sshd.
+io007_tools() { command -v pgrep && command -v pkill && command -v setsid; } >/dev/null
+
+# Processes whose command line holds this test's temp dir: the remote
+# halves of the sandbox (run scripts, rolling loops, their iperf clients
+# and CPU samplers) all do; the test's own shells do not.
+leftover_procs() { pgrep -f -- "$TEST_TMPDIR" 2>/dev/null | tr '\n' ' '; }
+
+# wait_for_no_leftovers: up to 3 s, for a group kill to land.
+wait_for_no_leftovers() {
+    local left=""
+    for _ in $(seq 1 30); do left=$(leftover_procs); [ -z "${left// }" ] && return 0; sleep 0.1; done
+    echo "still running under the test dir after the interrupt:" >&2
+    # shellcheck disable=SC2086
+    ps -o pid,pgid,args -p $(echo $left | tr ' ' ',') >&2 2>/dev/null
+    pkill -f -- "$TEST_TMPDIR" 2>/dev/null
+    return 1
+}
+
+test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts() {
+    io007_tools || { echo "(no pgrep/pkill/setsid: skipped)"; return 0; }
+    sandbox_two_hosts h1 h2
+    export SANDBOX_IPERF_SECONDS=30
+    PATH="$FAKE_BIN:$PATH" bash "$ORCH" --start-delay 0 --duration 1 run-tests parallel \
+        > "$TEST_TMPDIR/orch.out" 2>&1 &
+    local pid=$! rc h
+    for _ in $(seq 1 100); do
+        [ "$(wc -l < "$SANDBOX_ROOT/iperf_clients.log")" -ge 2 ] && break
+        sleep 0.1
+    done
+    kill -TERM "$pid"; wait "$pid"; rc=$?
+    wait_for_no_leftovers || { cat "$TEST_TMPDIR/orch.out" >&2; return 1; }
+    assert_eq 130 "$rc" "exit status after SIGTERM" || return 1
+    for h in h1 h2; do
+        assert_contains "$(tail -n 1 "$REMOTE_DIR/iperf_run_${h}_$IPERF_RUN_ID.status")" INTERRUPTED \
+            "$h's status file after the interrupt" || return 1
+        [ ! -e "$REMOTE_DIR/iperf_run_${h}_$IPERF_RUN_ID.sid" ] || { echo "$h's sid file was left" >&2; return 1; }
+    done
+    unset SANDBOX_IPERF_SECONDS
+    orch status
+    printf '%s\n' "$RUN_OUT" | grep -qE '^ *h1 +INTERRUPTED' \
+        || { echo "status should show h1 INTERRUPTED:" >&2; echo "$RUN_OUT" >&2; return 1; }
+}
+
+test_sigterm_mid_rolling_stops_the_loops_on_the_hosts() {
+    io007_tools || { echo "(no pgrep/pkill/setsid: skipped)"; return 0; }
+    sandbox_two_hosts h1 h2
+    PATH="$FAKE_BIN:$PATH" bash "$ORCH" --duration 1 --total-time 60 run-tests rolling \
+        > "$TEST_TMPDIR/orch.out" 2>&1 &
+    local pid=$! rc h
+    for _ in $(seq 1 100); do
+        [ "$(wc -l < "$SANDBOX_ROOT/iperf_clients.log")" -ge 2 ] && break
+        sleep 0.1
+    done
+    kill -TERM "$pid"; wait "$pid"; rc=$?
+    wait_for_no_leftovers || { cat "$TEST_TMPDIR/orch.out" >&2; return 1; }
+    assert_eq 130 "$rc" "exit status after SIGTERM" || return 1
+    for h in h1 h2; do
+        assert_contains "$(tail -n 1 "$REMOTE_DIR/iperf_run_${h}_$IPERF_RUN_ID.status" 2>/dev/null)" INTERRUPTED \
+            "$h's status file after the interrupt" || return 1
+    done
+}
+
+# A sid file whose group is not this run's (the script died without
+# removing it, and the id was reused) must never be signalled.
+test_stale_sid_file_never_signals_another_session() {
+    io007_tools || { echo "(no pgrep/pkill/setsid: skipped)"; return 0; }
+    sandbox_two_hosts h1 h2
+    mkdir -p "$REMOTE_DIR"
+    setsid bash -c 'sleep 60; true' &
+    local other=$!
+    echo "$other" > "$REMOTE_DIR/iperf_run_h1_$IPERF_RUN_ID.sid"
+    PATH="$FAKE_BIN:$PATH" _worker_stop_run h1 >/dev/null 2>&1
+    local alive=0
+    kill -0 "$other" 2>/dev/null && alive=1
+    kill -KILL -- -"$other" 2>/dev/null
+    assert_eq 1 "$alive" "a session that is not this run's was signalled" || return 1
+    [ ! -e "$REMOTE_DIR/iperf_run_h1_$IPERF_RUN_ID.sid" ] || { echo "the sid file was left" >&2; return 1; }
+}
+
+# ...and one that is this run's is stopped, all of it, including a
+# process that moved to a process group of its own (as timeout does).
+test_stop_run_stops_the_runs_own_session() {
+    io007_tools || { echo "(no pgrep/pkill/setsid: skipped)"; return 0; }
+    command -v timeout >/dev/null || { echo "(no timeout: skipped)"; return 0; }
+    sandbox_two_hosts h1 h2
+    mkdir -p "$REMOTE_DIR"
+    # A stand-in for a run script: its leader names the script, and one
+    # child sits under timeout, in a process group of its own.
+    setsid bash -c ": run_iperf_h1_$IPERF_RUN_ID.sh; timeout 60 sleep 60 & sleep 60; true" &
+    local own=$! left
+    for _ in $(seq 1 50); do
+        [ "$(ps -e -o sid=,pgid= | awk -v s="$own" '$1 == s && $2 != s' | wc -l)" -ge 1 ] && break
+        sleep 0.1
+    done
+    echo "$own" > "$REMOTE_DIR/iperf_run_h1_$IPERF_RUN_ID.sid"
+    PATH="$FAKE_BIN:$PATH" _worker_stop_run h1 >/dev/null 2>&1
+    left=$(ps -e -o pid=,sid=,pgid=,args= | awk -v s="$own" '$2 == s')
+    pkill -KILL -s "$own" 2>/dev/null
+    [ -z "$left" ] || { echo "still running in the run's session:" >&2; echo "$left" >&2; return 1; }
+    assert_contains "$(tail -n 1 "$REMOTE_DIR/iperf_run_h1_$IPERF_RUN_ID.status")" INTERRUPTED || return 1
+}
+
+test_finished_run_leaves_no_sid_file_and_clean_removes_one() {
+    sandbox_two_hosts h1 h2
+    orch --start-delay 0 --duration 1 run-tests parallel
+    assert_status 0 "$RUN_RC" "parallel round" || return 1
+    orch --run-id roll --duration 1 --total-time 2 run-tests rolling
+    assert_status 0 "$RUN_RC" "rolling round" || return 1
+    local left; left=$(cd "$REMOTE_DIR" && ls ./*.sid 2>/dev/null)
+    [ -z "$left" ] || { echo "sid files left by finished runs: $left" >&2; return 1; }
+    : > "$REMOTE_DIR/iperf_run_h1_old.sid"
+    # One host for the clean: two sharing REMOTE_DIR race each other for
+    # the removal, which is IO-011's business, not this test's.
+    write_server_list h1 >/dev/null
+    orch clean --yes
+    assert_status 0 "$RUN_RC" "clean with a sid file in the dir: $RUN_OUT" || return 1
+    [ ! -e "$REMOTE_DIR" ] || { echo "REMOTE_DIR survived: $(ls -A "$REMOTE_DIR")" >&2; return 1; }
+}
+
 ADV_TESTS=(
     test_remote_dir_quote_reaches_host_literally_in_cleanup
     test_server_bind_quote_reaches_host_literally
@@ -879,6 +1008,11 @@ ADV_TESTS=(
     test_dir_holding_a_file_the_tool_did_not_write_is_refused
     test_clean_without_yes_is_refused_off_a_terminal
     test_clean_removes_the_tools_own_files_and_the_dir
+    test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts
+    test_sigterm_mid_rolling_stops_the_loops_on_the_hosts
+    test_stale_sid_file_never_signals_another_session
+    test_stop_run_stops_the_runs_own_session
+    test_finished_run_leaves_no_sid_file_and_clean_removes_one
 )
 
 for t in "${ADV_TESTS[@]}"; do

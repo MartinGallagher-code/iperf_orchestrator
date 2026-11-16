@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.8.1"
+ORCH_VERSION="2.8.3"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -587,7 +587,7 @@ _remote_dir_guard() {
 #   it removes those files and the directory itself (rmdir: nothing else
 #   could have been in it). A REMOTE_DIR that does not exist is left alone.
 #------------------------------------------------------------------------------
-_REMOTE_DIR_OWN_FILES='run_iperf_*.sh .run_iperf_*.tmp iperf_test_*.log iperf_run_*.status iperf_server_*.log cpu_*.log _results_*.tar.gz _iperf_files_*.list'
+_REMOTE_DIR_OWN_FILES='run_iperf_*.sh .run_iperf_*.tmp iperf_test_*.log iperf_run_*.status iperf_run_*.sid iperf_server_*.log cpu_*.log _results_*.tar.gz _iperf_files_*.list'
 
 _remote_dir_removal_problem() {
     local d="$1" part dn="" home_n=""
@@ -1629,6 +1629,7 @@ _worker_run_progress() {
             local total=""
             [ -n "$expected" ] && [ -n "$last" ] && total="/$expected"
             case "$last" in
+                *INTERRUPTED*) printf '%-30s INTERRUPTED %s%s tests\n' "$host" "$logs" "$total" ;;
                 *DONE*) printf '%-30s DONE      %s%s tests\n' "$host" "$logs" "$total" ;;
                 '')     printf '%-30s RUNNING   %s tests so far\n' "$host" "$logs" ;;
                 *)      printf '%-30s RUNNING   %s%s tests   %s\n' "$host" "$logs" "$total" "$last" ;;
@@ -1934,6 +1935,29 @@ fi
 
 cd "\$(dirname "\$0")"
 
+# Sanitizer matching the orchestrator's _sanitize_host(). Keeps file
+# names safe for IPv6 hostnames like [fe80::1] and any host with \`:\`,
+# \`/\`, \`[\`, \`]\`, or whitespace. Real hostname is preserved inside
+# headers (# pair_a=..., # host=...) so the parser sees the truth.
+_san() { printf '%s' "\$1" | tr ':/[] \\t' '_______'; }
+SOURCE_SAFE=\$(_san "\$SOURCE")
+
+# Record this script's session (shared_tools IO-007): sshd starts each
+# remote command in a session of its own, and everything this script
+# starts stays in it -- its iperf clients and CPU sampler, including the
+# clients coreutils timeout moves into process groups of their own. If
+# the orchestrator is interrupted, it reads this file and stops the whole
+# session, which a killed ssh client would otherwise leave running to the
+# end of the round. The file goes again when the script ends, however it
+# ends.
+SID_FILE="iperf_run_\${SOURCE_SAFE}_\${RUN_ID}.sid"
+_sid=\$(ps -o sid= -p \$\$ 2>/dev/null | tr -d ' ')
+[ -n "\$_sid" ] || _sid=\$(sed 's/.*) //' /proc/\$\$/stat 2>/dev/null | cut -d' ' -f4)
+case "\$_sid" in
+    ''|*[!0-9]*) ;;
+    *) echo "\$_sid" > "\$SID_FILE" && trap 'rm -f "\$SID_FILE"' EXIT ;;
+esac
+
 # Resolve --bind. The value is a substring matched against this host's
 # 'ip -o -4 addr show' output (full line, so it matches against iface
 # name OR address). The first matching line's IPv4 wins.
@@ -1981,12 +2005,6 @@ else
     run_conn_ips=( "\${TARGET_CONN_IPS[@]}" )
 fi
 
-# Sanitizer matching the orchestrator's _sanitize_host(). Keeps file
-# names safe for IPv6 hostnames like [fe80::1] and any host with \`:\`,
-# \`/\`, \`[\`, \`]\`, or whitespace. Real hostname is preserved inside
-# headers (# pair_a=..., # host=...) so the parser sees the truth.
-_san() { printf '%s' "\$1" | tr ':/[] \\t' '_______'; }
-SOURCE_SAFE=\$(_san "\$SOURCE")
 STATUS_FILE="iperf_run_\${SOURCE_SAFE}_\${RUN_ID}.status"
 
 echo "\$(date '+%F %T') START \$SOURCE -> \${run_targets[*]}" >> "\$STATUS_FILE"
@@ -2179,12 +2197,49 @@ cmd_distribute_scripts() {
 }
 
 #------------------------------------------------------------------------------
-# Signal handler: on Ctrl-C or SIGTERM during run-tests / cmd_all, try to
-# stop the iperf daemons we spawned on every remote host so they don't
-# linger. cmd_stop_servers is idempotent and parallel.
+# Stop this run's work on one host after an interrupt (shared_tools IO-007).
+# A real ssh does not end the remote command when the client dies, so
+# killing our ssh jobs leaves each host's run script (or rolling loop)
+# running to the end of its window, still sampling and launching clients,
+# and then writing DONE. The script recorded its session id (sshd gives
+# each remote command a session of its own) in iperf_run_<host>_<run-id>.sid.
+# Stop every process in that session -- a process group is not enough,
+# since coreutils timeout moves each iperf client into a group of its own
+# -- but only if the session's leader still names this run's script or
+# sid file on its command line, so a stale file (an id since reused) never
+# makes us signal anything else. SIGTERM first, SIGKILL for whatever is
+# left after two seconds. Then mark the run INTERRUPTED in its status file,
+# which `status` shows. A host with no sid file is left alone: its part of
+# the run already ended.
+_worker_stop_run() {
+    local host="$1" safe f st script_mark
+    safe=$(_sanitize_host "$host")
+    f=$(_shq "iperf_run_${safe}_${RUN_ID}.sid")
+    st=$(_shq "iperf_run_${safe}_${RUN_ID}.status")
+    script_mark=$(_shq "run_iperf_${safe}_${RUN_ID}.sh")
+    local s
+    s="cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 0; [ -f $f ] || exit 0; "
+    s+="_iosid=\$(head -n 1 $f); rm -f $f; "
+    s+="case \"\$_iosid\" in ''|*[!0-9]*|0|1) _iosid='' ;; esac; "
+    # The processes in session \$_iosid: ps where it can say, /proc otherwise.
+    s+="_iosess() { ps -e -o pid=,sid= 2>/dev/null | awk -v s=\"\$_iosid\" '\$2 == s {print \$1}' | grep . "
+    s+="|| for _iop in /proc/[0-9]*; do [ \"\$(sed 's/.*) //' \"\$_iop/stat\" 2>/dev/null | cut -d' ' -f4)\" = \"\$_iosid\" ] && echo \"\${_iop#/proc/}\"; done; }; "
+    s+="if [ -n \"\$_iosid\" ]; then "
+    s+="_ioargs=\$(tr '\\0' ' ' < /proc/\$_iosid/cmdline 2>/dev/null) || _ioargs=\$(ps -o args= -p \"\$_iosid\" 2>/dev/null); "
+    s+="case \"\$_ioargs\" in *$script_mark*|*$f*) "
+    s+="kill -TERM \$(_iosess) 2>/dev/null; "
+    s+="for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n \"\$(_iosess)\" ] || break; sleep 0.2; done; "
+    s+="_iorest=\$(_iosess); [ -z \"\$_iorest\" ] || kill -KILL \$_iorest 2>/dev/null ;; esac; fi; "
+    s+="tail -n 1 $st 2>/dev/null | grep -q DONE || echo \"\$(date '+%F %T') INTERRUPTED\" >> $st; true"
+    ssh_run "$host" "$s"
+}
+
+# Signal handler: on Ctrl-C or SIGTERM during run-tests / cmd_all, stop
+# this run's work on every host (_worker_stop_run), then the iperf daemons
+# we spawned, so nothing lingers. Both steps are idempotent and parallel.
 _orchestrator_signal_cleanup() {
     trap - INT TERM
-    warn "interrupted; attempting to stop iperf servers on all hosts"
+    warn "interrupted; stopping this run and the iperf servers on all hosts"
     # First end this run's own ssh jobs (a test round still in flight).
     # A Ctrl-C at a terminal reaches them anyway, but a SIGTERM sent to
     # this process alone does not: they would run on until the round
@@ -2196,6 +2251,9 @@ _orchestrator_signal_cleanup() {
         kill -TERM "$j" 2>/dev/null
     done
     # Best-effort: don't let a failure here mask the original signal.
+    if [ -n "${RUN_ID:-}" ]; then
+        _validate_server_list && parallel_hosts _worker_stop_run || true
+    fi
     cmd_stop_servers || true
     exit 130
 }
@@ -2301,6 +2359,15 @@ _run_rolling() {
             set -u
             $(_remote_dir_guard "$src" create)
             cd '$rd'
+            # This loop's session, for an interrupted orchestrator to stop
+            # (shared_tools IO-007); see the run script's SID_FILE.
+            _sidf=\"iperf_run_${q_safe}_$q_rid.sid\"
+            _sid=\$(ps -o sid= -p \$\$ 2>/dev/null | tr -d ' ')
+            [ -n \"\$_sid\" ] || _sid=\$(sed 's/.*) //' /proc/\$\$/stat 2>/dev/null | cut -d' ' -f4)
+            case \"\$_sid\" in
+                ''|*[!0-9]*) ;;
+                *) echo \"\$_sid\" > \"\$_sidf\" && trap 'rm -f \"\$_sidf\"' EXIT ;;
+            esac
             # Background CPU sampler running for the whole rolling window
             # (mpstat if present, /proc/stat fallback otherwise). Same
             # filename + header format as the parallel/sequential modes,

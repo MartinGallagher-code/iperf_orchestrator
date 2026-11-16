@@ -314,9 +314,16 @@ root="$SANDBOX_ROOT/hosts/$hostkey"
 mkdir -p "$root" && cd "$root" || exit 255
 # Not exec: this process stands for the local ssh client, the bash below
 # for the remote side, so killing one leaves the other running -- as with
-# a real ssh, whose remote command outlives a killed client.
+# a real ssh, whose remote command outlives a killed client. And, as sshd
+# does, the remote side gets a session (so a process group) of its own:
+# a signal to the test's group does not reach it, and the run's own
+# process group, which an interrupted orchestrator stops (IO-007), holds
+# the remote side only. Without setsid the remote side shares the test's
+# group, and the IO-007 tests skip.
 [ -n "${SANDBOX_HOST_LC_ALL:-}" ] && export LC_ALL="$SANDBOX_HOST_LC_ALL"
-HOME="$root" SANDBOX_HOST="$host" PATH="$SANDBOX_BIN:$PATH" bash -c "$remote_cmd"
+_setsid=""
+command -v setsid >/dev/null 2>&1 && _setsid=setsid
+HOME="$root" SANDBOX_HOST="$host" PATH="$SANDBOX_BIN:$PATH" $_setsid bash -c "$remote_cmd"
 SHIM
     chmod +x "$FAKE_BIN/ssh"
 

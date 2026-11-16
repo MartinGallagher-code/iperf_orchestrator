@@ -4,6 +4,58 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.3] - 2026-11-16
+
+Ctrl-C now stops the run on the hosts, not only on this machine
+(shared_tools ticket IO-007, found by IO-001's adversarial pass).
+
+### Fixed
+
+- **An interrupted run no longer carries on on the hosts.** On Ctrl-C or
+  SIGTERM during `start`, `run-tests`, `all` or `run`, the orchestrator
+  ended its own ssh jobs and stopped the daemons. A real ssh does not end
+  the remote command when its client dies, though. Every host's run
+  script ran on to the end of its window, sampling CPU and launching
+  clients that then failed against the stopped daemons, and wrote `DONE`,
+  so `status` showed a run that never completed as done. In rolling mode
+  the loop went on launching probes for the rest of `--total-time`. Now:
+  - The run script and the rolling loop each record their session id as
+    they start, in `iperf_run_<host>_<run-id>.sid` in `REMOTE_DIR`, and
+    remove it when they end. sshd gives every remote command a session of
+    its own.
+  - After an interrupt, the handler stops every process in that session
+    on every host: SIGTERM, then SIGKILL for anything left after two
+    seconds. It acts only if the session's leader still names this run's
+    script or `.sid` file, so a stale file whose id has been reused never
+    gets anything else signalled.
+  - It then appends `INTERRUPTED` to the host's status file, and `status`
+    shows it.
+  - It stops the session, not the process group, because coreutils
+    `timeout` (which wraps each iperf client) moves the client into a
+    process group of its own.
+- `iperf_run_*.sid` is one of the tool's own files, so `clean` and
+  `cleanup` remove one left behind rather than refusing the directory.
+
+### Tests
+
+- The test sandbox's ssh stand-in runs the remote side in a session of
+  its own (`setsid`), as sshd does.
+- `tests/test_adversarial.sh`: five new tests, all of which fail on 2.8.1.
+  - SIGTERM in the middle of a parallel round leaves nothing running on
+    the hosts, and `status` shows `INTERRUPTED`.
+  - The same holds in the middle of a rolling run.
+  - A `.sid` file naming a session that is not this run's leaves that
+    session alone.
+  - This run's session is stopped whole, including a child under
+    `timeout` in a process group of its own.
+  - A finished run leaves no `.sid` file, and `clean` removes one.
+- Each new test has a mutation in `tests/test_adversarial_mutations.sh`,
+  seven in all.
+- `test_sigterm_mid_round_stops_promptly_and_leaves_no_local_ssh` now
+  removes the session files before the interrupt, so it still checks that
+  the orchestrator ends its own ssh jobs even when the hosts cannot be
+  stopped. Otherwise its existing mutation would survive.
+
 ## [2.8.1] - 2026-11-16
 
 The analysis steps no longer import Python modules from the directory the

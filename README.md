@@ -89,6 +89,15 @@ workflow):
 | `stop` | Stop the daemons (test logs stay on the hosts). |
 | `clean --yes` | Stop, then delete the remote work dir everywhere — verified gone. It asks first: without `--yes` it prompts on a terminal and refuses anywhere else. It deletes only the files this tool writes there and then the empty directory, and refuses a `--remote-dir` that cannot be the tool's own (empty, `/`, `~`, a home directory, a directory holding anything else); see **Shared-FS safety**. |
 
+**Ctrl-C stops the run on the hosts too** (since 2.8.3). Ctrl-C, or a SIGTERM, during `start`, `run-tests`, `all` or `run` does four things:
+
+1. It ends the orchestrator's own ssh jobs.
+2. On every host, it stops what is still running for this run: the run script (or rolling loop), the iperf clients it started, and its CPU sampler.
+3. It stops the daemons.
+4. It exits with status 130.
+
+A real ssh does not end a remote command when its client dies. Before 2.8.3, those scripts ran on to the end of the round (in rolling mode, to the end of `--total-time`) and then wrote `DONE`. Each host's part is found through the session id it records as it starts: `iperf_run_<host>_<run-id>.sid` in `REMOTE_DIR`, removed again when it finishes. It is stopped only if that session still belongs to this run. `status` then shows the host as `INTERRUPTED`.
+
 Not sure what to ask for? `./iperf-orchestrator.sh hints` turns a goal into
 the command that gets you there. The classic one-liner still works too:
 `./iperf-orchestrator.sh --servers servers.txt all`.
@@ -807,7 +816,7 @@ ls results/
 
 - **They ask.** `cleanup` and `clean` need `--yes`; on a terminal `clean` asks instead (`y` to go on), and anywhere else it refuses without contacting a host. `all` and `run` say at the start which directory they will delete at the end.
 - **Refused before any host is contacted:** an empty `REMOTE_DIR`; `/` (or `//`, `/./`); a top-level directory such as `/tmp` or `/home`; anything starting with `~` (the hosts get the value quoted, so `~` is never expanded); a value with a `..` component; the login directory itself (`.`); a home directory by its shape (`…/home/<user>`, `…/Users/<user>`, `/root`, `/var/root`); and this machine's `$HOME` or a directory above it. The command fails with the reason and exits non-zero.
-- **Refused on the host, removing nothing there:** a `REMOTE_DIR` that fails the ownership checks below (a symlink, another user's, writable by others); one that is, or holds, the SSH user's home directory or any home directory in the host's password database; and one holding anything the tool does not write there. The tool's own names are `run_iperf_*.sh`, `.run_iperf_*.tmp`, `iperf_test_*.log`, `iperf_run_*.status`, `iperf_server_*.log`, `cpu_*.log`, `_results_*.tar.gz` and `_iperf_files_*.list`, as plain files or symlinks (a symlink is removed, never followed). The error lists what else is there; move it out, or pick another `--remote-dir`.
+- **Refused on the host, removing nothing there:** a `REMOTE_DIR` that fails the ownership checks below (a symlink, another user's, writable by others); one that is, or holds, the SSH user's home directory or any home directory in the host's password database; and one holding anything the tool does not write there. The tool's own names are `run_iperf_*.sh`, `.run_iperf_*.tmp`, `iperf_test_*.log`, `iperf_run_*.status`, `iperf_run_*.sid`, `iperf_server_*.log`, `cpu_*.log`, `_results_*.tar.gz` and `_iperf_files_*.list`, as plain files or symlinks (a symlink is removed, never followed). The error lists what else is there; move it out, or pick another `--remote-dir`.
 - **Otherwise** those files are removed and then the empty directory (`rmdir`), so nothing the tool did not write can be deleted. A `REMOTE_DIR` that does not exist is left alone. `clean` then checks that the directory is gone and reports `LEFTOVER` (and fails) on any host where it is not.
 
 Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
