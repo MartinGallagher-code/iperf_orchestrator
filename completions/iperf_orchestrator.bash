@@ -86,7 +86,7 @@ _iperf_orchestrator() {
         run)
             COMPREPLY=( $(compgen -W "$run_modes --for --keep-going --help" -- "$cur") )
             ;;
-        cleanup)
+        cleanup|clean)
             COMPREPLY=( $(compgen -W "--yes --help" -- "$cur") )
             ;;
         status)

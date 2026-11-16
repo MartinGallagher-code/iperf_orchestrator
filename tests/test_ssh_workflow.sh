@@ -97,12 +97,13 @@ test_stop_servers_kills_iperf_on_each_host() {
 
 test_cleanup_removes_remote_dir() {
     prep_workflow a b
-    # cleanup wipes $REMOTE_DIR; requires --yes when run directly.
+    # cleanup removes $REMOTE_DIR (only the tool's own files, then the
+    # dir: IO-004); requires --yes when run directly.
     run_with_fake_path cleanup --yes
     assert_status 0 "$RUN_RC" || return 1
     local rm_count
-    rm_count=$(grep -c "rm -rf" "$FAKE_SSH_LOG")
-    assert_eq "2" "$rm_count" "rm -rf should hit each of 2 hosts" || return 1
+    rm_count=$(grep -c "rmdir -- " "$FAKE_SSH_LOG")
+    assert_eq "2" "$rm_count" "the removal should reach each of 2 hosts" || return 1
 }
 
 test_cleanup_without_yes_dies() {
@@ -110,8 +111,8 @@ test_cleanup_without_yes_dies() {
     run_with_fake_path cleanup
     assert_status 1 "$RUN_RC" "cleanup without --yes should die" || return 1
     assert_contains "$RUN_OUT" "--yes" "should mention --yes" || return 1
-    if grep -q "rm -rf" "$FAKE_SSH_LOG"; then
-        echo "rm -rf was dispatched without --yes" >&2
+    if grep -q "rm -f\|rmdir" "$FAKE_SSH_LOG"; then
+        echo "a removal was dispatched without --yes" >&2
         return 1
     fi
 }

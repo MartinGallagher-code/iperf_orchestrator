@@ -47,7 +47,7 @@ test_remote_dir_quote_reaches_host_literally_in_cleanup() {
     # Relative, so each host's copy lives in its own root.
     local rd="work';touch MARK_rd;'"
     local h
-    for h in h1 h2; do mkdir -p "$(sandbox_host_root "$h")/$rd" && touch "$(sandbox_host_root "$h")/$rd/f"; done
+    for h in h1 h2; do mkdir -p "$(sandbox_host_root "$h")/$rd" && touch "$(sandbox_host_root "$h")/$rd/cpu_$h.log"; done
     REMOTE_DIR="$rd" orch cleanup --yes
     assert_no_marker || return 1
     for h in h1 h2; do
@@ -219,7 +219,7 @@ test_no_fleet_command_runs_a_hostile_value() {
     for cmd in check-iperf check-servers "--server-bind eth0 start-servers" \
                "--server-bind nosuch start-servers" create-scripts distribute-scripts \
                "run-tests parallel" "run-tests sequential-host" "run-tests sequential-pair" \
-               "run-tests rolling" status collect-results stop-servers "cleanup --yes" clean; do
+               "run-tests rolling" status collect-results stop-servers "cleanup --yes" "clean --yes"; do
         # shellcheck disable=SC2086
         orch --run-id "$rid" --start-delay 0 --duration 1 --total-time 3 $cmd
         assert_no_marker || { echo "  (after: $cmd)" >&2; return 1; }
@@ -728,6 +728,103 @@ test_shared_remote_dir_opt_out_relaxes_group_write_only() {
     assert_contains "$RUN_OUT" "others can write to it" || return 1
 }
 
+# ---- What clean/cleanup/all/run may delete (IO-004) -------------------------
+
+# The sandbox's rm stand-in calls, one line each; empty when nothing was removed.
+sandbox_rm_calls() { grep -E "^rm(-refused)?$(printf '\t')" "$SANDBOX_LOG" || true; }
+
+# IO-001 deleted a home directory with --remote-dir /home/victim. Values
+# that can never be the tool's own dir are refused by every deleting
+# command before any host is contacted (no ssh at all, so no rm either).
+test_unsafe_remote_dir_values_are_refused_before_any_host() {
+    sandbox_two_hosts h1 h2
+    local fakehome="$TEST_TMPDIR/fakehome/martin" cmd v
+    mkdir -p "$fakehome"
+    local -a values=('' '/' '//' '/./' '~' '~/' '~victim/x' '.' './' '/tmp' '/home'
+                     '/home/victim' '/home/victim/' '/export/home/victim' '/Users/victim'
+                     '/root' 'work/../..' "$fakehome" "$TEST_TMPDIR/fakehome")
+    for cmd in "clean --yes" "cleanup --yes" "all --keep-going" "run --keep-going"; do
+        for v in "${values[@]}"; do
+            : > "$FAKE_SSH_LOG"
+            # shellcheck disable=SC2086
+            HOME="$fakehome" orch --remote-dir="$v" $cmd
+            assert_ne 0 "$RUN_RC" "$cmd with REMOTE_DIR '$v' must fail" || return 1
+            assert_contains "$RUN_OUT" "refusing to delete REMOTE_DIR" "($cmd, '$v')" || return 1
+            [ ! -s "$FAKE_SSH_LOG" ] || { echo "$cmd with REMOTE_DIR '$v' contacted a host:" >&2; cat "$FAKE_SSH_LOG" >&2; return 1; }
+        done
+    done
+    [ -z "$(sandbox_rm_calls)" ] || { echo "something was removed:" >&2; sandbox_rm_calls >&2; return 1; }
+    # The default, and an ordinary directory of its own, still pass.
+    orch --remote-dir "$TEST_TMPDIR/own" clean --yes
+    assert_status 0 "$RUN_RC" "clean of an ordinary dir" || return 1
+}
+
+# A REMOTE_DIR that is the SSH user's home on the host (here h1's sandbox
+# root, which the sandbox ssh sets as HOME) is refused there, even when
+# everything in it is a file the tool could have written.
+test_home_directory_on_the_host_is_refused() {
+    sandbox_two_hosts h1
+    local home; home=$(sandbox_host_root h1)
+    mkdir -p "$home" && chmod 0755 "$home" && touch "$home/cpu_h1_x.log"
+    local cmd
+    for cmd in "cleanup --yes" "clean --yes"; do
+        orch --remote-dir "$home" $cmd
+        assert_contains "$RUN_OUT" "the home directory" "($cmd)" || return 1
+        [ -f "$home/cpu_h1_x.log" ] || { echo "$cmd removed a file from the home dir" >&2; return 1; }
+    done
+    assert_ne 0 "$RUN_RC" "clean must fail on a home dir" || return 1
+    [ -z "$(sandbox_rm_calls)" ] || { echo "something was removed:" >&2; sandbox_rm_calls >&2; return 1; }
+}
+
+# A directory holding a file the tool did not write is refused whole: not
+# even the tool's own files in it are removed. all and run say up front
+# what they will delete, and end failing on that host.
+test_dir_holding_a_file_the_tool_did_not_write_is_refused() {
+    sandbox_two_hosts h1 h2
+    local rd="$TEST_TMPDIR/mixed" cmd
+    mkdir -p "$rd" && chmod 0700 "$rd"
+    echo notes > "$rd/notes.txt"
+    echo old > "$rd/run_iperf_h1_old.sh"
+    for cmd in "clean --yes" "cleanup --yes"; do
+        orch --remote-dir "$rd" $cmd
+        assert_contains "$RUN_OUT" "did not write: notes.txt" "($cmd)" || return 1
+    done
+    [ -z "$(sandbox_rm_calls)" ] || { echo "something was removed:" >&2; sandbox_rm_calls >&2; return 1; }
+    for cmd in all run; do
+        # --keep-going: without numpy/matplotlib (the Python 3.6 job) doctor
+        # fails, and this must still reach the cleanup at the end.
+        orch --remote-dir "$rd" --start-delay 0 --duration 1 --run-id "io4$cmd" $cmd --keep-going
+        assert_contains "$RUN_OUT" "cleanup had 2 failure(s)" "($cmd)" || return 1
+        assert_contains "$RUN_OUT" "At the end: delete REMOTE_DIR $rd on every host" "$cmd should say so up front" || return 1
+        assert_contains "$RUN_OUT" "did not write: notes.txt" "($cmd)" || return 1
+    done
+    [ -f "$rd/notes.txt" ] && [ -f "$rd/run_iperf_h1_old.sh" ] || { echo "files were removed from the refused dir" >&2; return 1; }
+}
+
+# Without --yes, off a terminal, clean does nothing at all: not even stop.
+test_clean_without_yes_is_refused_off_a_terminal() {
+    sandbox_two_hosts h1 h2
+    mkdir -p "$REMOTE_DIR"
+    orch clean < /dev/null
+    assert_ne 0 "$RUN_RC" "clean without --yes" || return 1
+    assert_contains "$RUN_OUT" "Pass --yes to confirm" || return 1
+    [ ! -s "$FAKE_SSH_LOG" ] || { echo "clean without --yes contacted a host:" >&2; cat "$FAKE_SSH_LOG" >&2; return 1; }
+    [ -d "$REMOTE_DIR" ] || { echo "REMOTE_DIR was removed" >&2; return 1; }
+}
+
+# What the tool wrote goes, and the directory with it: a real run, then clean.
+test_clean_removes_the_tools_own_files_and_the_dir() {
+    sandbox_two_hosts h1 h2
+    orch --run-id own --start-delay 0 --duration 1 run-tests parallel
+    orch --run-id own collect-results
+    touch "$REMOTE_DIR/.run_iperf_h1_own.sh.1.2.tmp" "$REMOTE_DIR/iperf_server_h1_own.log"
+    [ -n "$(ls -A "$REMOTE_DIR")" ] || { echo "the run left nothing to clean, so this tests nothing" >&2; return 1; }
+    orch clean --yes
+    assert_status 0 "$RUN_RC" "clean of the tool's own dir" || return 1
+    assert_contains "$RUN_OUT" "no trace left" || return 1
+    [ ! -e "$REMOTE_DIR" ] || { echo "REMOTE_DIR survived: $(ls -A "$REMOTE_DIR")" >&2; return 1; }
+}
+
 ADV_TESTS=(
     test_remote_dir_quote_reaches_host_literally_in_cleanup
     test_server_bind_quote_reaches_host_literally
@@ -777,6 +874,11 @@ ADV_TESTS=(
     test_remote_dir_owned_by_another_user_is_refused
     test_remote_dir_that_is_a_symlink_is_refused
     test_shared_remote_dir_opt_out_relaxes_group_write_only
+    test_unsafe_remote_dir_values_are_refused_before_any_host
+    test_home_directory_on_the_host_is_refused
+    test_dir_holding_a_file_the_tool_did_not_write_is_refused
+    test_clean_without_yes_is_refused_off_a_terminal
+    test_clean_removes_the_tools_own_files_and_the_dir
 )
 
 for t in "${ADV_TESTS[@]}"; do

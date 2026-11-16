@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.7.0"
+ORCH_VERSION="2.8.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -548,6 +548,115 @@ _remote_dir_guard() {
     g+="if [ -n \"\$_iobad\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod is owned by \$_ioo (uid \$_iou), mode \$_iom; the SSH user is uid \$_ioid: \$_iobad. Refusing to write to it or run from it: remove it, chmod go-w it, or pick another --remote-dir (a group-shared one needs --allow-shared-remote-dir)\" >&2; exit 1; fi; "
     g+="fi; "
     printf '%s' "$g"
+}
+
+#------------------------------------------------------------------------------
+# What clean, cleanup, all and run may delete (shared_tools IO-004).
+#
+# They used to run `rm -rf "$REMOTE_DIR"` on every host, whatever the value
+# was: IO-001 deleted a user's whole home directory with
+# `--remote-dir /home/victim clean`. Now two checks stand in front of it.
+#
+# _remote_dir_removal_problem DIR  (here, before any host is contacted)
+#   prints why DIR can never be the tool's own work dir and returns 1, or
+#   prints nothing and returns 0. Refused: an empty value, '/', a top-level
+#   directory (/tmp, /home, /usr), anything starting with '~' (the hosts get
+#   it quoted, so it is never expanded), a '..' component, the login
+#   directory itself ('.', './'), a home directory by its shape
+#   (<anything>/home/<user>, <anything>/Users/<user>, /root, /var/root), and
+#   this machine's $HOME or a directory above it.
+#
+# _remote_dir_remove HOST  prints the POSIX sh snippet that does the removal
+#   on the host, after _remote_dir_guard (a real directory, owned by the SSH
+#   user, not writable by others). It refuses, removing nothing, when the
+#   directory is (or holds) the SSH user's own home or any home directory in
+#   the host's password database, or when it holds anything the tool does
+#   not write there: only the names below, as plain files or symlinks. Then
+#   it removes those files and the directory itself (rmdir: nothing else
+#   could have been in it). A REMOTE_DIR that does not exist is left alone.
+#------------------------------------------------------------------------------
+_REMOTE_DIR_OWN_FILES='run_iperf_*.sh .run_iperf_*.tmp iperf_test_*.log iperf_run_*.status iperf_server_*.log cpu_*.log _results_*.tar.gz _iperf_files_*.list'
+
+_remote_dir_removal_problem() {
+    local d="$1" part dn="" home_n=""
+    local -a parts=() out=()
+    if [ -z "$d" ]; then echo "it is empty"; return 1; fi
+    case "$d" in
+        "~"*) echo "it starts with '~', which the hosts never expand (give the path itself)"; return 1 ;;
+    esac
+    # Split on '/', dropping empty and '.' components; refuse '..'. read -d ''
+    # keeps the here-string's own newline on the last word: drop it (and only
+    # it -- a newline that is part of the value stays).
+    IFS=/ read -r -d '' -a parts <<< "$d" || true
+    [ "${#parts[@]}" -gt 0 ] && parts[${#parts[@]}-1]="${parts[${#parts[@]}-1]%$'\n'}"
+    for part in ${parts[@]+"${parts[@]}"}; do
+        case "$part" in
+            ''|.) ;;
+            ..) echo "it has a '..' component"; return 1 ;;
+            *) out+=("$part"); dn+="/$part" ;;
+        esac
+    done
+    local n=${#out[@]}
+    if [ "${d:0:1}" != "/" ]; then
+        [ "$n" -gt 0 ] && return 0
+        echo "it is the SSH user's login (home) directory"; return 1
+    fi
+    if [ "$n" -eq 0 ]; then echo "it is the root directory"; return 1; fi
+    if [ "$n" -eq 1 ]; then echo "it is a top-level directory ($dn)"; return 1; fi
+    case "$dn" in
+        /root|/var/root) echo "it is root's home directory"; return 1 ;;
+    esac
+    case "${out[$((n-2))]}" in
+        home|Users) echo "it looks like a home directory (/${out[$((n-2))]}/<user>)"; return 1 ;;
+    esac
+    # This machine's $HOME, and anything above it, normalised the same way.
+    if [ "${HOME:0:1}" = "/" ]; then
+        local -a hp=()
+        IFS=/ read -r -a hp <<< "$HOME" || true
+        for part in ${hp[@]+"${hp[@]}"}; do
+            case "$part" in ''|.) ;; *) home_n+="/$part" ;; esac
+        done
+        case "$home_n/" in
+            "$dn"/*) echo "it is \$HOME on this machine, or a directory above it"; return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+# _require_removable_remote_dir CMD: die before any host is contacted when
+# REMOTE_DIR can never be the tool's own work dir.
+_require_removable_remote_dir() {
+    local why
+    if ! why=$(_remote_dir_removal_problem "$REMOTE_DIR"); then
+        die "$1: refusing to delete REMOTE_DIR '$(_cmt "$REMOTE_DIR")': $why. No host was contacted and nothing was removed. Give --remote-dir a directory of the tool's own (default /tmp/iperf_orchestrator)."
+    fi
+}
+
+_remote_dir_remove() {
+    local host="$1" hq s
+    _dqin_to hq "$host"
+    s="$(_remote_dir_guard "$host")"
+    s+="if [ -e \"\$_iod\" ]; then "
+    # pwd -P then '.', so a trailing newline in the path survives \$(...).
+    s+="_ioreal=\$(cd -- \"\$_iod\" 2>/dev/null && { pwd -P; echo .; }) || { echo \"ERROR: $hq: cannot enter REMOTE_DIR \$_iod; nothing removed\" >&2; exit 1; }; _ioreal=\${_ioreal%?}; _ioreal=\${_ioreal%?}; "
+    s+="[ \"\$_ioreal\" != / ] || { echo \"ERROR: $hq: REMOTE_DIR \$_iod is the root directory; nothing removed\" >&2; exit 1; }; "
+    # Every home this host knows: the SSH user's own, then the password
+    # database (getent where there is one). Refuse the dir if one of them
+    # is the dir itself or lies inside it.
+    s+="_iohit=\$( { (cd && pwd -P); { getent passwd 2>/dev/null || cat /etc/passwd 2>/dev/null; } | awk -F: '{print \$6}'; } | while IFS= read -r _ioh; do "
+    s+="[ -n \"\$_ioh\" ] || continue; _ior=\$(cd -- \"\$_ioh\" 2>/dev/null && pwd -P) || _ior=\$_ioh; "
+    s+="case \"\$_ior/\" in \"\$_ioreal\"/*) printf '%s\\n' \"\$_ioh\"; break ;; esac; done); "
+    s+="if [ -n \"\$_iohit\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod is, or holds, the home directory \$_iohit; refusing to delete it (nothing removed)\" >&2; exit 1; fi; "
+    # Anything the tool does not write there stops the removal.
+    s+="_ioforeign=''; for _ioe in \"\$_iod\"/* \"\$_iod\"/.[!.]* \"\$_iod\"/..?*; do "
+    s+="[ -e \"\$_ioe\" ] || [ -L \"\$_ioe\" ] || continue; _iob=\${_ioe##*/}; "
+    s+="case \"\$_iob\" in ${_REMOTE_DIR_OWN_FILES// /|}) if [ -f \"\$_ioe\" ] || [ -L \"\$_ioe\" ]; then continue; fi ;; esac; "
+    s+="_ioforeign=\"\$_ioforeign \$_iob\"; done; "
+    s+="if [ -n \"\$_ioforeign\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod holds files iperf-orchestrator did not write:\$_ioforeign. Refusing to delete it (nothing removed); move them out, or pick another --remote-dir\" >&2; exit 1; fi; "
+    s+="(cd -- \"\$_iod\" && rm -f -- $_REMOTE_DIR_OWN_FILES) || exit 1; "
+    s+="rmdir -- \"\$_iod\" 2>/dev/null || [ ! -e \"\$_iod\" ] || { echo \"ERROR: $hq: could not remove REMOTE_DIR \$_iod (something new appeared in it?)\" >&2; exit 1; }; "
+    s+="fi; "
+    printf '%s' "$s"
 }
 
 IPERF_EXTRA_ARGS=$(_iperf_extra_args)
@@ -1140,8 +1249,10 @@ THE SIX COMMANDS (each reads the plan file, so no flags need repeating):
     summarize       Collect results; render CSV, pivot, heatmap; print the
                     throughput summary and what to do next
     stop            Stop the iperf2 daemons (test logs stay on the hosts)
-    clean           stop + delete the remote work dir everywhere, verified
-                    (rm -rf of --remote-dir as given; it does not ask)
+    clean [--yes]   stop + delete the remote work dir everywhere, verified.
+                    Asks first (--yes skips it). Deletes only the files it
+                    wrote there, then the dir; refuses an empty dir, /, ~,
+                    a home dir, or a dir holding anything else
 
 AND WHEN YOU WANT THEM:
     run [MODE] [--for N]   start + summarize + stop + clean in one shot
@@ -1257,8 +1368,14 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --ssh-user, -u USER        SSH login user (default $SSH_USER)
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
                                Filenames embed <host>_<run-id>, so hosts can share
-                               it, but cleanup/clean/all/run rm -rf the whole dir,
-                               exactly as given: nothing checks what it is.
+                               it. cleanup/clean/all/run delete only the files the
+                               tool writes there, then the empty dir. Refused
+                               before any host is contacted: empty, /, a top-level
+                               dir, ~..., a '..' component, '.', a home dir
+                               (.../home/USER, .../Users/USER, /root) or this
+                               machine's \$HOME or above. Refused on a host: its
+                               SSH user's home or any passwd home (or a dir above
+                               one), or a dir holding any other file.
                                Before writing to it or running from it, each host
                                checks it is a real directory (not a symlink), owned
                                by the SSH user and not writable by group or others,
@@ -1323,9 +1440,11 @@ PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
                            every SECONDS until ctrl-c (like mx status).
     summarize              process + pivot + results-summary (with hints).
     stop                   stop-servers, plus what-to-do-next breadcrumbs.
-    clean                  stop-servers + rm -rf \$REMOTE_DIR, exactly as given,
-                           on every host, then VERIFY nothing is left (no --yes
-                           needed, and nothing checks what the directory is).
+    clean [--yes]          stop-servers + remove \$REMOTE_DIR on every host, then
+                           VERIFY nothing is left. Needs --yes, or a 'y' when
+                           asked on a terminal. Removes only the files the tool
+                           writes there, then the empty dir; see --remote-dir
+                           for what is refused.
     run [MODE] [--for N] [--keep-going]
                            all + results-summary. --for N pins total-time
                            (rolling mode) or per-test duration (others).
@@ -1353,7 +1472,8 @@ EXECUTION:
                                               Self-starting (no create-scripts).
     collect-results        Pull each host's logs as a tarball back into the run dir.
     stop-servers           Kill iperf -s daemons on every host.
-    cleanup [--yes]        Remove \$REMOTE_DIR on every host (--yes required).
+    cleanup [--yes]        Remove \$REMOTE_DIR on every host (--yes required):
+                           only the tool's own files, then the empty dir.
 
 ANALYSIS:
     parse-csv              Parse iperf2 CSV logs into results/iperf_results.csv
@@ -1396,6 +1516,8 @@ ANALYSIS:
 CONVENIENCE:
     all [MODE] [--keep-going]  Run the full pipeline (doctor + start-servers +
                                run-tests + process + stop-servers + cleanup).
+                               Says up front which REMOTE_DIR it will delete,
+                               and refuses one cleanup would refuse.
                                --keep-going continues past per-host failures.
     doctor                     Check local prerequisites (ssh tools, Python,
                                numpy, matplotlib) and print install hints.
@@ -2454,7 +2576,7 @@ cmd_stop_servers() {
 #------------------------------------------------------------------------------
 _worker_cleanup() {
     local host="$1"
-    ssh_run "$host" "rm -rf $(_shq "$REMOTE_DIR")"
+    ssh_run "$host" "$(_remote_dir_remove "$host")"
 }
 
 cmd_cleanup() {
@@ -2465,11 +2587,12 @@ cmd_cleanup() {
             *) die "cleanup: unknown argument: $a (expected --yes)" ;;
         esac
     done
+    _require_removable_remote_dir cleanup
     if [ "${_IPERF_ORCH_INTERNAL:-0}" != "1" ] && [ "$seen_yes" -ne 1 ]; then
-        die "cleanup will run 'rm -rf $REMOTE_DIR' on every host. Pass --yes to confirm."
+        die "cleanup will delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host (only if it holds nothing but the files this tool writes). Pass --yes to confirm."
     fi
     _validate_server_list
-    log "Removing $REMOTE_DIR on every host..."
+    log "Removing $REMOTE_DIR on every host (only the files this tool writes, then the directory)..."
     parallel_hosts _worker_cleanup
     [ ${#PARALLEL_FAILED[@]} -eq 0 ] || warn "cleanup: ${#PARALLEL_FAILED[@]} failure(s)"
 }
@@ -4868,6 +4991,10 @@ cmd_all() {
         esac
     done
 
+    # The pipeline ends by deleting REMOTE_DIR on every host: refuse one
+    # that can never be the tool's own before anything starts (IO-004).
+    _require_removable_remote_dir "${_IPERF_ORCH_VERB:-all}"
+
     # Stop iperf daemons across the fleet on Ctrl-C / SIGTERM.
     trap '_orchestrator_signal_cleanup' INT TERM
 
@@ -4887,6 +5014,7 @@ cmd_all() {
     log "=== Running full pipeline (run-tests mode: $mode${keep_going:+, --keep-going})  ==="
     log "Run ID: $RUN_ID"
     log "Results dir: $RESULTS_DIR"
+    log "At the end: delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host -- only the files this tool writes there, then the directory; anything else in it stops the delete."
 
     _all_gate() {
         local step="$1"
@@ -5107,8 +5235,7 @@ cmd_stop() {
 # success unless nothing is left.
 _worker_clean_verify() {
     local host="$1"
-    local rd; _sqin_to rd "$REMOTE_DIR"
-    if ssh_run "$host" "rm -rf '$rd' && [ ! -e '$rd' ]"; then
+    if ssh_run "$host" "$(_remote_dir_remove "$host")[ ! -e \"\$_iod\" ]"; then
         printf '%-30s CLEAN\n' "$host"
     else
         printf '%-30s LEFTOVER (%s still exists or could not be removed)\n' "$host" "$REMOTE_DIR"
@@ -5116,8 +5243,33 @@ _worker_clean_verify() {
     fi
 }
 
+# Like cleanup it asks first (IO-004): --yes, or a y at the prompt when
+# run on a terminal. It refuses a REMOTE_DIR that cannot be the tool's own
+# before it contacts any host (see _remote_dir_removal_problem).
 cmd_clean() {
+    local seen_yes=0 a ans
+    for a in "$@"; do
+        case "$a" in
+            --yes) seen_yes=1 ;;
+            *) die "clean: unknown argument: $a (expected --yes)" ;;
+        esac
+    done
+    _require_removable_remote_dir clean
     _validate_server_list
+    if [ "$seen_yes" -ne 1 ]; then
+        local what
+        what="stop the iperf daemons and delete REMOTE_DIR $(_cmt "$REMOTE_DIR") on every host in $SERVER_LIST_FILE (only if it holds nothing but the files this tool writes)"
+        if [ -t 0 ] && [ -t 2 ]; then
+            printf 'clean will %s. Continue? [y/N] ' "$what" >&2
+            IFS= read -r ans || ans=""
+            case "$ans" in
+                y|Y|yes|YES|Yes) ;;
+                *) die "clean: not confirmed; nothing was stopped or removed" ;;
+            esac
+        else
+            die "clean will $what. Pass --yes to confirm (on a terminal it asks instead)."
+        fi
+    fi
     log "Stopping daemons and removing $REMOTE_DIR on every host..."
     cmd_stop_servers
     parallel_hosts _worker_clean_verify
@@ -5150,7 +5302,7 @@ cmd_run() {
             IPERF_DURATION="$for_secs"
         fi
     fi
-    cmd_all "$mode" ${pass[@]+"${pass[@]}"}
+    _IPERF_ORCH_VERB=run cmd_all "$mode" ${pass[@]+"${pass[@]}"}
     cmd_results_summary
 }
 
@@ -5233,7 +5385,7 @@ case "$cmd" in
     start)              cmd_start "$@" ;;
     summarize)          cmd_summarize ;;
     stop)               cmd_stop ;;
-    clean)              cmd_clean ;;
+    clean)              cmd_clean "$@" ;;
     run)                cmd_run "$@" ;;
     hints)              cmd_hints ;;
     status)             cmd_status "$@" ;;

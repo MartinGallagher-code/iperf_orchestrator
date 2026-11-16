@@ -23,8 +23,8 @@ source "$DIR/test_helper.bash"
 # occurrence is replaced.
 MUTATIONS=$(cat <<'TABLE'
 ### test_remote_dir_quote_reaches_host_literally_in_cleanup
----     ssh_run "$host" "rm -rf $(_shq "$REMOTE_DIR")"
-+++     ssh_run "$host" "rm -rf '$REMOTE_DIR'"
+---     g="_iod=$(_shq "$d"); _ioshared=
++++     g="_iod='$d'; _ioshared=
 ### test_server_bind_quote_reaches_host_literally
 ---         BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
 +++         BIND_RAW='$IPERF_SERVER_BIND'
@@ -211,6 +211,21 @@ MUTATIONS=$(cat <<'TABLE'
 ### test_shared_remote_dir_opt_out_relaxes_group_write_only
 --- if [ \"\$_ioshared\" != 1 ]; then
 +++ if [ \"\$_ioshared\" != 0 ]; then
+### test_unsafe_remote_dir_values_are_refused_before_any_host
+---     if ! why=$(_remote_dir_removal_problem "$REMOTE_DIR"); then
++++     if false; then
+### test_home_directory_on_the_host_is_refused
+---     s+="if [ -n \"\$_iohit\" ]; then
++++     s+="if false; then
+### test_dir_holding_a_file_the_tool_did_not_write_is_refused
+---     s+="if [ -n \"\$_ioforeign\" ]; then
++++     s+="if false; then
+### test_clean_without_yes_is_refused_off_a_terminal
+---             die "clean will $what. Pass --yes to confirm (on a terminal it asks instead)."
++++             :
+### test_clean_removes_the_tools_own_files_and_the_dir
+---     s+="rmdir -- \"\$_iod\" 2>/dev/null ||
++++     s+="true ||
 TABLE
 )
 export MUTATIONS

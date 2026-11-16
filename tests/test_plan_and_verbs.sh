@@ -204,7 +204,7 @@ test_stop_kills_daemons_and_points_at_next_steps() {
 test_clean_reports_verified_removal() {
     write_server_list h1 h2 >/dev/null
     install_fake_ssh
-    PATH="$FAKE_BIN:$PATH" run_orch clean
+    PATH="$FAKE_BIN:$PATH" run_orch clean --yes
     assert_status 0 "$RUN_RC" "clean should succeed on a healthy fleet" || return 1
     assert_contains "$RUN_OUT" "CLEAN" || return 1
     assert_contains "$RUN_OUT" "no trace left" || return 1
@@ -214,9 +214,61 @@ test_clean_fails_loudly_when_a_host_is_left_dirty() {
     write_server_list h1 h2 >/dev/null
     install_fake_ssh
     echo h2 > "$FAKE_BIN/unreachable"
-    PATH="$FAKE_BIN:$PATH" run_orch clean
+    PATH="$FAKE_BIN:$PATH" run_orch clean --yes
     [ "$RUN_RC" -ne 0 ] || { echo "clean must fail when a host keeps leftovers" >&2; return 1; }
     assert_contains "$RUN_OUT" "LEFTOVER" || return 1
+}
+
+# clean on a terminal asks (IO-004): 'n' stops before any host is
+# contacted, 'y' goes on. A pty from Python's standard library stands in
+# for the terminal.
+_clean_on_a_tty() {
+    python3 - "$1" bash "$ORCH" clean <<'PY'
+import os, pty, sys
+ans = sys.argv[1]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[2], sys.argv[2:])
+out, sent = b"", False
+while True:
+    try:
+        d = os.read(fd, 4096)
+    except OSError:
+        break
+    if not d:
+        break
+    out += d
+    if not sent and b"[y/N]" in out:
+        os.write(fd, (ans + "\n").encode())
+        sent = True
+_, st = os.waitpid(pid, 0)
+sys.stdout.write(out.decode("utf-8", "replace"))
+sys.exit(1 if st else 0)
+PY
+}
+
+test_clean_asks_on_a_terminal() {
+    command -v python3 >/dev/null || { echo "  (no python3; skipped)"; return 0; }
+    write_server_list h1 h2 >/dev/null
+    install_fake_ssh
+    local out rc
+    out=$(PATH="$FAKE_BIN:$PATH" _clean_on_a_tty n 2>&1); rc=$?
+    assert_ne 0 "$rc" "clean answered 'n' must fail" || return 1
+    assert_contains "$out" "Continue? [y/N]" || return 1
+    assert_contains "$out" "not confirmed; nothing was stopped or removed" || return 1
+    [ ! -s "$FAKE_SSH_LOG" ] || { echo "clean answered 'n' contacted a host" >&2; return 1; }
+    out=$(PATH="$FAKE_BIN:$PATH" _clean_on_a_tty y 2>&1); rc=$?
+    assert_eq 0 "$rc" "clean answered 'y' should succeed: $out" || return 1
+    assert_contains "$out" "no trace left" || return 1
+}
+
+test_clean_without_yes_refuses_off_a_terminal() {
+    write_server_list h1 h2 >/dev/null
+    install_fake_ssh
+    PATH="$FAKE_BIN:$PATH" run_orch clean < /dev/null
+    assert_ne 0 "$RUN_RC" || return 1
+    assert_contains "$RUN_OUT" "Pass --yes to confirm" || return 1
+    [ ! -s "$FAKE_SSH_LOG" ] || { echo "clean without --yes contacted a host" >&2; return 1; }
 }
 
 # ---- hints -----------------------------------------------------------------
@@ -261,6 +313,8 @@ run_test test_summarize_shows_pivot_then_summary
 run_test test_stop_kills_daemons_and_points_at_next_steps
 run_test test_clean_reports_verified_removal
 run_test test_clean_fails_loudly_when_a_host_is_left_dirty
+run_test test_clean_asks_on_a_terminal
+run_test test_clean_without_yes_refuses_off_a_terminal
 run_test test_hints_prints_goal_to_command_cheatsheet
 run_test test_hints_sizes_estimates_to_the_fleet
 
