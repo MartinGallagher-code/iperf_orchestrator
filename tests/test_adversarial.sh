@@ -73,10 +73,15 @@ test_bind_quote_reaches_host_literally_in_peer_probe() {
 
 test_run_id_metacharacters_stay_literal_in_collect() {
     sandbox_two_hosts h1 h2
-    local rid='r;touch MARK_rid;'
-    orch --run-id "$rid" create-scripts
+    local rid
     mkdir -p "$REMOTE_DIR"
-    orch --run-id "$rid" collect-results
+    # A test log for the run-id check to look at (IO-009).
+    echo x > "$REMOTE_DIR/iperf_test_h1_to_h2_other.log"
+    # A ';' ends a command; a $(...) runs one even inside a word.
+    for rid in 'r;touch MARK_rid;' 'r$(touch MARK_rid2)'; do
+        orch --run-id "$rid" create-scripts
+        orch --run-id "$rid" collect-results
+    done
     assert_no_marker
 }
 
@@ -95,16 +100,18 @@ test_run_id_with_a_space_does_not_delete_files_on_the_host() {
 
 test_run_id_glob_does_not_delete_other_runs_logs() {
     sandbox_two_hosts h1 h2
-    mkdir -p "$REMOTE_DIR" && touch "$REMOTE_DIR/iperf_test_a_to_b_otherrun.log"
+    mkdir -p "$REMOTE_DIR" && touch "$REMOTE_DIR/iperf_test_h1_to_h2_otherrun.log"
     orch --run-id '*' create-scripts
     orch --run-id '*' distribute-scripts
-    [ -f "$REMOTE_DIR/iperf_test_a_to_b_otherrun.log" ] || { echo "another run's log was deleted" >&2; return 1; }
+    [ -f "$REMOTE_DIR/iperf_test_h1_to_h2_otherrun.log" ] || { echo "another run's log was deleted" >&2; return 1; }
 }
 
 test_status_progress_keeps_run_id_literal() {
     sandbox_two_hosts h1 h2
     mkdir -p "$REMOTE_DIR"
+    echo x > "$REMOTE_DIR/iperf_test_h1_to_h2_other.log"
     orch --run-id 'r;touch MARK_st;' status
+    orch --run-id 'r$(touch MARK_st2)' status
     assert_no_marker
 }
 
@@ -349,7 +356,7 @@ test_remote_path_with_shell_characters_goes_over_ssh_not_scp() {
 # ---- collect-results: what a host's tarball may put on this machine --------
 
 test_collect_keeps_only_regular_run_files() {
-    sandbox_two_hosts h1
+    sandbox_two_hosts h1 h2
     mkdir -p "$REMOTE_DIR" && echo ok > "$REMOTE_DIR/iperf_test_h1_to_h2_$IPERF_RUN_ID.log"
     # A compromised host: its tar hands back a tarball of its own making.
     local craft="$TEST_TMPDIR/craft"
@@ -376,7 +383,10 @@ SHIM
 }
 
 test_collect_does_not_fetch_a_stale_tarball() {
-    sandbox_two_hosts h1
+    # Both hosts listed: a log naming h2 is then one this run would keep
+    # (IO-009), so only the stale-tarball check stands between it and the
+    # results.
+    sandbox_two_hosts h1 h2
     mkdir -p "$REMOTE_DIR"
     # Left by an earlier collect (or planted); nothing of this run exists.
     local old="$TEST_TMPDIR/old"; mkdir -p "$old"
@@ -449,7 +459,9 @@ test_collect_over_ssh_for_a_path_with_shell_characters() {
 
 test_scp_from_gets_bare_ipv6_in_brackets() {
     install_fake_ssh
-    write_server_list 2001:db8::1 >/dev/null
+    # h2 listed too: collect takes only test logs between listed hosts
+    # (IO-009).
+    write_server_list 2001:db8::1 h2 >/dev/null
     # Something to collect, for when install_fake_ssh is the sandbox
     # (run_tests.sh --sandbox) and the remote side really runs.
     mkdir -p "$REMOTE_DIR" && echo x > "$REMOTE_DIR/iperf_test_2001_db8__1_to_h2_$IPERF_RUN_ID.log"
@@ -831,6 +843,90 @@ test_clean_removes_the_tools_own_files_and_the_dir() {
     [ ! -e "$REMOTE_DIR" ] || { echo "REMOTE_DIR survived: $(ls -A "$REMOTE_DIR")" >&2; return 1; }
 }
 
+# ---- Exactly this run's files (shared_tools IO-009) ------------------------
+
+# Run 'tuned_baseline' shares REMOTE_DIR with run 'baseline'. Its file names
+# end in _baseline.log too, so the old globs took them as baseline's.
+plant_tuned_baseline() {
+    mkdir -p "$REMOTE_DIR"
+    local f
+    for f in iperf_test_h1_to_h2_tuned_baseline.log iperf_test_h2_to_h1_f2_tuned_baseline.log \
+             iperf_test_h2_to_h1_5_tuned_baseline.log iperf_run_h1_tuned_baseline.status; do
+        echo "# pair_a=x pair_b=y run_id=tuned_baseline" > "$REMOTE_DIR/$f"
+    done
+}
+
+test_distribute_leaves_a_longer_run_ids_files_alone() {
+    sandbox_two_hosts h1 h2
+    plant_tuned_baseline
+    local f
+    # baseline's own stale files, in all three name shapes, which go.
+    for f in iperf_test_h1_to_h2_baseline.log iperf_test_h1_to_h2_f2_baseline.log \
+             iperf_test_h2_to_h1_17_baseline.log iperf_run_h1_baseline.status; do
+        echo stale > "$REMOTE_DIR/$f"
+    done
+    orch --run-id baseline create-scripts
+    orch --run-id baseline distribute-scripts
+    assert_status 0 "$RUN_RC" "distribute-scripts: $RUN_OUT" || return 1
+    for f in iperf_test_h1_to_h2_tuned_baseline.log iperf_test_h2_to_h1_f2_tuned_baseline.log \
+             iperf_test_h2_to_h1_5_tuned_baseline.log iperf_run_h1_tuned_baseline.status; do
+        [ -f "$REMOTE_DIR/$f" ] || { echo "run tuned_baseline's $f was deleted" >&2; return 1; }
+    done
+    for f in iperf_test_h1_to_h2_baseline.log iperf_test_h1_to_h2_f2_baseline.log \
+             iperf_test_h2_to_h1_17_baseline.log iperf_run_h1_baseline.status; do
+        [ ! -e "$REMOTE_DIR/$f" ] || { echo "baseline's stale $f was left" >&2; return 1; }
+    done
+}
+
+test_collect_takes_only_this_runs_logs() {
+    sandbox_two_hosts h1 h2
+    orch --run-id baseline --start-delay 0 --duration 1 run-tests parallel
+    assert_status 0 "$RUN_RC" "run-tests" || return 1
+    plant_tuned_baseline
+    orch -v --run-id baseline collect-results
+    assert_status 0 "$RUN_RC" "collect-results" || return 1
+    local rd="$RESULTS_BASE/baseline" left
+    [ -f "$rd/iperf_test_h1_to_h2_baseline.log" ] && [ -f "$rd/iperf_test_h2_to_h1_baseline.log" ] \
+        || { echo "baseline's own logs were not collected: $(ls "$rd")" >&2; return 1; }
+    left=$(cd "$rd" && ls ./*tuned* 2>/dev/null)
+    [ -z "$left" ] || { echo "another run's files were collected: $left" >&2; return 1; }
+    # Not even asked for: the hosts list only this run's logs, so nothing
+    # reaches the extraction filter to be thrown away.
+    assert_not_contains "$RUN_OUT" "unexpected tarball member" || return 1
+}
+
+# The host's tarball is not trusted either: one that carries another run's
+# log (here, one whose id ends in _<this run's id>) is filtered out here.
+test_collect_drops_another_runs_log_from_a_hostile_tarball() {
+    sandbox_two_hosts h1 h2
+    mkdir -p "$REMOTE_DIR" && echo ok > "$REMOTE_DIR/iperf_test_h1_to_h2_baseline.log"
+    local craft="$TEST_TMPDIR/craft"; mkdir -p "$craft"
+    echo good  > "$craft/iperf_test_h1_to_h2_baseline.log"
+    echo other > "$craft/iperf_test_h2_to_h1_tuned_baseline.log"
+    tar -czf "$TEST_TMPDIR/evil.tar.gz" -C "$craft" .
+    cat > "$SANDBOX_BIN/tar" <<SHIM
+#!/usr/bin/env bash
+[ "\$SANDBOX_HOST" = h1 ] && [ "\$1" = "-czf" ] && exec cp "$TEST_TMPDIR/evil.tar.gz" "\$2"
+exec $(command -v tar) "\$@"
+SHIM
+    chmod +x "$SANDBOX_BIN/tar"
+    orch --run-id baseline create-scripts >/dev/null
+    orch --run-id baseline collect-results
+    local rd="$RESULTS_BASE/baseline"
+    [ -f "$rd/iperf_test_h1_to_h2_baseline.log" ] || { echo "the test log was not kept" >&2; return 1; }
+    [ ! -e "$rd/iperf_test_h2_to_h1_tuned_baseline.log" ] || { echo "another run's log was kept" >&2; return 1; }
+}
+
+test_status_counts_only_this_runs_logs() {
+    sandbox_two_hosts h1 h2
+    plant_tuned_baseline
+    echo x > "$REMOTE_DIR/iperf_test_h1_to_h2_baseline.log"
+    orch --run-id baseline create-scripts >/dev/null
+    orch --run-id baseline status
+    printf '%s\n' "$RUN_OUT" | grep -qE '^ *h1 +RUNNING +1 tests so far' \
+        || { echo "status should count h1's one baseline log:" >&2; echo "$RUN_OUT" >&2; return 1; }
+}
+
 # ---- Ctrl-C stops the run on the hosts (shared_tools IO-007) --------------
 
 # pgrep/pkill to see and clear what is left, setsid so the sandbox's remote
@@ -1005,6 +1101,10 @@ ADV_TESTS=(
     test_dir_holding_a_file_the_tool_did_not_write_is_refused
     test_clean_without_yes_is_refused_off_a_terminal
     test_clean_removes_the_tools_own_files_and_the_dir
+    test_distribute_leaves_a_longer_run_ids_files_alone
+    test_collect_takes_only_this_runs_logs
+    test_collect_drops_another_runs_log_from_a_hostile_tarball
+    test_status_counts_only_this_runs_logs
     test_sigterm_mid_round_stops_the_run_scripts_on_the_hosts
     test_sigterm_mid_rolling_stops_the_loops_on_the_hosts
     test_stale_sid_file_never_signals_another_session

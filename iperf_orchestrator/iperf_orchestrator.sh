@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.8.3"
+ORCH_VERSION="2.8.4"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -1590,6 +1590,40 @@ EOF
 }
 
 #------------------------------------------------------------------------------
+# Which test logs are this run's (shared_tools IO-009). Remote file names
+# are iperf_test_<src>_to_<dst>_<run-id>.log, with _f<N> before the run id
+# when a pair has several flows and _<N> (a sequence number) in rolling
+# mode. Host names and run ids may both hold '_', so the glob
+# iperf_test_*_<run-id>.log also matches another run whose id ends in
+# _<run-id>: run 'baseline' took 'tuned_baseline''s logs, and
+# distribute-scripts deleted them. _run_log_pred [RUN] prints POSIX sh
+# defining _iorunlog NAME, true only when NAME splits as that pattern with
+# <src> and <dst> hosts from the server list (sanitized as the files name
+# them) and the optional part a flow or sequence number, digits only.
+# The callers list every iperf_test_*.log and let _iorunlog choose, so the
+# run id appears in one place, quoted. Every host name goes in through _shq. It is used on the hosts (in an ssh
+# snippet) and here (eval'd), so both sides select the same files.
+_run_log_pred() {
+    local run="${1:-$RUN_ID}" h safe list="" pat=""
+    while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        safe=$(_shq "$(_sanitize_host "$h")")
+        list+=" $safe"
+        pat+="${pat:+|}$safe"
+    done < <(read_servers)
+    [ -n "$pat" ] || pat="''"
+    local rsuf; rsuf=$(_shq "_${run}.log")
+    printf '%s' "_iohost() { case \"\$1\" in $pat) return 0 ;; esac; return 1; }; "
+    printf '%s' "_iorunlog() { case \"\$1\" in iperf_test_*$rsuf) ;; *) return 1 ;; esac; "
+    printf '%s' "_iom=\${1#iperf_test_}; _iom=\${_iom%$rsuf}; "
+    printf '%s' "for _ioa in$list; do case \"\$_iom\" in \"\$_ioa\"_to_*) ;; *) continue ;; esac; "
+    printf '%s' "_ior=\${_iom#\"\$_ioa\"_to_}; _iohost \"\$_ior\" && return 0; "
+    printf '%s' "_ios=\${_ior##*_}; case \"\$_ios\" in f*) _ios=\${_ios#f} ;; esac; "
+    printf '%s' "case \"\$_ios\" in ''|*[!0-9]*) continue ;; esac; "
+    printf '%s' "case \"\$_ior\" in *_*) _iohost \"\${_ior%_*}\" && return 0 ;; esac; done; return 1; }; "
+}
+
+#------------------------------------------------------------------------------
 # One live-progress line per host for the run named in $_PROGRESS_RUN_ID
 # (mx-style status ticker). Reads the host's own status file -- written by
 # the generated run script -- plus its per-test log count, so it works from
@@ -1609,7 +1643,11 @@ _worker_run_progress() {
     if ! out=$(ssh_run "$host" "
             cd $(_shq "$REMOTE_DIR") 2>/dev/null || { echo 'NOT-STARTED'; exit 0; }
             st=$(_shq "iperf_run_${safe}_${run}.status")
-            logs=\$(ls iperf_test_$(_bare "$safe")_to_*_$(_bare "$run").log 2>/dev/null | wc -l | tr -d ' ')
+            $(_run_log_pred "$run")
+            logs=0
+            for _iof in iperf_test_$(_bare "$safe")_to_*.log; do
+                [ -f \"\$_iof\" ] && _iorunlog \"\$_iof\" && logs=\$((logs + 1))
+            done
             if [ -f \"\$st\" ]; then
                 printf '%s|%s\n' \"\$logs\" \"\$(tail -n 1 \"\$st\")\"
             elif [ \"\$logs\" -gt 0 ]; then
@@ -2161,9 +2199,15 @@ _worker_distribute_script() {
     # Only delete files belonging to this run-id so prior runs sharing
     # the same $REMOTE_DIR aren't collateral damage. The run id is quoted
     # as well: a '*' or a space in it must not widen what rm matches.
-    local rd rid
-    _sqin_to rd "$REMOTE_DIR"; rid=$(_bare "$RUN_ID")
-    local clean_glob="'$rd'/iperf_test_*_$rid.log '$rd'/iperf_run_*_$rid.status"
+    local rd h statuses=""
+    _sqin_to rd "$REMOTE_DIR"
+    # This run's test logs, by _iorunlog (IO-009), and each listed host's
+    # status file by its exact name: not iperf_run_*_<run-id>.status,
+    # which also matches a run whose id ends in _<run-id>.
+    while IFS= read -r h; do
+        [ -n "$h" ] && statuses+=" $(_shq "iperf_run_$(_sanitize_host "$h")_${RUN_ID}.status")"
+    done < <(read_servers)
+    local clean_run="( cd '$rd' && $(_run_log_pred)for _iof in iperf_test_*.log; do _iorunlog \"\$_iof\" && rm -f -- \"\$_iof\"; done; rm -f --$statuses ); "
     # The script goes to a temp name first and is then renamed over the
     # real one, after rm -f has removed whatever stood there: a symlink
     # planted at the run script's name is replaced, never followed (a
@@ -2172,7 +2216,7 @@ _worker_distribute_script() {
     local tmp=".${remote_name}.$$.${RANDOM}.tmp"
     local q_tmp q_dst
     q_tmp=$(_shq "$REMOTE_DIR/$tmp"); q_dst=$(_shq "$REMOTE_DIR/$remote_name")
-    if ssh_run "$host" "$(_remote_dir_guard "$host" create)rm -f $clean_glob $q_tmp" \
+    if ssh_run "$host" "$(_remote_dir_guard "$host" create)${clean_run}rm -f $q_tmp" \
        && scp_to "$script" "$host" "$REMOTE_DIR/$tmp" \
        && ssh_run "$host" "$(_remote_dir_guard "$host")chmod +x $q_tmp && rm -f -- $q_dst && mv -f -- $q_tmp $q_dst"; then
         vlog "  OK: $host"
@@ -2565,8 +2609,11 @@ _worker_collect_results() {
         cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 1
         rm -f '$tr_q'
         listfile='_iperf_files_${hs}_${rid}.list'
+        $(_run_log_pred)
         {
-            ls iperf_test_*_$(_bare "$RUN_ID").log 2>/dev/null || true
+            for _iof in iperf_test_*.log; do
+                [ -f \"\$_iof\" ] && _iorunlog \"\$_iof\" && printf '%s\\n' \"\$_iof\"
+            done
             ls 'iperf_server_${hs}_${rid}.log' 2>/dev/null || true
             ls 'iperf_run_${hs}_${rid}.status' 2>/dev/null || true
             ls 'cpu_${hs}_${rid}.log' 2>/dev/null || true
@@ -2602,18 +2649,23 @@ _worker_collect_results() {
     tarout=$(tar -xzf "$tarball_local" -C "$xdir" 2>&1)
     # A host's server log, status and cpu files carry its own name; test
     # logs may be any host's (on a shared REMOTE_DIR every host lists them
-    # all), but only this run's.
-    local xf xbase skipped=0
+    # all), but only this run's: _iorunlog (IO-009).
+    local xf xbase keep skipped=0
+    eval "$(_run_log_pred)"
     for xf in "$xdir"/* "$xdir"/.[!.]* "$xdir"/..?*; do
         [ -e "$xf" ] || [ -L "$xf" ] || continue
         xbase=${xf##*/}
+        keep=0
         case "$xbase" in
-            iperf_test_*_"$RUN_ID".log|"iperf_server_${host_safe}_${RUN_ID}.log"|"iperf_run_${host_safe}_${RUN_ID}.status"|"cpu_${host_safe}_${RUN_ID}.log")
-                if [ -f "$xf" ] && [ ! -L "$xf" ]; then
-                    mv -f -- "$xf" "$RESULTS_DIR/$xbase"
-                    continue
-                fi ;;
+            "iperf_server_${host_safe}_${RUN_ID}.log"|"iperf_run_${host_safe}_${RUN_ID}.status"|"cpu_${host_safe}_${RUN_ID}.log")
+                keep=1 ;;
+            iperf_test_*)
+                _iorunlog "$xbase" && keep=1 ;;
         esac
+        if [ "$keep" = 1 ] && [ -f "$xf" ] && [ ! -L "$xf" ]; then
+            mv -f -- "$xf" "$RESULTS_DIR/$xbase"
+            continue
+        fi
         skipped=$((skipped + 1))
     done
     rm -rf -- "$xdir"

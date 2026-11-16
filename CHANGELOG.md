@@ -4,6 +4,58 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.4] - 2026-11-16
+
+A run no longer touches another run's files whose run id ends in its own
+(shared_tools ticket IO-009, found by IO-001's adversarial pass).
+
+### Fixed
+
+- **`baseline` no longer takes `tuned_baseline`'s files.** Remote file
+  names are `iperf_test_<src>_to_<dst>_<run-id>.log` and
+  `iperf_run_<host>_<run-id>.status`. Host names and run ids may both
+  contain `_`, so the globs that picked "this run's files"
+  (`iperf_test_*_<run-id>.log`, `iperf_run_*_<run-id>.status`) also
+  matched another run whose id ends in `_<run-id>`. With two runs sharing
+  a `REMOTE_DIR`:
+  - `--run-id baseline distribute-scripts` deleted
+    `iperf_test_h1_to_h2_tuned_baseline.log` and
+    `iperf_run_h1_tuned_baseline.status`;
+  - `collect-results` pulled that run's logs into `baseline`'s results;
+  - `status` counted them.
+
+  A test log now counts as this run's only if its name splits as
+  `iperf_test_<src>_to_<dst>[_f<N>|_<N>]_<run-id>.log`. `<src>` and
+  `<dst>` must be hosts in the server list, and `<N>` must be digits (a
+  flow or a rolling sequence number). Status files are taken by their
+  exact names, one per host. One generated check (`_run_log_pred`)
+  makes the choice on the hosts and in collect's own filter of what a
+  tarball holds. The run id appears there once, quoted, and no longer
+  in any glob. No file is renamed and no run id is refused.
+
+### Tests
+
+- `tests/test_adversarial.sh`: four new tests, all of which fail on 2.8.2.
+  They use runs `baseline` and `tuned_baseline` in one `REMOTE_DIR`.
+  - `distribute-scripts` leaves the other run's files alone and still
+    clears its own, in all three name shapes.
+  - `collect-results` collects only its own logs.
+  - A host's tarball carrying the other run's log is filtered out.
+  - `status` counts only its own logs.
+- Each new test has a mutation in `tests/test_adversarial_mutations.sh`.
+- The IO-001 tests for hostile run ids now aim their mutations at the
+  new check. The protection those mutations used to undo is now
+  redundant, so they would have survived. Those tests also plant a test
+  log so the check is exercised, and try a `$(...)` run id as well as a
+  `;` one.
+- Tests whose logs named a host missing from their server list now list
+  it, because a log between unlisted hosts is no longer collected:
+  `test_collect_does_not_fetch_a_stale_tarball`,
+  `test_collect_keeps_only_regular_run_files`,
+  `test_scp_from_gets_bare_ipv6_in_brackets`, and the `test_collect_results.sh`
+  fixtures (`<host>_to_peer` is now `<host>_to_<a listed host>`).
+  `test_distribute_scripts_removes_only_this_runs_stale_files` checks the
+  new selection instead of the old globs.
 ## [2.8.3] - 2026-11-16
 
 Ctrl-C now stops the run on the hosts, not only on this machine

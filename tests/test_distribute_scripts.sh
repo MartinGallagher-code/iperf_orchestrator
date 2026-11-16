@@ -77,14 +77,22 @@ test_distribute_scripts_creates_remote_dir() {
 test_distribute_scripts_removes_only_this_runs_stale_files() {
     prep_workflow a b
     run_with_fakes distribute-scripts >/dev/null
-    # Worker scopes rm -f to <run-id>-suffixed files only.
-    if ! grep -q -E "rm -f .*iperf_test_\*_${IPERF_RUN_ID}\.log" "$FAKE_SSH_LOG"; then
-        echo "expected rm -f iperf_test_*_${IPERF_RUN_ID}.log on remote" >&2
+    # Worker removes only this run's test logs, chosen by _iorunlog (which
+    # names the run id once, quoted), and each host's status file by its
+    # exact name (IO-009): no iperf_*_<run-id> glob, which would also match
+    # a run whose id ends in _<run-id>.
+    if ! grep -qF "iperf_test_*'_${IPERF_RUN_ID}.log'" "$FAKE_SSH_LOG" \
+       || ! grep -qF '_iorunlog "$_iof" && rm -f -- "$_iof"' "$FAKE_SSH_LOG"; then
+        echo "expected this run's test logs removed through _iorunlog" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     fi
-    if ! grep -q -E "iperf_run_\*_${IPERF_RUN_ID}\.status" "$FAKE_SSH_LOG"; then
-        echo "expected stale status-file removal scoped to run-id" >&2
+    if ! grep -qF "rm -f -- 'iperf_run_a_${IPERF_RUN_ID}.status' 'iperf_run_b_${IPERF_RUN_ID}.status'" "$FAKE_SSH_LOG"; then
+        echo "expected each host's status file removed by its exact name" >&2
+        return 1
+    fi
+    if grep -qF "iperf_run_*_" "$FAKE_SSH_LOG"; then
+        echo "a status-file glob is back" >&2
         return 1
     fi
 }
