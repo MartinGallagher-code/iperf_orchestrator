@@ -61,9 +61,11 @@ test_check_servers_reports_stopped_when_none_running() {
     assert_eq "2" "$stopped" "both hosts should be STOPPED" || return 1
 }
 
-test_check_servers_reports_running_when_pgrep_finds_proc() {
-    prep_workflow alpha bravo
-    touch "$FAKE_BIN/iperf_running_bravo"
+test_check_servers_reports_running_for_its_daemon() {
+    prep_workflow bravo
+    run_with_fake_path start-servers
+    assert_status 0 "$RUN_RC" "start-servers on bravo: $RUN_OUT" || return 1
+    write_server_list alpha bravo >/dev/null
     run_with_fake_path check-servers
     assert_status 0 "$RUN_RC" || return 1
     local running stopped
@@ -86,7 +88,8 @@ test_start_servers_dispatches_per_host() {
 
 test_stop_servers_kills_iperf_on_each_host() {
     prep_workflow a b c
-    touch "$FAKE_BIN/iperf_running_a" "$FAKE_BIN/iperf_running_b" "$FAKE_BIN/iperf_running_c"
+    run_with_fake_path start-servers
+    assert_status 0 "$RUN_RC" "start-servers: $RUN_OUT" || return 1
     run_with_fake_path stop-servers
     assert_status 0 "$RUN_RC" || return 1
     for h in a b c; do
@@ -132,7 +135,7 @@ test_check_iperf_uses_parallel_jobs() {
 
 test_workflow_subcommands_are_idempotent() {
     prep_workflow a b
-    touch "$FAKE_BIN/iperf_running_a" "$FAKE_BIN/iperf_running_b"
+    run_with_fake_path start-servers
     run_with_fake_path stop-servers
     assert_status 0 "$RUN_RC" "first stop should succeed" || return 1
     run_with_fake_path stop-servers
@@ -142,7 +145,7 @@ test_workflow_subcommands_are_idempotent() {
 run_test test_check_iperf_marks_hosts_installed
 run_test test_check_iperf_handles_unreachable_host
 run_test test_check_servers_reports_stopped_when_none_running
-run_test test_check_servers_reports_running_when_pgrep_finds_proc
+run_test test_check_servers_reports_running_for_its_daemon
 test_start_servers_embeds_server_bind_resolver_when_set() {
     prep_workflow a b
     run_with_fake_path --server-bind eth0 start-servers >/dev/null 2>&1
@@ -158,7 +161,7 @@ test_start_servers_embeds_server_bind_resolver_when_set() {
     grep -q 'no interface matched' "$FAKE_SSH_LOG" || {
         echo "start-servers worker missing no-match error path" >&2; return 1
     }
-    grep -qE 'iperf -p [0-9]+ \$BIND_FLAG -s -D' "$FAKE_SSH_LOG" || {
+    grep -qE 'exec iperf -p "\$_ioport" \$BIND_FLAG -s' "$FAKE_SSH_LOG" || {
         echo "iperf -s invocation should reference \$BIND_FLAG" >&2
         grep "iperf -p" "$FAKE_SSH_LOG" >&2
         return 1

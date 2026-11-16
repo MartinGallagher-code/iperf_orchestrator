@@ -44,18 +44,15 @@ case "\$remote_cmd" in
     *"command -v mpstat"*)
         echo "yes"
         exit 0 ;;
-    *"iperf -s -D"*)
+    ": iperf-orchestrator start-server"*)
         touch "\$fake_remote/_running"
         exit 0 ;;
-    *"! pgrep"*)
+    ": iperf-orchestrator stop-server"*)
         rm -f "\$fake_remote/_running"
         exit 0 ;;
-    *"pgrep -ax iperf"*|*"pgrep -x iperf"*)
-        if [ -f "\$fake_remote/_running" ]; then
-            echo "12345 iperf -s -p 5001"
-            exit 0
-        fi
-        exit 1 ;;
+    ": iperf-orchestrator check-server"*)
+        [ -f "\$fake_remote/_running" ] && echo "12345 iperf -p 5001 -s"
+        exit 0 ;;
 esac
 
 local_cmd=\$(echo "\$remote_cmd" | sed -e "s|$REMOTE_DIR|\$fake_remote|g")

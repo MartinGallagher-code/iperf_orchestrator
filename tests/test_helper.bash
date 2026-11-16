@@ -40,6 +40,17 @@ setup_orch_env() {
 }
 
 teardown_orch_env() {
+    # Sandbox daemons a test left up (start-servers without stop-servers)
+    # are real processes: stop them, and only them.
+    if [ -n "${TEST_TMPDIR:-}" ] && [ -d "$TEST_TMPDIR/daemons" ]; then
+        local pid
+        for pid in $(cut -f1 "$TEST_TMPDIR"/daemons/* 2>/dev/null); do
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+                *"$TEST_TMPDIR"/*/iperf*) kill "$pid" 2>/dev/null ;;
+            esac
+        done
+    fi
     if [ -n "${TEST_TMPDIR:-}" ] && [ -d "$TEST_TMPDIR" ]; then
         rm -rf "$TEST_TMPDIR"
     fi
@@ -127,18 +138,23 @@ if [ -f "$FAKE_BIN/unreachable" ] && grep -Fxq "$host" "$FAKE_BIN/unreachable"; 
     exit 255
 fi
 
-# Order matters: orchestrator commands compound several ops on one line
-# (e.g. start = mkdir + pkill + iperf -s -D + pgrep), so we match on
-# the most specific signature first.
+# Order matters: orchestrator commands compound several ops in one
+# snippet, so we match on the most specific signature first. The daemon
+# snippets each start with a ': iperf-orchestrator <what>' line.
 case "$remote_cmd" in
-    *"iperf -p"*"-s -D"*)
-        # cmd_start_servers: mkdir + iperf -p PORT -s -D.
+    ": iperf-orchestrator start-server"*)
+        # start-servers: the daemon is up; the flag file stands for it.
         touch "$FAKE_BIN/iperf_running_$host"
+        echo "$host: the iperf daemon is listening on port 5001 (pid 12345)"
         exit 0
         ;;
-    *"pkill -f"*"^iperf -p"*)
-        # cmd_stop_servers: pkill the iperf -p PORT daemon. Clear the flag.
+    ": iperf-orchestrator stop-server"*)
         rm -f "$FAKE_BIN/iperf_running_$host"
+        exit 0
+        ;;
+    ": iperf-orchestrator check-server"*)
+        # check-servers: the pid and command line of the daemon, if up.
+        [ -f "$FAKE_BIN/iperf_running_$host" ] && echo "12345 iperf -p 5001 -s"
         exit 0
         ;;
     *"iperf -v"*)
@@ -148,14 +164,6 @@ case "$remote_cmd" in
     *"command -v mpstat"*)
         echo "yes"
         exit 0
-        ;;
-    *"pgrep -ax iperf"*|*"pgrep -x iperf"*)
-        # cmd_check_servers: bare pgrep probe.
-        if [ -f "$FAKE_BIN/iperf_running_$host" ]; then
-            echo "12345 iperf -s -p 5001"
-            exit 0
-        fi
-        exit 1
         ;;
     *"rm -rf "*)
         exit 0
@@ -225,14 +233,21 @@ SHIM
 #   * Remote commands see stand-ins first on their PATH:
 #       rm, mkdir, chmod  log every request, and refuse (exit 1, logged
 #                         as *-refused) any path outside $SANDBOX_ROOT.
-#       iperf             -s -D registers a daemon in a per-host registry
-#                         (a second one on a taken port "detaches" and
-#                         then fails, like the real one); -c logs its
-#                         argv, one %q-quoted word each, to
+#       iperf             -s registers a daemon in a per-host registry and
+#                         stays up as a real process (at most 300 s) until
+#                         it is killed, then leaves the registry; one on a
+#                         port the registry already holds logs "listener
+#                         bind failed" and lingers, like the real one.
+#                         -s -D registers and returns. -c logs its argv,
+#                         one %q-quoted word each, to
 #                         $SANDBOX_ROOT/iperf_clients.log and prints one
 #                         iperf2 CSV row; -v prints a version 2 banner.
+#       ss                -ltnp lists the registry's daemons as listening
+#                         sockets, with their pids.
 #       pkill, pgrep      act on that registry only, never on real
 #                         processes.
+#     sandbox_foreign_daemon HOST PORT puts a daemon the tool did not start
+#     (an operator's own) in the registry.
 #       ip, mpstat        canned output, instantly.
 #     Every stand-in call is logged to $SANDBOX_LOG, one line each:
 #     <tool> TAB <host> TAB <args, %q-quoted>.
@@ -240,6 +255,8 @@ SHIM
 #     snippet runs. Tests that inject commands use harmless markers
 #     (touch a file inside the sandbox), never anything destructive.
 #
+# SANDBOX_HOST_PATH=DIR[:DIR...] is the hosts' PATH after the stand-ins
+# (see path_without, for a host that lacks a tool).
 # SANDBOX_IPERF_SECONDS=N makes every iperf -c sleep N seconds first
 # (for interrupting a run mid-test). SANDBOX_HOST_LC_ALL=LOCALE runs the
 # hosts' side in LOCALE while the orchestrator keeps its own.
@@ -269,15 +286,6 @@ FAKE_BIN='$FAKE_BIN'
 _host="\${SANDBOX_HOST:-local}"
 _hostkey=\$(printf '%s' "\$_host" | tr -c 'A-Za-z0-9._-' '_')
 _slog() { local tool="\$1"; shift; printf '%s\t%s\t%s\n' "\$tool" "\$_host" "\$(printf '%q ' "\$@")" >> "\$SANDBOX_LOG"; }
-# The daemon registry for this host. A test written for install_fake_ssh
-# marks a daemon as running by touching iperf_running_<host>; read that
-# as one daemon on the default port, so those tests run here unchanged.
-# Only while the host has no registry at all: once pkill has emptied it,
-# a flag file not yet removed must not bring the daemon back.
-_reg="\$SANDBOX_ROOT/daemons/\$_hostkey"
-if [ -f "\$FAKE_BIN/iperf_running_\$_host" ] && [ ! -e "\$_reg" ]; then
-    printf '12345\tiperf -p 5001 -s -D\n' > "\$_reg"
-fi
 # _inside PATH: true when PATH (resolved, need not exist) is inside the sandbox.
 _inside() {
     local r
@@ -323,7 +331,7 @@ mkdir -p "$root" && cd "$root" || exit 255
 [ -n "${SANDBOX_HOST_LC_ALL:-}" ] && export LC_ALL="$SANDBOX_HOST_LC_ALL"
 _setsid=""
 command -v setsid >/dev/null 2>&1 && _setsid=setsid
-HOME="$root" SANDBOX_HOST="$host" PATH="$SANDBOX_BIN:$PATH" $_setsid bash -c "$remote_cmd"
+HOME="$root" SANDBOX_HOST="$host" PATH="$SANDBOX_BIN:${SANDBOX_HOST_PATH:-$PATH}" $_setsid bash -c "$remote_cmd"
 SHIM
     chmod +x "$FAKE_BIN/ssh"
 
@@ -401,12 +409,15 @@ for o in ${opts[@]+"${opts[@]}"}; do
 done
 rc=0 ok=()
 for p in ${ops[@]+"${ops[@]}"}; do
-    # Like rm -f: an operand that does not exist is nothing to do. Checked
-    # before _inside, whose realpath cannot resolve a relative path once
-    # this shell's current directory is gone -- as when another host
-    # sharing REMOTE_DIR has just removed it (shared_tools IO-011).
-    if [ "$force" = 1 ] && [ ! -e "$p" ] && [ ! -L "$p" ]; then continue; fi
     if [ -z "$p" ] || _inside "$p"; then ok+=("$p"); continue; fi
+    # Like rm -f: an operand that does not exist is nothing to do, so only
+    # a path that exists outside the sandbox is refused. _inside's realpath
+    # cannot resolve a relative path once this shell's current directory is
+    # gone -- as when another host sharing REMOTE_DIR has just removed it
+    # (shared_tools IO-011) -- and the other host can remove the operand
+    # between a check before _inside and _inside itself (IO-006 met that
+    # once), so the check comes after.
+    if [ "$force" = 1 ] && [ ! -e "$p" ] && [ ! -L "$p" ]; then continue; fi
     _slog rm-refused "$(realpath -m -- "$p")"
     echo "sandbox rm: refused to remove $p (outside the sandbox)" >&2
     rc=1
@@ -483,15 +494,27 @@ done
 case "$mode" in
     server)
         [ "$daemon" = 1 ] && echo "Running Iperf Server as a daemon"
-        # The real one detaches before it binds, so a taken port still
-        # "succeeds" here and the daemon then dies.
+        # A taken port: iperf 2.1.9 logs this, lingers, then exits 0; with
+        # -D it has detached before it binds, so that "succeeds" too.
         if [ -f "$reg" ] && awk -v p="$port" '{for (i=2;i<=NF;i++) if ($i=="-p" && $(i+1)==p) f=1} END{exit !f}' "$reg"; then
-            echo "bind failed: Address already in use" >> "$SANDBOX_ROOT/hosts/$_hostkey.iperf_daemon.err"
+            echo "listener bind failed: Address already in use" >&2
+            [ "$daemon" = 1 ] && exit 0
+            sleep 2 & wait $!
             exit 0
         fi
         printf '%s\t%s\n' "$$" "iperf $*" >> "$reg"
         touch "$FAKE_BIN/iperf_running_$_host"
-        exit 0 ;;
+        [ "$daemon" = 1 ] && exit 0
+        # In the foreground, as start-servers runs it: a real process,
+        # up until it is killed, then out of the registry.
+        _leave() {
+            grep -v "^$$"$'\t' "$reg" > "$reg.$$" 2>/dev/null; mv -f "$reg.$$" "$reg"
+            [ -s "$reg" ] || rm -f "$FAKE_BIN/iperf_running_$_host"
+            exit 0
+        }
+        trap _leave TERM INT
+        while [ "$SECONDS" -lt 300 ]; do sleep 1 & wait $!; done
+        _leave ;;
     client)
         printf '%s\t%s\n' "$_host" "$(printf '%q ' "$@")" >> "$SANDBOX_ROOT/iperf_clients.log"
         [ -n "${SANDBOX_IPERF_SECONDS:-}" ] && sleep "$SANDBOX_IPERF_SECONDS"
@@ -542,6 +565,22 @@ reg="$SANDBOX_ROOT/daemons/$_hostkey"
 tr '\t' ' ' < "$reg"
 SHIM
 
+    cat > "$SANDBOX_BIN/ss" <<'SHIM'
+#!/usr/bin/env bash
+# The registry's daemons as `ss -ltnp` shows listening sockets.
+. "$SANDBOX_BIN/.prelude"
+_slog ss "$@"
+reg="$SANDBOX_ROOT/daemons/$_hostkey"
+echo "State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
+[ -f "$reg" ] || exit 0
+while IFS=$'\t' read -r pid cmdline; do
+    port=5001
+    read -r -a w <<< "$cmdline"
+    for ((i=0; i<${#w[@]}; i++)); do [ "${w[$i]}" = -p ] && port="${w[$((i+1))]:-5001}"; done
+    printf 'LISTEN 0      128          0.0.0.0:%s      0.0.0.0:*    users:(("iperf",pid=%s,fd=3))\n' "$port" "$pid"
+done < "$reg"
+SHIM
+
     cat > "$SANDBOX_BIN/ip" <<'SHIM'
 #!/usr/bin/env bash
 . "$SANDBOX_BIN/.prelude"
@@ -565,6 +604,33 @@ echo "00:00:01     all    1.00    0.00    1.00    0.00    0.00    1.00    0.00  
 SHIM
 
     chmod +x "$SANDBOX_BIN"/*
+}
+
+# path_without TOOL...: a directory holding a link to every command on
+# PATH except TOOL..., for a host that lacks them (SANDBOX_HOST_PATH).
+# Prints the directory. Remove the sandbox's own stand-in for a TOOL too.
+path_without() {
+    local d="$TEST_TMPDIR/path-without" dir f name hidden=" $* "
+    mkdir -p "$d"
+    local IFS=:
+    for dir in $PATH; do
+        [ -d "$dir" ] || continue
+        for f in "$dir"/*; do
+            name=${f##*/}
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            case "$hidden" in *" $name "*) continue ;; esac
+            [ -e "$d/$name" ] || [ -L "$d/$name" ] || ln -s "$f" "$d/$name"
+        done
+    done
+    printf '%s' "$d"
+}
+
+# sandbox_foreign_daemon HOST PORT: an iperf daemon on HOST that the tool
+# did not start (an operator's own), in the sandbox registry only.
+sandbox_foreign_daemon() {
+    mkdir -p "$SANDBOX_ROOT/daemons"
+    printf '%s\t%s\n' 999999 "iperf -p $2 -s -D" \
+        >> "$SANDBOX_ROOT/daemons/$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_')"
 }
 
 # sandbox_host_root HOST: the directory a sandboxed host runs in.

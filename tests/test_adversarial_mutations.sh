@@ -26,8 +26,8 @@ MUTATIONS=$(cat <<'TABLE'
 ---     g="_iod=$(_shq "$d"); _ioshared=
 +++     g="_iod='$d'; _ioshared=
 ### test_server_bind_quote_reaches_host_literally
----         BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
-+++         BIND_RAW='$IPERF_SERVER_BIND'
+--- BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
++++ BIND_RAW='$IPERF_SERVER_BIND'
 ### test_bind_quote_reaches_host_literally_in_peer_probe
 ---                 BIND_RAW=$(_shq "$pattern")
 +++                 BIND_RAW='$pattern'
@@ -77,11 +77,8 @@ MUTATIONS=$(cat <<'TABLE'
 --- _sqin_to() { local LC_ALL=C; printf -v "$1" '%s' "${2//\'/$_SQ_ESC}"; }
 +++ _sqin_to() { printf -v "$1" '%s' "$2"; }
 ### test_no_fleet_command_runs_a_hostile_value
----             [ -n \"\$_line\" ] || { echo \"ERROR: $(_dqin "$host"): --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
-+++             [ -n \"\$_line\" ] || { echo \"ERROR: $host: --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
-### test_no_fleet_command_runs_a_hostile_value
----             echo \"[server-bind] $(_dqin "$host"): '\$BIND_RAW' -> ip=\$_ip\"
-+++             echo \"[server-bind] $host: '\$BIND_RAW' -> ip=\$_ip\"
+---         "$IPERF_PORT" "$hq" "$(_shq "$base.pid")" "$(_shq "$base.log")"
++++         "$IPERF_PORT" "$host" "$(_shq "$base.pid")" "$(_shq "$base.log")"
 ### test_no_fleet_command_runs_a_hostile_value
 ---             st=$(_shq "iperf_run_${safe}_${run}.status")
 +++             st='iperf_run_${safe}_${run}.status'
@@ -188,8 +185,8 @@ MUTATIONS=$(cat <<'TABLE'
 --- "$(_remote_dir_guard "$src")$(_shq
 +++ "$(_shq
 ### test_start_servers_refuses_a_world_writable_remote_dir
----         $(_remote_dir_guard "$host" create)
-+++         mkdir -p $(_shq "$REMOTE_DIR")
+--- $(_remote_dir_guard "$host" create)cd -- \"\$_iod\"
++++ _iod=$(_shq "$REMOTE_DIR"); mkdir -p -- \"\$_iod\"; cd -- \"\$_iod\"
 ### test_fresh_remote_dir_is_created_private_and_works
 --- mkdir -p -m 700 -- 
 +++ mkdir -p -- 

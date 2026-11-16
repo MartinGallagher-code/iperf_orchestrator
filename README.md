@@ -163,17 +163,18 @@ PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
 
 SETUP:
   check-iperf            Verify iperf2 + mpstat presence on every host
-  check-servers          Check which hosts have iperf -s currently running
+  check-servers          Check which hosts run the iperf daemon start-servers started
 
 EXECUTION:
-  start-servers          Start iperf2 -s on every host (--port, default 5001)
+  start-servers          Start iperf2 -s on every host (--port, default 5001) and
+                         wait until it listens
   run-tests [MODE] [--keep-going]
                          Run the tests. Auto-runs create-scripts and
                          distribute-scripts for non-rolling modes, and stops if
                          distribution failed on a host unless --keep-going. MODE is
                          parallel | sequential-host | sequential-pair | rolling.
   collect-results        Pull logs back as a tar archive per host
-  stop-servers           Kill iperf -s on every host
+  stop-servers           Stop the iperf daemons start-servers started, no others
   cleanup --yes          Remove $REMOTE_DIR on every host (its own files only)
 
 ANALYSIS:
@@ -830,7 +831,7 @@ ls results/
 
 - **They ask.** `cleanup` and `clean` need `--yes`; on a terminal `clean` asks instead (`y` to go on), and anywhere else it refuses without contacting a host. `all` and `run` say at the start which directory they will delete at the end.
 - **Refused before any host is contacted:** an empty `REMOTE_DIR`; `/` (or `//`, `/./`); a top-level directory such as `/tmp` or `/home`; anything starting with `~` (the hosts get the value quoted, so `~` is never expanded); a value with a `..` component; the login directory itself (`.`); a home directory by its shape (`…/home/<user>`, `…/Users/<user>`, `/root`, `/var/root`); and this machine's `$HOME` or a directory above it. The command fails with the reason and exits non-zero.
-- **Refused on the host, removing nothing there:** a `REMOTE_DIR` that fails the ownership checks below (a symlink, another user's, writable by others); one that is, or holds, the SSH user's home directory or any home directory in the host's password database; and one holding anything the tool does not write there. The tool's own names are `run_iperf_*.sh`, `.run_iperf_*.tmp`, `iperf_test_*.log`, `iperf_run_*.status`, `iperf_run_*.sid`, `iperf_server_*.log`, `cpu_*.log`, `_results_*.tar.gz` and `_iperf_files_*.list`, as plain files or symlinks (a symlink is removed, never followed). The error lists what else is there; move it out, or pick another `--remote-dir`.
+- **Refused on the host, removing nothing there:** a `REMOTE_DIR` that fails the ownership checks below (a symlink, another user's, writable by others); one that is, or holds, the SSH user's home directory or any home directory in the host's password database; and one holding anything the tool does not write there. The tool's own names are `run_iperf_*.sh`, `.run_iperf_*.tmp`, `iperf_test_*.log`, `iperf_run_*.status`, `iperf_run_*.sid`, `iperf_server_*.log`, `iperf_daemon_*.pid`, `iperf_daemon_*.log`, `cpu_*.log`, `_results_*.tar.gz` and `_iperf_files_*.list`, as plain files or symlinks (a symlink is removed, never followed). The error lists what else is there; move it out, or pick another `--remote-dir`. A pid file whose iperf daemon is still running stops the removal too (since 2.12.0): `stop-servers` stops only the daemons it has a pid file for, so the daemon would be left running with no way for the tool to stop it. Run `stop-servers` first, as `clean`, `all` and `run` do.
 - **Otherwise** those files are removed and then the empty directory (`rmdir`), so nothing the tool did not write can be deleted. A `REMOTE_DIR` that does not exist is left alone. `clean` then checks that the directory is gone and reports `LEFTOVER` (and fails) on any host where it is not.
 
 Before 2.6.4 a quote in the value could also break out of it on the host; now it cannot (see **What reaches the hosts**).
@@ -842,6 +843,17 @@ Before 2.6.4 a quote in the value could also break out of it on the host; now it
 - A run script is copied to a temporary name in `REMOTE_DIR` and then renamed over its real name, after anything already standing at that name is removed, so a symlink planted there is replaced, never followed.
 
 If another user already holds `/tmp/iperf_orchestrator` on a host, that host now fails instead of being used: pick a `--remote-dir` of your own (one in the SSH user's home is safest), or remove the directory. A directory that was made group- or world-writable by hand needs `chmod go-w`. **On a shared filesystem** where `REMOTE_DIR` is deliberately group-writable (an NFS directory a team shares), pass `--allow-shared-remote-dir` (or set `IPERF_ALLOW_SHARED_REMOTE_DIR=1`): it lifts the group-write check only. The directory must still be the SSH user's own, not a symlink, and not writable by others, and anyone in the group can still swap a script, so use it only with a group you trust.
+
+### The iperf daemons
+
+Since 2.12.0 the tool stops only the iperf daemons it started, and makes sure the ones it starts are listening:
+
+- **`start-servers`** starts `iperf -p PORT -s` on each host (with `-B` for `--server-bind`), in the background with hang-ups ignored so that it outlives the ssh session, as `-D` did. It records the daemon's pid in `REMOTE_DIR/iperf_daemon_<host>_<port>.pid`, and what the daemon prints goes to the `.log` beside it. Then it waits up to 5 seconds for that pid to hold a listening socket on the port. It looks with `ss -ltnp`; without `ss`, through `/proc/net/tcp`; with neither, it settles for no bind error in the daemon's log after a second. If the daemon is not listening, `start-servers` stops it and fails for that host, quoting the log's last line. Before 2.12.0 it ran `iperf -s -D`, which detaches before it binds: on a port someone else held, it printed "Running Iperf Server as a daemon", exited 0, and the daemon was gone a moment later. A daemon of the tool's own already listening on the port is left as it is.
+- **`stop-servers`** (and so `stop`, `clean`, `all`, `run` and an interrupted run) reads that pid file. It stops the pid only while that pid is still `iperf -p PORT`, which it checks through `/proc`, or `ps` without it. A daemon that is already gone, or a pid that now belongs to something else, only loses its pid file. Before 2.12.0 it ran `pkill -f '^iperf -p PORT '`, which also killed any iperf daemon on that port that someone else had started. A host with neither `/proc` nor `ps` fails rather than guesses. `pkill` and `pgrep` are no longer needed.
+- **`check-servers`** (and the Daemons part of `status`) reports `RUNNING pid N: …` only for that daemon on `--port`. Before 2.12.0 it reported any iperf process at all, on any port.
+- A host without `ip` is told so when `--server-bind` or `--bind` needs it, instead of being told that the pattern matched no interface.
+
+The pid file lives in `REMOTE_DIR` and is named after the port, so a `stop-servers` with another `--remote-dir` or `--port` does not find it. **A daemon that a version before 2.12.0 started has no pid file**, and `stop-servers` leaves it running. Its port is then taken, and `start-servers` says so. Stop it by hand on the host: `pkill -f '^iperf -p 5001 '`.
 
 ### What reaches the hosts
 
@@ -910,6 +922,8 @@ A second common surprise: `peak_total_pct` is 30% but `peak_softirq_pct` is 100%
 ## Troubleshooting
 
 **`check-iperf` says `WRONG_VERSION`.** Some distributions ship `iperf` as a symlink to `iperf3`. Verify with `iperf -v` on the host and install the actual iperf2 package (`apt install iperf` on Debian/Ubuntu, where `iperf` is iperf2 and `iperf3` is iperf3).
+
+**`start-servers` says "iperf -s is not listening on port 5001".** Something else holds the port on that host: its log line says so ("listener bind failed: Address already in use"). It may be an iperf daemon someone started by hand, or one an iperf-orchestrator before 2.12.0 started, which has no pid file. Since 2.12.0 `stop-servers` stops only the daemons `start-servers` started, so stop that one by hand (`pkill -f '^iperf -p 5001 '` on the host), or pick another `--port`.
 
 **`run-tests` finishes but logs are full of "the server is busy" errors.** Confirms an iperf3 instance is still listening on port 5001. `pkill -x iperf3` and re-run `start-servers`.
 

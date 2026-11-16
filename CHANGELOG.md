@@ -4,6 +4,92 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.0] - 2026-11-16
+
+The tool stops only the iperf daemons it started, and checks that the
+ones it starts are listening (shared_tools ticket IO-006, found by
+IO-001's adversarial pass; the owner chose this, with no fallback to the
+old pattern). 2.10.0 and 2.11.0 are IO-005's and IO-002's, in their own
+pull requests.
+
+### Changed
+
+- **`stop-servers` stops only the daemons `start-servers` started.** It
+  used to run `pkill -f '^iperf -p PORT '`, which also killed an iperf
+  daemon an operator had started by hand on that port (reproduced with
+  real iperf 2.1.9). `start-servers` now records each daemon's pid in
+  `REMOTE_DIR/iperf_daemon_<host>_<port>.pid`, and `stop-servers` stops
+  that pid, once it has checked through `/proc` (or `ps`) that it is
+  still `iperf -p PORT`. `stop`, `clean`, `all`, `run` and an
+  interrupted run all stop daemons this way.
+  **A daemon a version before 2.12.0 started has no pid file and is now
+  left running**: stop it by hand once (`pkill -f '^iperf -p 5001 '`).
+- **`start-servers` fails for a host whose daemon is not listening.**
+  - **Before:** it ran `iperf -s -D`, which detaches before it binds. On
+    a taken port it printed "Running Iperf Server as a daemon" and exited
+    0, and the daemon was gone.
+  - **Real iperf 2.1.9 does not help:** on a taken port it logs "listener
+    bind failed: Address already in use" and stays alive for a while, so
+    a running process proves nothing.
+  - **Now:** it starts `iperf -p PORT -s` in the background, ignoring
+    hang-ups as `-D` did, and waits up to 5 s for that pid to hold a
+    listening socket on the port. It looks with `ss -ltnp`; without
+    `ss`, through `/proc/net/tcp`; with neither, it settles for no bind
+    error in the daemon's log.
+  - **If the daemon is not listening,** it stops it, removes the pid
+    file and fails for the host, quoting the daemon's log. What the
+    daemon prints now goes to `iperf_daemon_<host>_<port>.log`.
+  - **A second start** leaves a daemon of the tool's own as it is.
+- **`check-servers` reports the daemon on `--port`, not any iperf.** It
+  said `RUNNING` for any iperf process, on any port. It now says
+  `RUNNING pid N: ...` only for the daemon `start-servers` started on
+  that port. The Daemons part of `status` follows it.
+- **A missing tool is named.** A host without `ip` used to be told that
+  its `--server-bind` pattern matched no interface; `--server-bind` and
+  `--bind` now say that `ip` is missing. `pkill` and `pgrep` are no
+  longer used for the daemons, so a host without them is no longer
+  stopped "successfully" with its daemons still running. A host with
+  neither `/proc` nor `ps` fails `stop-servers` rather than guess.
+- **`cleanup` refuses to delete a running daemon's pid file.** The
+  daemon would be left with no way for the tool to stop it. Run
+  `stop-servers` first, as `clean`, `all` and `run` do. The pid and log
+  files are among the tool's own files, which `cleanup` and `clean`
+  remove.
+- The README has a new **The iperf daemons** section and a
+  troubleshooting entry for a taken port. `--help-advanced` describes
+  the three commands as they now behave.
+
+### Tests
+
+- `tests/test_own_daemons.sh` has 11 tests, all failing on 2.9.0:
+  - an operator's daemon survives `stop-servers`, `stop` and `clean`;
+  - a taken port fails `start-servers`;
+  - `check-servers` reports only its daemon on its port;
+  - the pid is recorded and stopped;
+  - a second start keeps the daemon;
+  - a stale pid file naming another process is not trusted;
+  - `stop-servers` works without `pkill` and `pgrep`;
+  - a missing `ip` is named;
+  - `cleanup` keeps a running daemon's pid file;
+  - two tests with a stand-in iperf that really listens check the `ss`
+    and `/proc` paths against real sockets.
+- `tests/test_own_daemons_mutations.sh` undoes each part and shows the
+  test that guards it fails (13 of 13).
+- The sandbox's iperf stand-in now stays up as a real process when it
+  runs without `-D`, a new `ss` stand-in lists its daemons, and
+  `SANDBOX_HOST_PATH` with `path_without` lets a test take a tool away
+  from a host. Tests that modelled daemons with `pkill` and `pgrep`
+  now start them with `start-servers`.
+- The sandbox's `rm` stand-in failed `clean` once in this ticket's runs.
+  Both hosts share one `REMOTE_DIR`, and the other host removed a file
+  between the stand-in's check that it was missing and its check that it
+  was inside the sandbox. The missing check now comes second, so a
+  vanished `-f` operand is nothing to do, as with a real `rm -f`.
+  `tests/test_sandbox_rm.sh` (IO-011) still covers it.
+- `test_ssh_gets_bracketed_ipv6_without_brackets` reads hosts only from
+  the `ssh` lines of the stand-in's call log: `check-servers` now sends a
+  command of several lines, and its later lines are not calls.
+
 ## [2.9.0] - 2026-11-16
 
 Fleet commands exit non-zero when a host fails (shared_tools ticket

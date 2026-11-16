@@ -196,7 +196,7 @@ test_stop_kills_daemons_and_points_at_next_steps() {
     install_fake_ssh
     PATH="$FAKE_BIN:$PATH" run_orch stop
     assert_status 0 "$RUN_RC" || return 1
-    grep -q "pkill" "$FAKE_SSH_LOG" || { echo "stop should pkill daemons" >&2; return 1; }
+    grep -q ": iperf-orchestrator stop-server" "$FAKE_SSH_LOG" || { echo "stop should stop the daemons" >&2; return 1; }
     assert_contains "$RUN_OUT" "summarize" "stop should mention summarize" || return 1
     assert_contains "$RUN_OUT" "clean" "stop should mention clean" || return 1
 }
