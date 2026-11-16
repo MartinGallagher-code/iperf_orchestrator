@@ -74,6 +74,7 @@ _iperf_orchestrator() {
         '--ssh-user[SSH login user]:user:'
         '-u[SSH login user]:user:'
         '--remote-dir[remote working dir]:dir:'
+        '--allow-shared-remote-dir[let the remote working dir be group-writable]'
         '--python[Python interpreter]:path:_files'
         '--overlay[also export the overlay during process]'
         '--overlay-out[overlay destination (- for stdout)]:file:_files'

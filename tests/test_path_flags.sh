@@ -84,14 +84,21 @@ test_remote_dir_propagates_to_generated_scripts() {
     local rd="$TEST_TMPDIR/var/myremote"
     PATH="$FAKE_BIN:$PATH" run_orch --remote-dir="$rd" --run-id myrun create-scripts >/dev/null
     PATH="$FAKE_BIN:$PATH" run_orch --remote-dir="$rd" --run-id myrun distribute-scripts >/dev/null
-    grep -qF "mkdir -p '$rd'" "$FAKE_SSH_LOG" || {
-        echo "expected mkdir -p '$rd' on remote" >&2
+    # Created private when new (IO-003): the guard names it, then mkdir -m 700.
+    grep -F "_iod='$rd'" "$FAKE_SSH_LOG" | grep -qF "mkdir -p -m 700" || {
+        echo "expected a private mkdir of '$rd' on remote" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }
+    # Copied to a temp name, then renamed onto the real one (IO-003).
     grep -E '^scp' "$FAKE_SSH_LOG" | awk -F'\t' '{print $3}' \
-        | grep -qF "$rd/run_iperf_a_myrun.sh" || {
-        echo "expected scp dst at $rd/run_iperf_a_myrun.sh" >&2
+        | grep -qF "$rd/.run_iperf_a_myrun.sh." || {
+        echo "expected scp dst at $rd/.run_iperf_a_myrun.sh.<tmp>" >&2
+        cat "$FAKE_SSH_LOG" >&2
+        return 1
+    }
+    grep -qF "'$rd/run_iperf_a_myrun.sh'" "$FAKE_SSH_LOG" || {
+        echo "expected the script renamed to $rd/run_iperf_a_myrun.sh" >&2
         cat "$FAKE_SSH_LOG" >&2
         return 1
     }

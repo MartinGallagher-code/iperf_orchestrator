@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.6.4"
+ORCH_VERSION="2.7.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -174,6 +174,7 @@ RUN_ID="${IPERF_RUN_ID:-}"              # set by --run-id / IPERF_RUN_ID; auto-g
 _RUN_ID_EXPLICIT=0                      # 1 when the user asked for a specific run-id; otherwise follow 'latest'
 [ -n "$RUN_ID" ] && _RUN_ID_EXPLICIT=1
 REMOTE_DIR="${REMOTE_DIR:-/tmp/iperf_orchestrator}"
+IPERF_ALLOW_SHARED_REMOTE_DIR="${IPERF_ALLOW_SHARED_REMOTE_DIR:-0}" # 1 = REMOTE_DIR may be group-writable
 
 IPERF_PORT="${IPERF_PORT:-5001}"
 IPERF_DURATION="${IPERF_DURATION:-10}"     # seconds per pair
@@ -342,6 +343,7 @@ while [ $# -gt 0 ]; do
         -s=*)            SERVER_LIST_FILE="${1#*=}"; shift ;;
         --remote-dir)    _flag_need "$1" "${2:-}"; REMOTE_DIR="$2"; shift 2 ;;
         --remote-dir=*)  REMOTE_DIR="${1#*=}"; shift ;;
+        --allow-shared-remote-dir) IPERF_ALLOW_SHARED_REMOTE_DIR=1; shift ;;
         --python)        _flag_need "$1" "${2:-}"; PYTHON_BIN="$2"; shift 2 ;;
         --python=*)      PYTHON_BIN="${1#*=}"; shift ;;
         --overlay)         IPERF_OVERLAY=1; shift ;;
@@ -497,6 +499,56 @@ _bare() {
     esac
 }
 _cmt()  { local s="${1//$'\n'/ }"; printf '%s' "${s//$'\r'/ }"; }
+
+#------------------------------------------------------------------------------
+# The remote work dir guard (shared_tools IO-003).
+#
+# _remote_dir_guard HOST [create]  prints a POSIX sh snippet that, on the
+# host, makes sure REMOTE_DIR is safe to write into before anything is
+# written there or run from there:
+#   * with 'create', a REMOTE_DIR that does not exist yet is made private,
+#     mkdir -m 700 (parents, if any, get the login shell's umask as before);
+#   * it must then be a real directory -- not a symlink, not a file;
+#   * owned by the SSH user (uid as `id -u` reports it);
+#   * and writable by nobody else: no group-write, no other-write bit.
+#     IPERF_ALLOW_SHARED_REMOTE_DIR=1 (--allow-shared-remote-dir) relaxes
+#     the group-write rule only, for a group-shared NFS directory; the
+#     symlink, owner and other-write rules always hold.
+# On a failure the snippet prints one ERROR line naming the directory, its
+# owner and its mode, and exits 1, so nothing after it runs on that host.
+# Without 'create' a missing REMOTE_DIR is left alone (the command that
+# follows fails on its own, as it always did).
+#
+# Why: the default /tmp/iperf_orchestrator is a name any user on a host can
+# create first. Another user who owns it, or can write to it, can plant a
+# symlink where distribute-scripts writes (overwriting the SSH user's file
+# at its other end) or swap a run script before run-tests runs it as the
+# SSH user. ls -ldn / ls -ld rather than stat: stat's flags differ between
+# GNU and BSD, and the hosts may be either.
+#------------------------------------------------------------------------------
+_remote_dir_guard() {
+    local host="$1" create="${2:-}" d="$REMOTE_DIR" hq
+    # "dir/" names the target of a symlink "dir"; test the link itself.
+    while [ "${#d}" -gt 1 ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done
+    _dqin_to hq "$host"
+    # One line, ending in "; ", so a caller writes "$(_remote_dir_guard
+    # HOST)rm -f ..." and the whole command stays one line in -v output.
+    local g
+    g="_iod=$(_shq "$d"); _ioshared=$(_bare "$IPERF_ALLOW_SHARED_REMOTE_DIR"); "
+    if [ "$create" = "create" ]; then
+        g+="if [ ! -e \"\$_iod\" ] && [ ! -L \"\$_iod\" ]; then mkdir -p -m 700 -- \"\$_iod\" || { echo \"ERROR: $hq: could not create REMOTE_DIR \$_iod\" >&2; exit 1; }; fi; "
+    fi
+    g+="if [ -e \"\$_iod\" ] || [ -L \"\$_iod\" ]; then "
+    g+="if [ -L \"\$_iod\" ] || [ ! -d \"\$_iod\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod is a symlink or not a directory (\$(ls -ld -- \"\$_iod\" 2>/dev/null | cut -c1-10)); refusing to use it\" >&2; exit 1; fi; "
+    g+="_iom=\$(ls -ldn -- \"\$_iod\" | awk 'NR==1{print \$1}'); _iou=\$(ls -ldn -- \"\$_iod\" | awk 'NR==1{print \$3}'); "
+    g+="_ioo=\$(ls -ld -- \"\$_iod\" | awk 'NR==1{print \$3}'); _ioid=\$(id -u); _iobad=''; "
+    g+="[ \"\$_iou\" = \"\$_ioid\" ] || _iobad='it is not owned by the SSH user'; "
+    g+="case \"\$_iom\" in ????????w*) _iobad=\"\${_iobad:+\$_iobad; }others can write to it\" ;; esac; "
+    g+="if [ \"\$_ioshared\" != 1 ]; then case \"\$_iom\" in ?????w*) _iobad=\"\${_iobad:+\$_iobad; }its group can write to it\" ;; esac; fi; "
+    g+="if [ -n \"\$_iobad\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod is owned by \$_ioo (uid \$_iou), mode \$_iom; the SSH user is uid \$_ioid: \$_iobad. Refusing to write to it or run from it: remove it, chmod go-w it, or pick another --remote-dir (a group-shared one needs --allow-shared-remote-dir)\" >&2; exit 1; fi; "
+    g+="fi; "
+    printf '%s' "$g"
+}
 
 IPERF_EXTRA_ARGS=$(_iperf_extra_args)
 # The same arguments for a host's shell: split into words on whitespace
@@ -1207,6 +1259,13 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
                                Filenames embed <host>_<run-id>, so hosts can share
                                it, but cleanup/clean/all/run rm -rf the whole dir,
                                exactly as given: nothing checks what it is.
+                               Before writing to it or running from it, each host
+                               checks it is a real directory (not a symlink), owned
+                               by the SSH user and not writable by group or others,
+                               and fails if not; a new one is made mode 700.
+    --allow-shared-remote-dir  let REMOTE_DIR be group-writable (a group-shared
+                               NFS dir); the symlink, owner and other-write
+                               checks still apply
     --python PATH              Python interpreter (default $PYTHON_BIN)
     --overlay                  Also write the datacenter-layout overlay during
                                'process' (so 'summarize', 'run' and 'all' too).
@@ -1385,6 +1444,7 @@ CONFIG (env vars; CLI flags above take precedence, plan values yield):
     IPERF_RUN_ID=${IPERF_RUN_ID:-}           # run to address (--run-id)
     RESULTS_BASE=$RESULTS_BASE
     REMOTE_DIR=$REMOTE_DIR
+    IPERF_ALLOW_SHARED_REMOTE_DIR=$IPERF_ALLOW_SHARED_REMOTE_DIR  # 1 = group-writable REMOTE_DIR ok (--allow-shared-remote-dir)
     PYTHON_BIN=$PYTHON_BIN
 
 FILES:
@@ -1596,7 +1656,7 @@ _worker_start_server() {
     # of silently falling back to a 0.0.0.0 listener.
     ssh_run "$host" "
         set -e
-        mkdir -p $(_shq "$REMOTE_DIR")
+        $(_remote_dir_guard "$host" create)
         BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
         BIND_FLAG=''
         if [ -n \"\$BIND_RAW\" ]; then
@@ -1952,9 +2012,17 @@ _worker_distribute_script() {
     local rd rid
     _sqin_to rd "$REMOTE_DIR"; rid=$(_bare "$RUN_ID")
     local clean_glob="'$rd'/iperf_test_*_$rid.log '$rd'/iperf_run_*_$rid.status"
-    if ssh_run "$host" "mkdir -p '$rd' && rm -f $clean_glob" \
-       && scp_to "$script" "$host" "$REMOTE_DIR/$remote_name" \
-       && ssh_run "$host" "chmod +x $(_shq "$REMOTE_DIR/$remote_name")"; then
+    # The script goes to a temp name first and is then renamed over the
+    # real one, after rm -f has removed whatever stood there: a symlink
+    # planted at the run script's name is replaced, never followed (a
+    # plain mv onto a symlink to a directory would move the file into
+    # that directory). Each step re-checks REMOTE_DIR (IO-003).
+    local tmp=".${remote_name}.$$.${RANDOM}.tmp"
+    local q_tmp q_dst
+    q_tmp=$(_shq "$REMOTE_DIR/$tmp"); q_dst=$(_shq "$REMOTE_DIR/$remote_name")
+    if ssh_run "$host" "$(_remote_dir_guard "$host" create)rm -f $clean_glob $q_tmp" \
+       && scp_to "$script" "$host" "$REMOTE_DIR/$tmp" \
+       && ssh_run "$host" "$(_remote_dir_guard "$host")chmod +x $q_tmp && rm -f -- $q_dst && mv -f -- $q_tmp $q_dst"; then
         vlog "  OK: $host"
     else
         warn "  FAILED: $host"
@@ -2097,7 +2165,7 @@ _run_rolling() {
         local hostlog="$LOGS_DIR/rolling_${src_safe}.log"
         ssh_run "$src" "
             set -u
-            mkdir -p '$rd'
+            $(_remote_dir_guard "$src" create)
             cd '$rd'
             # Background CPU sampler running for the whole rolling window
             # (mpstat if present, /proc/stat fallback otherwise). Same
@@ -2260,7 +2328,10 @@ _run_one_round() {
         local script="$REMOTE_DIR/run_iperf_${safe}_${RUN_ID}.sh"
         local arg=""
         [ -n "$target" ] && arg=" $(_shq "$target")"
-        ssh_run "$src" "$(_shq "$script") $start_time$arg" > "$hostlog" 2>&1 &
+        # REMOTE_DIR is checked again right before its script runs as the
+        # SSH user (IO-003): a directory someone else can write to may
+        # hold a script swapped in since distribute-scripts.
+        ssh_run "$src" "$(_remote_dir_guard "$src")$(_shq "$script") $start_time$arg" > "$hostlog" 2>&1 &
         pids+=("$!")
     done
     local p
@@ -2286,6 +2357,7 @@ _worker_collect_results() {
     _sqin_to hs "$host_safe"; _sqin_to rid "$RUN_ID"
     _sqin_to tr_q "_results_${host_safe}_${RUN_ID}.tar.gz"
     if ! ssh_run "$host" "
+        $(_remote_dir_guard "$host")
         cd $(_shq "$REMOTE_DIR") 2>/dev/null || exit 1
         rm -f '$tr_q'
         listfile='_iperf_files_${hs}_${rid}.list'

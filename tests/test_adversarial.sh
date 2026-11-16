@@ -11,8 +11,9 @@
 # directory part, so wherever it would run it lands inside the sandbox;
 # assert_no_marker looks for it anywhere under the test's temp dir.
 #
-# Every test here failed on 2.6.3, and tests/test_adversarial_mutations.sh
-# reverts each fix in a copy of the script and shows its test failing.
+# Every test here failed on 2.6.3 (the IO-003 ones, at the end, on
+# 2.6.4), and tests/test_adversarial_mutations.sh reverts each fix in a
+# copy of the script and shows its test failing.
 # ADV_ONLY=<test name> runs just that test (the mutation file uses it).
 
 set -u
@@ -588,6 +589,145 @@ test_dry_run_shows_the_real_transport() {
 
 # ---- Runner ---------------------------------------------------------------------
 
+# ---- A REMOTE_DIR someone else can write to (IO-003) ------------------------
+#
+# The sandbox runs every host as the user running the tests, so "another
+# user" is played two ways: a directory that is group- or world-writable
+# (anyone could have planted what is in it), and a stand-in `id` on the
+# hosts' PATH that makes the SSH user someone other than the directory's
+# owner. Every test here failed on 2.6.4.
+
+dir_mode() { ls -ld -- "$1" | cut -c1-10; }
+
+# IO-001's reproduction: a 0777 REMOTE_DIR holding a symlink at a run
+# script's name. distribute-scripts must fail on that host and leave the
+# symlink's target as it was. (On its own, distribute-scripts reports a
+# per-host failure and still exits 0, as it always has; `all` aborts.)
+test_world_writable_remote_dir_with_planted_symlink_is_refused() {
+    sandbox_two_hosts 127.0.0.1 h2
+    local rd="$TEST_TMPDIR/iorch_e5" target="$TEST_TMPDIR/important.conf"
+    mkdir -p "$rd" && chmod 0777 "$rd"
+    printf 'keep me\n' > "$target"; chmod 0644 "$target"
+    ln -s "$target" "$rd/run_iperf_127.0.0.1_e5.sh"
+    orch --remote-dir "$rd" --run-id e5 create-scripts
+    orch --remote-dir "$rd" --run-id e5 distribute-scripts
+    assert_contains "$RUN_OUT" "distribute-scripts had 2 failure(s)" || return 1
+    [ "$(cat "$target")" = "keep me" ] || { echo "the symlink's target was overwritten" >&2; return 1; }
+    [ ! -x "$target" ] || { echo "the symlink's target was made executable" >&2; return 1; }
+    [ ! -e "$rd/run_iperf_h2_e5.sh" ] || { echo "a script was written into the unsafe dir" >&2; return 1; }
+    assert_contains "$RUN_OUT" "others can write to it" || return 1
+    assert_contains "$RUN_OUT" "mode drwxrwxrwx" || return 1
+}
+
+# A run script swapped into a writable REMOTE_DIR after distribute-scripts
+# must not be run. run-tests distributes the scripts itself first, so the
+# "other user" acts in the gap after that: a wrapper around the sandbox
+# ssh makes the directory world-writable and swaps h1's script just before
+# the first command that runs a script.
+test_run_tests_refuses_a_script_in_a_writable_remote_dir() {
+    sandbox_two_hosts h1 h2
+    local rd="$TEST_TMPDIR/swap"
+    mv "$FAKE_BIN/ssh" "$FAKE_BIN/ssh.real"
+    cat > "$FAKE_BIN/ssh" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do last="\$a"; done
+case "\$last" in
+    *"run_iperf_"*".sh' "[0-9]*)
+        if [ ! -e "$TEST_TMPDIR/swapped" ]; then
+            touch "$TEST_TMPDIR/swapped"
+            chmod 0777 "$rd"
+            printf '#!/bin/sh\ntouch MARK_swapped\n' > "$rd/run_iperf_h1_sw.sh"
+        fi ;;
+esac
+exec "\$(dirname "\$0")/ssh.real" "\$@"
+SHIM
+    chmod +x "$FAKE_BIN/ssh"
+    orch --remote-dir "$rd" --run-id sw create-scripts
+    orch --remote-dir "$rd" --run-id sw --start-delay 0 --duration 1 run-tests parallel
+    [ -e "$TEST_TMPDIR/swapped" ] || { echo "the swap never happened, so this tested nothing" >&2; return 1; }
+    assert_no_marker || return 1
+    assert_contains "$RUN_OUT$(cat "$RESULTS_BASE"/sw/logs/run_h1.log 2>/dev/null)" "others can write to it" || return 1
+}
+
+test_start_servers_refuses_a_world_writable_remote_dir() {
+    sandbox_two_hosts h1 h2
+    local rd="$TEST_TMPDIR/ww"
+    mkdir -p "$rd" && chmod 0777 "$rd"
+    orch --remote-dir "$rd" start-servers
+    assert_contains "$RUN_OUT" "start-servers: 2 failure(s)" || return 1
+    local up; up=$(cat "$SANDBOX_ROOT"/daemons/* 2>/dev/null | grep -c .)
+    [ "$up" = 0 ] || { echo "$up daemon(s) started anyway" >&2; return 1; }
+    assert_contains "$RUN_OUT" "others can write to it" || return 1
+}
+
+# A REMOTE_DIR that does not exist yet is made private (0700) and works.
+test_fresh_remote_dir_is_created_private_and_works() {
+    sandbox_two_hosts h1 h2
+    local rd="$TEST_TMPDIR/fresh/iorch"
+    orch --remote-dir "$rd" --run-id fr create-scripts
+    orch --remote-dir "$rd" --run-id fr distribute-scripts
+    assert_status 0 "$RUN_RC" "distribute-scripts into a fresh dir" || return 1
+    assert_not_contains "$RUN_OUT" "failure(s)" || return 1
+    [ "$(dir_mode "$rd")" = "drwx------" ] || { echo "new REMOTE_DIR is $(dir_mode "$rd"), not drwx------" >&2; return 1; }
+    [ -f "$rd/run_iperf_h1_fr.sh" ] && [ -x "$rd/run_iperf_h1_fr.sh" ] || { echo "run script not delivered" >&2; return 1; }
+    [ -z "$(find "$rd" -name '.*.tmp')" ] || { echo "a temp file was left behind" >&2; return 1; }
+    orch --remote-dir "$rd" --run-id fr --start-delay 0 --duration 1 run-tests parallel
+    [ -s "$SANDBOX_ROOT/iperf_clients.log" ] || { echo "run-tests ran no iperf client" >&2; return 1; }
+    local rd2="$TEST_TMPDIR/fresh2"
+    orch --remote-dir "$rd2" start-servers
+    assert_status 0 "$RUN_RC" "start-servers with a fresh dir" || return 1
+    [ "$(dir_mode "$rd2")" = "drwx------" ] || { echo "start-servers made $(dir_mode "$rd2")" >&2; return 1; }
+}
+
+test_remote_dir_owned_by_another_user_is_refused() {
+    sandbox_two_hosts h1 h2
+    printf '#!/bin/sh\n[ "${1:-}" = -u ] && { echo 4242; exit 0; }\nexec /usr/bin/id "$@"\n' > "$SANDBOX_BIN/id"
+    chmod +x "$SANDBOX_BIN/id"
+    local rd="$TEST_TMPDIR/theirs"
+    mkdir -p "$rd" && chmod 0700 "$rd"
+    orch --remote-dir "$rd" --run-id ow create-scripts
+    orch --remote-dir "$rd" --run-id ow distribute-scripts
+    assert_contains "$RUN_OUT" "distribute-scripts had 2 failure(s)" || return 1
+    [ -z "$(ls -A "$rd")" ] || { echo "files were written into another user's dir" >&2; return 1; }
+    assert_contains "$RUN_OUT" "not owned by the SSH user" || return 1
+    assert_contains "$RUN_OUT" "the SSH user is uid 4242" || return 1
+}
+
+test_remote_dir_that_is_a_symlink_is_refused() {
+    sandbox_two_hosts h1 h2
+    local real="$TEST_TMPDIR/real" rd="$TEST_TMPDIR/link"
+    mkdir -p "$real" && chmod 0700 "$real" && ln -s "$real" "$rd"
+    orch --remote-dir "$rd/" --run-id sl create-scripts
+    orch --remote-dir "$rd/" --run-id sl distribute-scripts
+    assert_contains "$RUN_OUT" "distribute-scripts had 2 failure(s)" || return 1
+    [ -z "$(ls -A "$real")" ] || { echo "files were written through the symlink" >&2; return 1; }
+    assert_contains "$RUN_OUT" "is a symlink or not a directory" || return 1
+}
+
+# --allow-shared-remote-dir lets a group-writable dir through, and only
+# that: a planted symlink at a script's name is replaced, never followed,
+# and a world-writable dir is still refused.
+test_shared_remote_dir_opt_out_relaxes_group_write_only() {
+    sandbox_two_hosts h1 h2
+    local rd="$TEST_TMPDIR/nfs" target="$TEST_TMPDIR/important.conf"
+    mkdir -p "$rd" && chmod 0775 "$rd"
+    printf 'keep me\n' > "$target"; chmod 0644 "$target"
+    ln -s "$target" "$rd/run_iperf_h1_sh.sh"
+    orch --remote-dir "$rd" --run-id sh create-scripts
+    orch --remote-dir "$rd" --run-id sh distribute-scripts
+    assert_contains "$RUN_OUT" "distribute-scripts had 2 failure(s)" || return 1
+    assert_contains "$RUN_OUT" "its group can write to it" || return 1
+    orch --remote-dir "$rd" --run-id sh --allow-shared-remote-dir distribute-scripts
+    assert_status 0 "$RUN_RC" "a group-writable dir with --allow-shared-remote-dir" || return 1
+    assert_not_contains "$RUN_OUT" "failure(s)" || return 1
+    [ "$(cat "$target")" = "keep me" ] && [ ! -x "$target" ] || { echo "the planted symlink was followed" >&2; return 1; }
+    [ -f "$rd/run_iperf_h1_sh.sh" ] && [ ! -L "$rd/run_iperf_h1_sh.sh" ] || { echo "the symlink was not replaced by the script" >&2; return 1; }
+    chmod 0777 "$rd"
+    IPERF_ALLOW_SHARED_REMOTE_DIR=1 orch --remote-dir "$rd" --run-id sh distribute-scripts
+    assert_contains "$RUN_OUT" "distribute-scripts had 2 failure(s)" || return 1
+    assert_contains "$RUN_OUT" "others can write to it" || return 1
+}
+
 ADV_TESTS=(
     test_remote_dir_quote_reaches_host_literally_in_cleanup
     test_server_bind_quote_reaches_host_literally
@@ -630,6 +770,13 @@ ADV_TESTS=(
     test_relative_remote_dir_collects
     test_sigterm_during_collect_in_all_still_stops_daemons
     test_dry_run_shows_the_real_transport
+    test_world_writable_remote_dir_with_planted_symlink_is_refused
+    test_run_tests_refuses_a_script_in_a_writable_remote_dir
+    test_start_servers_refuses_a_world_writable_remote_dir
+    test_fresh_remote_dir_is_created_private_and_works
+    test_remote_dir_owned_by_another_user_is_refused
+    test_remote_dir_that_is_a_symlink_is_refused
+    test_shared_remote_dir_opt_out_relaxes_group_write_only
 )
 
 for t in "${ADV_TESTS[@]}"; do

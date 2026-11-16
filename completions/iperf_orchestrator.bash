@@ -26,7 +26,7 @@ _iperf_orchestrator() {
         --streams -P --ssh-jobs -j --start-delay \
         --total-time --host-flows --bandwidth -b --length -l --window -w \
         --mss -M --no-nagle -N --bind -B --server-bind \
-        --ssh-user -u --remote-dir --python \
+        --ssh-user -u --remote-dir --allow-shared-remote-dir --python \
         --overlay --overlay-out --overlay-format --overlay-map \
         --overlay-prefix --overlay-test-prefix --overlay-run \
         --overlay-window --overlay-line-rate \
