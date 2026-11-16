@@ -946,9 +946,6 @@ test_finished_run_leaves_no_sid_file_and_clean_removes_one() {
     local left; left=$(cd "$REMOTE_DIR" && ls ./*.sid 2>/dev/null)
     [ -z "$left" ] || { echo "sid files left by finished runs: $left" >&2; return 1; }
     : > "$REMOTE_DIR/iperf_run_h1_old.sid"
-    # One host for the clean: two sharing REMOTE_DIR race each other for
-    # the removal, which is IO-011's business, not this test's.
-    write_server_list h1 >/dev/null
     orch clean --yes
     assert_status 0 "$RUN_RC" "clean with a sid file in the dir: $RUN_OUT" || return 1
     [ ! -e "$REMOTE_DIR" ] || { echo "REMOTE_DIR survived: $(ls -A "$REMOTE_DIR")" >&2; return 1; }

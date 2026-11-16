@@ -56,6 +56,36 @@ Ctrl-C now stops the run on the hosts, not only on this machine
   the orchestrator ends its own ssh jobs even when the hosts cannot be
   stopped. Otherwise its existing mutation would survive.
 
+## [2.8.2] - 2026-11-16
+
+A test that failed at random no longer does (shared_tools ticket IO-011).
+Nothing in the tool itself changed.
+
+### Fixed
+
+- **`test_clean_removes_the_tools_own_files_and_the_dir` failed about one
+  run in three** (14 of 50 on 2.8.0): "clean of the tool's own dir
+  expected=0 actual=1". The cause was the test sandbox, not `clean`.
+  Both sandbox hosts share one `REMOTE_DIR`, and `clean` runs on them at
+  once. When one host removed the directory while the other's shell was
+  still inside it, the other's `rm -f -- _iperf_files_*.list` (an
+  unmatched glob, so the literal name) reached the sandbox's stand-in
+  `rm`. That stand-in could not resolve a relative path once the current
+  directory was gone, so it refused the path as "outside the sandbox", and
+  the host reported `LEFTOVER`. A real `rm -f` does nothing for a missing
+  operand, and the stand-in now does the same, before its
+  inside-the-sandbox check. It still refuses any existing path outside
+  the sandbox. With the fix the test passed 50 runs out of 50.
+
+### Tests
+
+- `tests/test_sandbox_rm.sh` reproduces the race deterministically by
+  removing the shell's directory before `rm -f`. It fails every time on
+  2.8.0's helper. It also checks that a file outside the sandbox is still
+  refused and survives, that `rm -f` still removes files inside it, and
+  that `rm` without `-f` of a missing name still fails. It includes a
+  mutation check: with the fix taken out of a copy of the helper, the race
+  test fails.
 ## [2.8.1] - 2026-11-16
 
 The analysis steps no longer import Python modules from the directory the
