@@ -21,6 +21,13 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test_helper.bash
 source "$DIR/test_helper.bash"
 
+# Since 2.11.0 (IO-002) the values these tests send -- a quote, a '$(...)',
+# a newline, a host name with a space -- are refused at startup. The tests
+# are about the quoting underneath, which still has to hold for a value
+# that gets that far, so _IPERF_NO_VALUE_CHECKS=1 turns the startup checks
+# off here. test_value_checks.sh tests the checks themselves.
+export _IPERF_NO_VALUE_CHECKS=1
+
 orch() { PATH="$FAKE_BIN:$PATH" run_orch "$@"; }
 
 assert_no_marker() {

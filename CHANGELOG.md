@@ -4,13 +4,13 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.12.0] - 2026-11-16
+## [2.13.0] - 2026-11-17
 
 The tool stops only the iperf daemons it started, and checks that the
 ones it starts are listening (shared_tools ticket IO-006, found by
 IO-001's adversarial pass; the owner chose this, with no fallback to the
-old pattern). 2.10.0 and 2.11.0 are IO-005's and IO-002's, in their own
-pull requests.
+old pattern). It was 2.12.0 in its pull request: IO-002 merged first, as
+2.11.0, and IO-005 is 2.12.0 in its own pull request.
 
 ### Changed
 
@@ -22,7 +22,7 @@ pull requests.
   that pid, once it has checked through `/proc` (or `ps`) that it is
   still `iperf -p PORT`. `stop`, `clean`, `all`, `run` and an
   interrupted run all stop daemons this way.
-  **A daemon a version before 2.12.0 started has no pid file and is now
+  **A daemon a version before 2.13.0 started has no pid file and is now
   left running**: stop it by hand once (`pkill -f '^iperf -p 5001 '`).
 - **`start-servers` fails for a host whose daemon is not listening.**
   - **Before:** it ran `iperf -s -D`, which detaches before it binds. On
@@ -92,6 +92,69 @@ pull requests.
 - `test_ssh_gets_bracketed_ipv6_without_brackets` reads hosts only from
   the `ssh` lines of the stand-in's call log: `check-servers` now sends a
   command of several lines, and its later lines are not calls.
+## [2.11.0] - 2026-11-16
+
+Values that can never be valid are refused before any host is contacted
+(shared_tools ticket IO-002, found by IO-001's adversarial pass; the owner
+chose the character sets). IO-005 had 2.10.0 in its own pull request and
+merged later, as 2.12.0; there is no 2.10.0.
+
+### Changed
+
+- **A value that can never be valid is refused, not only quoted.** Since
+  2.6.4 every value reaches a host quoted, as one literal, so none of
+  these could run anything there; but nothing was refused, and some did
+  harm or failed late. `--run-id ../../x` wrote its run two levels above
+  `--output` and pointed `latest` at it; an empty `--remote-dir=` was
+  taken; a host name holding a quote or a space failed only when `ssh`
+  tried it. Every command but `help` and `version` now checks, before it
+  does anything:
+  - a run id (`--run-id`, `IPERF_RUN_ID`): letters, digits, `.`, `_` and
+    `-`, and not `.` or `..`;
+  - the remote work dir (`--remote-dir`, `REMOTE_DIR`, `remote_dir=`):
+    not empty, and no control character (a newline, a tab, ...);
+  - the SSH user (`--ssh-user`, `SSH_USER`, `ssh_user=`): letters,
+    digits, `.`, `_`, `@` and `-`, and not starting with `-`;
+  - the iperf values (`-b`, `-l`, `-w`, `-M` and their variables and plan
+    keys): letters, digits, `.`, `,`, `:`, `+` and `-`, in words
+    separated by spaces, which are split into words as before;
+  - `--single-server`: a host, as below.
+  A refused value stops the command with exit status 2, naming the value
+  and every place it can be set.
+- **The server list is checked, as its comment always said it was.**
+  Every command that contacts hosts, `status` now included, refuses a
+  list holding an entry that cannot be a host (letters, digits, `.`,
+  `_`, `:`, `%` and `-`, an IPv6 address optionally in one pair of
+  `[ ]`): a URL, `user@host`, two names on one line, a name with a quote.
+  It exits 1, listing every entry it refused, and `gen` writes no plan
+  from such a list. Duplicates still only warn.
+- `--bind` and `--server-bind` are patterns matched against `ip addr`
+  output, not values, and are not checked. The quoting stays for them,
+  for anything a host prints, and as a second line of defence.
+- **A run named outside the set by an earlier version** (`--run-id
+  'nightly run'`) can still be followed through `latest`, but no longer
+  named with `--run-id`: rename its directory under `results/`.
+- The README has a new **Values that are refused** section; **What
+  reaches the hosts**, **Exit status**, the settings table and
+  `--help` / `--help-advanced` say the same.
+
+### Tests
+
+- `tests/test_value_checks.sh`: one test per refused class (run id
+  leaving the results dir, run id outside the set, empty and
+  control-character remote dir, SSH user, iperf values, `--single-server`,
+  hosts for every command that contacts them, `status`, `gen`), each
+  checking the exit status, the message and that no host was contacted.
+  All ten fail on 2.9.0. Two more check that ordinary values, IPv6 in
+  both forms and with a zone among them, are still accepted, and that
+  `help` and `version` still run. Every test passes both under the plain
+  stand-in ssh and under the sandbox.
+- `tests/test_value_checks_mutations.sh` undoes each part of the checks,
+  or makes one refuse too much, and shows the test that guards it fails
+  (17 of 17).
+- `tests/test_adversarial.sh` (IO-001) sends exactly such values, to show
+  the quoting underneath holds, so it sets `_IPERF_NO_VALUE_CHECKS=1`, an
+  internal switch for the test suite that turns the startup checks off.
 
 ## [2.9.0] - 2026-11-16
 

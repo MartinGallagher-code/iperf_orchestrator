@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.12.0"
+ORCH_VERSION="2.13.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -433,6 +433,98 @@ if [ "$IPERF_SSH_JOBS" -gt 256 ]; then
     echo "iperf-orchestrator: WARN: --ssh-jobs=$IPERF_SSH_JOBS is unusually high; ssh fan-out may exhaust file descriptors" >&2
 fi
 [ "$IPERF_PORT" -le 65535 ] || _flag_die "IPERF_PORT / --port must be <= 65535 (got $IPERF_PORT)"
+
+#------------------------------------------------------------------------------
+# Values that can never be valid (shared_tools IO-002)
+#
+# The quoting further down (_shq and friends) carries any value to a host
+# as one literal, so nothing in a value can run there. That stops
+# injection but refuses nothing, and some values are plain mistakes that
+# do harm or fail late: a run id of '../../x' put its run two levels above
+# --output and pointed 'latest' at it, an empty --remote-dir was taken,
+# and a host name with a quote or a space failed only when ssh tried it.
+# These are refused before any command runs and before any host is
+# contacted, naming the value and every place it can be set:
+#
+#   --run-id               letters, digits, '.', '_', '-'; not '.' or '..'
+#   --remote-dir           not empty, no control characters
+#   --ssh-user             letters, digits, '.', '_', '@', '-'; no leading '-'
+#   -b / -l / -w / -M      letters, digits, '.', ',', ':', '+', '-', in
+#                          words separated by spaces (split as always)
+#   hosts, --single-server letters, digits, '.', '_', ':', '%', '-'; an
+#                          IPv6 address may be in one pair of [ ]
+#
+# The host check is in _validate_server_list, which every command that
+# contacts hosts runs first. --bind / --server-bind are patterns matched
+# against `ip addr` output, not values, and are not checked.
+#
+# _IPERF_NO_VALUE_CHECKS=1 turns these checks off. It is for the test
+# suite: the IO-001 tests send exactly such values, to show the quoting
+# underneath still holds. With it every value is still quoted.
+#------------------------------------------------------------------------------
+_HOST_RULE="a host is letters, digits, '.', '_', ':', '%' and '-', and an IPv6 address may be in one pair of [ ]"
+
+# _shown VALUE: a value for an error message: '...', or bash's $'...'
+# when it holds a control character, so a newline shows as \n.
+_shown() {
+    local LC_ALL=C
+    case "$1" in
+        *[[:cntrl:]]*) printf '%q' "$1" ;;
+        *) printf "'%s'" "$1" ;;
+    esac
+}
+
+# _host_ok HOST: a host name or an IPv4 or IPv6 address (with a zone after
+# '%'), bare or in one pair of brackets.
+_host_ok() {
+    local LC_ALL=C h="$1"
+    case "$h" in \[*\]) h="${h#\[}"; h="${h%\]}" ;; esac
+    case "$h" in ''|*[!A-Za-z0-9._:%-]*) return 1 ;; esac
+    return 0
+}
+
+# _value_refused NAMES VALUE RULE: exit 2, as the integer checks above do.
+_value_refused() {
+    _flag_die "$1: $(_shown "$2") is refused: $3. Nothing was run and no host was contacted."
+}
+
+_check_iperf_value() {
+    local LC_ALL=C
+    case "$2" in
+        *[!A-Za-z0-9.,:+\ -]*)
+            _value_refused "$1" "$2" "an iperf value is letters, digits, '.', ',', ':', '+' and '-' (several words separated by spaces)" ;;
+    esac
+}
+
+_validate_values() {
+    [ "${_IPERF_NO_VALUE_CHECKS:-0}" = 1 ] && return 0
+    local LC_ALL=C
+    if [ "$_RUN_ID_EXPLICIT" = 1 ]; then
+        case "$RUN_ID" in
+            ''|.|..|*[!A-Za-z0-9._-]*)
+                _value_refused "--run-id / IPERF_RUN_ID" "$RUN_ID" \
+                    "a run id is letters, digits, '.', '_' and '-', and not '.' or '..'" ;;
+        esac
+    fi
+    case "$REMOTE_DIR" in
+        ''|*[[:cntrl:]]*)
+            _value_refused "--remote-dir / REMOTE_DIR / remote_dir= in the plan" "$REMOTE_DIR" \
+                "the remote work dir must not be empty or hold a control character (a newline, a tab, ...)" ;;
+    esac
+    case "$SSH_USER" in
+        ''|-*|*[!A-Za-z0-9._@-]*)
+            _value_refused "--ssh-user / SSH_USER / ssh_user= in the plan" "$SSH_USER" \
+                "a user name is letters, digits, '.', '_', '@' and '-', and does not start with '-'" ;;
+    esac
+    _check_iperf_value "--bandwidth / IPERF_BANDWIDTH / bandwidth= in the plan" "$IPERF_BANDWIDTH"
+    _check_iperf_value "--length / IPERF_LENGTH / length= in the plan" "$IPERF_LENGTH"
+    _check_iperf_value "--window / IPERF_WINDOW / window= in the plan" "$IPERF_WINDOW"
+    _check_iperf_value "--mss / IPERF_MSS / mss= in the plan" "$IPERF_MSS"
+    if [ -n "$IPERF_SINGLE_SERVER" ] && ! _host_ok "$IPERF_SINGLE_SERVER"; then
+        _value_refused "--single-server / IPERF_SINGLE_SERVER" "$IPERF_SINGLE_SERVER" "$_HOST_RULE"
+    fi
+    return 0
+}
 
 # Split-NIC fleets: if --bind is set but --server-bind is not, mirror
 # --bind to the server side so the daemon only accepts on the data-plane
@@ -900,14 +992,27 @@ pair_enabled() {
     [ -n "${PAIR_OK["$1|$2"]:-}" ]
 }
 
-# Validate the server list once, when something needs hosts. Catches
-# typos / URLs / whitespace-laden hostnames before we generate scripts
-# or fan out SSH connections.
+# Validate the server list once, when something needs hosts, before any
+# script is generated or any host is contacted: it must exist, and every
+# entry must be a host name or address (_host_ok), so a URL, a user@host,
+# two names on one line or a name with a quote in it is refused here
+# rather than failing at ssh (shared_tools IO-002). Duplicates only warn.
 _validate_server_list() {
     [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ] \
         || die "no server list. Pass --servers <file> or set IPERF_SERVERS"
-    local dups
-    dups=$(read_servers | sort | uniq -d)
+    local hosts h bad=() dups
+    hosts=$(read_servers)
+    if [ "${_IPERF_NO_VALUE_CHECKS:-0}" != 1 ]; then
+        while IFS= read -r h; do
+            if [ -n "$h" ] && ! _host_ok "$h"; then bad+=("$(_shown "$h")"); fi
+        done <<< "$hosts"
+        if [ "${#bad[@]}" -gt 0 ]; then
+            local list="${bad[0]}" i
+            for ((i = 1; i < ${#bad[@]}; i++)); do list+=", ${bad[$i]}"; done
+            die "server list $(_cmt "$SERVER_LIST_FILE"): not a host name or address: $list ($_HOST_RULE). No host was contacted."
+        fi
+    fi
+    dups=$(printf '%s\n' "$hosts" | sort | uniq -d)
     [ -z "$dups" ] || warn "server list has duplicate hostnames: $(echo $dups)"
 }
 
@@ -1327,6 +1432,8 @@ COMMON FLAGS (all become plan defaults once 'gen' has run):
 
 Each run writes \$RESULTS_BASE/<run-id>/; \$RESULTS_BASE/latest tracks the
 newest. Analysis follows 'latest'; pass --run-id <id> for an older run.
+A value that can never be valid (a run id with '/', a host name with a space
+or a quote, an iperf value with ';') is refused before any host is contacted.
 'export-overlay' (or 'run --overlay') also renders the run as datacenter
 layout viewer overlays -- throughput, each direction against the run median,
 pair asymmetry, per-host success rate and CPU -- painted onto a .dc floor plan.
@@ -1357,9 +1464,13 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
                                precedence: CLI flag > env var > plan > default.
     --servers, -s FILE         Server list file: one IP/host per line; '#' comments OK
                                (default: \$IPERF_SERVERS env, else the plan file's
-                               hosts, else $SCRIPT_DIR/servers.txt)
+                               hosts, else $SCRIPT_DIR/servers.txt). A host is
+                               letters, digits, . _ : % -, an IPv6 address
+                               optionally in [ ]; any other entry is refused
+                               before any host is contacted
     --output, -o DIR           Base directory for results (default $RESULTS_BASE)
-    --run-id ID                Address an existing run (default: follow 'latest' symlink)
+    --run-id ID                Address an existing run (default: follow 'latest' symlink);
+                               letters, digits, . _ - only, and not . or ..
     --port PORT                iperf2 listening port (default $IPERF_PORT)
     --duration, -d SECONDS     duration per test (default $IPERF_DURATION)
     --test-timeout SECONDS     hard cap per iperf -c, enforced with coreutils
@@ -1381,6 +1492,8 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --length, -l SIZE          TCP read/write buffer size (iperf2 -l; e.g. 128K)
     --window, -w SIZE          TCP window / socket buffer (iperf2 -w; e.g. 4M)
     --mss, -M SIZE             TCP maximum segment size (iperf2 -M)
+                               -b/-l/-w/-M take letters, digits and . , : + -;
+                               spaces split a value into several iperf words
     --no-nagle, -N             disable Nagle's algorithm (iperf2 -N)
     --bind, -B PATTERN         bind iperf -c to a local interface. PATTERN is
                                substring-matched against 'ip -o -4 addr show'
@@ -1404,8 +1517,11 @@ GLOBAL FLAGS (override env vars; both --flag value and --flag=value work):
     --verbose, -v              also print every ssh/scp invocation
     --quiet, -q                suppress non-WARN/ERROR log lines
     --start-delay SECONDS      synchronized-start lead time (default $START_DELAY)
-    --ssh-user, -u USER        SSH login user (default $SSH_USER)
+    --ssh-user, -u USER        SSH login user (default $SSH_USER); letters,
+                               digits, . _ @ -, and not starting with -
     --remote-dir PATH          remote working dir (default $REMOTE_DIR)
+                               Never empty or holding a control character (a
+                               newline, a tab): every command refuses that.
                                Filenames embed <host>_<run-id>, so hosts can share
                                it. cleanup/clean/all/run delete only the files the
                                tool writes there, then the empty dir. Refused
@@ -1728,6 +1844,11 @@ cmd_status() {
     if [ "$watch" != "0" ]; then
         _validate_uint "--watch" "$watch" 1
     fi
+    # status asks every host in the list, so the list is checked first,
+    # as every other command that contacts hosts does (IO-002).
+    if [ -n "$SERVER_LIST_FILE" ] && [ -f "$SERVER_LIST_FILE" ]; then
+        _validate_server_list
+    fi
     while :; do
         if [ "$watch" != "0" ]; then
             # Clear + home, like watch(1) / mx status --watch.
@@ -1869,7 +1990,7 @@ cmd_check_servers() {
 # .log beside it. stop-servers (and stop, clean, and Ctrl-C) stops that pid
 # and nothing else, once it has checked that the pid is still
 # `iperf -p PORT`. An operator's own daemon on the same port, or another
-# tool's, is left alone. Before 2.12.0 both ran `pkill -f '^iperf -p
+# tool's, is left alone. Before 2.13.0 both ran `pkill -f '^iperf -p
 # PORT '`, which killed every such daemon the SSH user could signal, and
 # start-servers ran `iperf -s -D`, which detaches before it binds, so a
 # taken port still "started".
@@ -1978,7 +2099,7 @@ if [ -z "$_ioup" ]; then
     kill "$_iop" 2>/dev/null || true
     rm -f -- "$_iopf"
     _iolast=$(tail -n 1 "$_iolf" 2>/dev/null || true)
-    echo "ERROR: $_iohost: iperf -s is not listening on port $_ioport${_iolast:+ (its log: $_iolast)}. If the port is taken, stop what holds it or pick another --port. A daemon an iperf-orchestrator before 2.12.0 started has no pid file, and stop-servers leaves it alone: stop it by hand (pkill -f '^iperf -p $_ioport ')." >&2
+    echo "ERROR: $_iohost: iperf -s is not listening on port $_ioport${_iolast:+ (its log: $_iolast)}. If the port is taken, stop what holds it or pick another --port. A daemon an iperf-orchestrator before 2.13.0 started has no pid file, and stop-servers leaves it alone: stop it by hand (pkill -f '^iperf -p $_ioport ')." >&2
     exit 1
 fi
 echo "$_iohost: the iperf daemon is listening on port $_ioport (pid $_iop)"
@@ -5749,6 +5870,13 @@ shift || true
 if [ -n "${_PLAN_MISSING:-}" ] && [ "$cmd" != "gen" ]; then
     die "plan file not found: $_PLAN_MISSING (run '$PROG gen' to create it)"
 fi
+
+# Values that can never be valid are refused before any command runs
+# (shared_tools IO-002); help and version still show what is set.
+case "$cmd" in
+    ""|help|-h|--help|help-advanced|--help-advanced|version|--version) ;;
+    *) _validate_values ;;
+esac
 
 case "$cmd" in
     "")                 first_run_banner ;;

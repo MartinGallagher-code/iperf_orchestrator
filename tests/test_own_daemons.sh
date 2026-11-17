@@ -6,7 +6,7 @@
 # it starts are listening (shared_tools IO-006; the owner chose: no fallback
 # to the pattern).
 #
-# Before 2.12.0 stop-servers (and stop, clean, Ctrl-C) ran
+# Before 2.13.0 stop-servers (and stop, clean, Ctrl-C) ran
 # `pkill -f '^iperf -p PORT '`, which killed an operator's own daemon on the
 # port too; start-servers ran `iperf -s -D`, which detaches before it binds,
 # so a taken port "started" and exited 0; check-servers said RUNNING for any
