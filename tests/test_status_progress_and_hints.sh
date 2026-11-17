@@ -48,8 +48,8 @@ case "$remote_cmd" in
     *"command -v mpstat"*)
         echo "yes"
         exit 0 ;;
-    *"pgrep -ax iperf"*|*"pgrep -x iperf"*)
-        exit 1 ;;
+    ": iperf-orchestrator check-server"*)
+        exit 0 ;;
     *)
         exit 0 ;;
 esac

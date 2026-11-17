@@ -50,7 +50,7 @@ PROG="${IPERF_ORCH_PROG:-$0}"
 
 # Reported by --version / the version subcommand. Keep in sync with the
 # version in pyproject.toml and iperf_orchestrator/__init__.py.
-ORCH_VERSION="2.12.0"
+ORCH_VERSION="2.13.0"
 # Copyright holder and license, mirroring the file header, LICENSE, and
 # pyproject.toml. --version prints these in the conventional GNU layout:
 # program + version on line 1 (so scripts can still parse it), then the
@@ -719,7 +719,7 @@ _remote_dir_guard() {
 #   it removes those files and the directory itself (rmdir: nothing else
 #   could have been in it). A REMOTE_DIR that does not exist is left alone.
 #------------------------------------------------------------------------------
-_REMOTE_DIR_OWN_FILES='run_iperf_*.sh .run_iperf_*.tmp iperf_test_*.log iperf_run_*.status iperf_run_*.sid iperf_server_*.log cpu_*.log _results_*.tar.gz _iperf_files_*.list'
+_REMOTE_DIR_OWN_FILES='run_iperf_*.sh .run_iperf_*.tmp iperf_test_*.log iperf_run_*.status iperf_run_*.sid iperf_server_*.log iperf_daemon_*.pid iperf_daemon_*.log cpu_*.log _results_*.tar.gz _iperf_files_*.list'
 
 _remote_dir_removal_problem() {
     local d="$1" part dn="" home_n=""
@@ -791,6 +791,12 @@ _remote_dir_remove() {
     s+="[ -n \"\$_ioh\" ] || continue; _ior=\$(cd -- \"\$_ioh\" 2>/dev/null && pwd -P) || _ior=\$_ioh; "
     s+="case \"\$_ior/\" in \"\$_ioreal\"/*) printf '%s\\n' \"\$_ioh\"; break ;; esac; done); "
     s+="if [ -n \"\$_iohit\" ]; then echo \"ERROR: $hq: REMOTE_DIR \$_iod is, or holds, the home directory \$_iohit; refusing to delete it (nothing removed)\" >&2; exit 1; fi; "
+    # A daemon start-servers started from here and still running would be
+    # left with no pid file, and stop-servers stops nothing else (IO-006).
+    s+="for _iopf in \"\$_iod\"/iperf_daemon_*.pid; do [ -f \"\$_iopf\" ] || continue; _iop=\$(cat \"\$_iopf\" 2>/dev/null); "
+    s+="case \"\$_iop\" in ''|*[!0-9]*) continue ;; esac; "
+    s+="_ioa=\$(tr '\\0' ' ' 2>/dev/null < /proc/\$_iop/cmdline || ps -o args= -p \"\$_iop\" 2>/dev/null); "
+    s+="case \"\$_ioa\" in *'iperf -p '*) echo \"ERROR: $hq: the iperf daemon started from REMOTE_DIR \$_iod (pid \$_iop, \${_iopf##*/}) is still running; run stop-servers first (nothing removed)\" >&2; exit 1 ;; esac; done; "
     # Anything the tool does not write there stops the removal.
     s+="_ioforeign=''; for _ioe in \"\$_iod\"/* \"\$_iod\"/.[!.]* \"\$_iod\"/..?*; do "
     s+="[ -e \"\$_ioe\" ] || [ -L \"\$_ioe\" ] || continue; _iob=\${_ioe##*/}; "
@@ -1292,6 +1298,7 @@ _resolve_peer_bind_ips() {
         (
             ssh_run "${hosts[$i]}" "
                 BIND_RAW=$(_shq "$pattern")
+                command -v ip >/dev/null 2>&1 || { echo NO-IP; exit 0; }
                 _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
                 [ -n \"\$_line\" ] || exit 1
                 echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1
@@ -1301,10 +1308,12 @@ _resolve_peer_bind_ips() {
     done
     wait
 
-    local missing=() ip
+    local missing=() noip=() ip
     for ((i=0; i<n; i++)); do
         ip=$(tr -d '[:space:]' < "$tmpdir/$i.ip" 2>/dev/null)
-        if [ -z "$ip" ]; then
+        if [ "$ip" = NO-IP ]; then
+            noip+=("${hosts[$i]}")
+        elif [ -z "$ip" ]; then
             missing+=("${hosts[$i]}")
         else
             PEER_BIND_IPS["${hosts[$i]}"]=$ip
@@ -1313,6 +1322,10 @@ _resolve_peer_bind_ips() {
     done
     rm -rf "$tmpdir"
 
+    # Without 'ip' nothing can match: say so rather than blame the pattern.
+    if [ "${#noip[@]}" -gt 0 ]; then
+        die "--bind '$pattern' needs the 'ip' command, which is not on host(s): ${noip[*]}"
+    fi
     if [ "${#missing[@]}" -gt 0 ]; then
         die "--bind '$pattern': no interface matched on host(s): ${missing[*]}. Check that the pattern matches a line in 'ip -o -4 addr show' on each host."
     fi
@@ -1636,10 +1649,13 @@ PLAN WORKFLOW (each verb reads the plan file, so flags never repeat):
 
 SETUP:
     check-iperf            Check which hosts have iperf2 installed
-    check-servers          Check which hosts have iperf -s currently running
+    check-servers          Check which hosts run the iperf daemon start-servers
+                           started on --port (from its pid file in REMOTE_DIR)
 
 EXECUTION:
-    start-servers          Start iperf -p \$PORT -s -D on every host
+    start-servers          Start iperf -p \$PORT -s on every host, record its pid in
+                           REMOTE_DIR and wait until it listens; a host where
+                           it does not (the port is taken) fails
     create-scripts         Generate per-host client run scripts (called by run-tests)
     distribute-scripts     Copy each host's run script to that host (called by run-tests)
     run-tests [MODE] [--keep-going]
@@ -1656,7 +1672,9 @@ EXECUTION:
                                               --total-time, with --host-flows concurrent.
                                               Self-starting (no create-scripts).
     collect-results        Pull each host's logs as a tarball back into the run dir.
-    stop-servers           Kill iperf -s daemons on every host.
+    stop-servers           Stop the iperf daemon start-servers started on every
+                           host, and no other: an iperf someone else started on
+                           the port is left running.
     cleanup [--yes]        Remove \$REMOTE_DIR on every host (--yes required):
                            only the tool's own files, then the empty dir.
 
@@ -1981,15 +1999,21 @@ cmd_check_iperf() {
 #------------------------------------------------------------------------------
 _worker_check_servers() {
     local host="$1"
-    # `pgrep -x iperf` matches process name exactly = "iperf", which
-    # excludes "iperf3". Adding -a includes the full command line.
+    # The daemon start-servers started on this port, from its pid file:
+    # another iperf, or one on another port, is not it (IO-006).
     local result
-    result=$(ssh_run "$host" "pgrep -ax iperf || true" 2>/dev/null || true)
-    if [ -n "$result" ]; then
-        printf "%-30s RUNNING    %s\n" "$host" "$(echo "$result" | head -n1)"
-    else
-        printf "%-30s STOPPED\n" "$host"
-    fi
+    result=$(ssh_run "$host" ": iperf-orchestrator check-server
+_iod=$(_shq "$REMOTE_DIR")
+$(_daemon_vars "$host")
+$_DAEMON_FUNCS
+$_DAEMON_CHECK" 2>/dev/null || true)
+    result=$(printf '%s\n' "$result" | head -n1)
+    result="${result% }"
+    case "$result" in
+        '')   printf "%-30s STOPPED\n" "$host" ;;
+        '? '*) printf "%-30s UNKNOWN    no /proc and no ps on the host to look at pid %s\n" "$host" "${result#? }" ;;
+        *)    printf "%-30s RUNNING    pid %s: %s\n" "$host" "${result%% *}" "${result#* }" ;;
+    esac
 }
 
 cmd_check_servers() {
@@ -1999,26 +2023,179 @@ cmd_check_servers() {
 }
 
 #------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+# The iperf daemons this tool starts (shared_tools IO-006)
+#
+# start-servers starts `iperf -p PORT [-B ip] -s` on each host in the
+# background, with SIGHUP ignored as -D would have it, and records its pid
+# in REMOTE_DIR/iperf_daemon_<host>_<port>.pid; what it prints goes to the
+# .log beside it. stop-servers (and stop, clean, and Ctrl-C) stops that pid
+# and nothing else, once it has checked that the pid is still
+# `iperf -p PORT`. An operator's own daemon on the same port, or another
+# tool's, is left alone. Before 2.13.0 both ran `pkill -f '^iperf -p
+# PORT '`, which killed every such daemon the SSH user could signal, and
+# start-servers ran `iperf -s -D`, which detaches before it binds, so a
+# taken port still "started".
+#
+# iperf 2.1.9 with its port taken logs "listener bind failed: Address
+# already in use" and stays alive for a while before it exits 0, so a
+# running process proves nothing: start-servers waits until that pid holds
+# a listening socket on the port, and fails for the host if it does not.
+#
+# Each snippet starts with a ': iperf-orchestrator <what>' line, a no-op
+# that says in -v output what the snippet is.
+#------------------------------------------------------------------------------
+_daemon_base() { printf 'iperf_daemon_%s_%s' "$(_sanitize_host "$1")" "$IPERF_PORT"; }
+
+# _daemon_vars HOST: the shell variables every daemon snippet starts with:
+# the port, the host for messages, and the pid and log file names.
+_daemon_vars() {
+    local host="$1" base hq
+    base=$(_daemon_base "$host")
+    _dqin_to hq "$host"
+    printf '_ioport=%s; _iohost="%s"; _iopf=%s; _iolf=%s\n' \
+        "$IPERF_PORT" "$hq" "$(_shq "$base.pid")" "$(_shq "$base.log")"
+}
+
+# POSIX sh functions the daemon snippets share. They read $_ioport.
+_DAEMON_FUNCS=$(cat <<'SH'
+# _ioargs PID: its command line, nothing once it is gone (or a zombie);
+# status 2 when this host has neither /proc nor ps to tell.
+_ioargs() {
+    if [ -r /proc/self/cmdline ]; then
+        tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline"
+        return 0
+    fi
+    command -v ps >/dev/null 2>&1 || return 2
+    ps -o args= -p "$1" 2>/dev/null
+    return 0
+}
+# _ioours ARGS: true when ARGS is the command line of iperf -s on our port.
+_ioours() {
+    case "$1" in "iperf -p $_ioport "*|*"/iperf -p $_ioport "*) return 0 ;; esac
+    return 1
+}
+# _ioalive PID: true while PID is still our daemon.
+_ioalive() {
+    _ioa=$(_ioargs "$1") && _ioours "$_ioa"
+}
+# _iolisten PID: 0 when PID holds a listening TCP socket on our port, 1
+# when it does not, 2 when this host has no ss and no /proc to tell.
+_iolisten() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp 2>/dev/null | awk -v p="$_ioport" -v me="pid=$1," \
+            'index($0, me) { n = split($4, a, ":"); if (a[n] == p) f = 1 } END { exit !f }'
+        return
+    fi
+    if [ -r /proc/net/tcp ] && [ -d "/proc/$1/fd" ]; then
+        _iohp=$(printf ':%04X' "$_ioport")
+        for _ioino in $(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+                | awk -v hp="$_iohp" '$4 == "0A" && substr($2, length($2) - 4) == hp { print $10 }'); do
+            ls -l "/proc/$1/fd" 2>/dev/null | grep -q "socket:\[$_ioino\]" && return 0
+        done
+        return 1
+    fi
+    return 2
+}
+_iosleep() { sleep 0.2 2>/dev/null || sleep 1; }
+SH
+)
+
+_DAEMON_START=$(cat <<'SH'
+BIND_FLAG=''
+if [ -n "$BIND_RAW" ]; then
+    command -v ip >/dev/null 2>&1 \
+        || { echo "ERROR: $_iohost: --server-bind needs the 'ip' command, which is not on this host" >&2; exit 1; }
+    _line=$(ip -o -4 addr show 2>/dev/null | grep -- "$BIND_RAW" | head -n1)
+    [ -n "$_line" ] || { echo "ERROR: $_iohost: --server-bind: no interface matched '$BIND_RAW'" >&2; exit 1; }
+    _ip=$(echo "$_line" | awk '{print $4}' | cut -d/ -f1)
+    BIND_FLAG="-B $_ip"
+    echo "[server-bind] $_iohost: '$BIND_RAW' -> ip=$_ip"
+fi
+# A daemon of ours already up on this port is left as it is.
+if [ -f "$_iopf" ]; then
+    _iop=$(cat "$_iopf")
+    if _ioalive "$_iop"; then
+        echo "$_iohost: the iperf daemon on port $_ioport is already running (pid $_iop)"
+        exit 0
+    fi
+    rm -f -- "$_iopf"
+fi
+( trap '' HUP; exec iperf -p "$_ioport" $BIND_FLAG -s ) </dev/null >>"$_iolf" 2>&1 &
+_iop=$!
+echo "$_iop" > "$_iopf"
+# Up to 5 s for that pid to listen on the port. With neither ss nor /proc
+# to look with, a second without a bind error in its log has to do.
+_ioup=''; _ioi=0
+while [ "$_ioi" -lt 25 ]; do
+    _iosleep
+    _ioi=$((_ioi + 1))
+    _ioalive "$_iop" || break
+    if _iolisten "$_iop"; then _ioup=1; break; else _iorc=$?; fi
+    if [ "$_iorc" = 2 ] && [ "$_ioi" -ge 5 ] \
+       && ! grep -qiE 'bind failed|address already in use' "$_iolf" 2>/dev/null; then
+        _ioup=1; break
+    fi
+done
+if [ -z "$_ioup" ]; then
+    kill "$_iop" 2>/dev/null || true
+    rm -f -- "$_iopf"
+    _iolast=$(tail -n 1 "$_iolf" 2>/dev/null || true)
+    echo "ERROR: $_iohost: iperf -s is not listening on port $_ioport${_iolast:+ (its log: $_iolast)}. If the port is taken, stop what holds it or pick another --port. A daemon an iperf-orchestrator before 2.13.0 started has no pid file, and stop-servers leaves it alone: stop it by hand (pkill -f '^iperf -p $_ioport ')." >&2
+    exit 1
+fi
+echo "$_iohost: the iperf daemon is listening on port $_ioport (pid $_iop)"
+SH
+)
+
+_DAEMON_STOP=$(cat <<'SH'
+[ -d "$_iod" ] || exit 0
+cd -- "$_iod" || exit 1
+[ -f "$_iopf" ] || exit 0
+_iop=$(cat "$_iopf")
+case "$_iop" in ''|*[!0-9]*) rm -f -- "$_iopf"; exit 0 ;; esac
+if ! _ioa=$(_ioargs "$_iop"); then
+    echo "ERROR: $_iohost: cannot tell whether pid $_iop is still the iperf daemon on port $_ioport (no /proc and no ps on this host); it was not stopped" >&2
+    exit 1
+fi
+# Gone, or the pid is something else now: only the pid file is left.
+if _ioours "$_ioa"; then
+    kill "$_iop" 2>/dev/null || true
+    _ioi=0
+    while _ioalive "$_iop" && [ "$_ioi" -lt 25 ]; do _iosleep; _ioi=$((_ioi + 1)); done
+    if _ioalive "$_iop"; then
+        echo "ERROR: $_iohost: the iperf daemon on port $_ioport (pid $_iop) did not stop" >&2
+        exit 1
+    fi
+fi
+rm -f -- "$_iopf"
+SH
+)
+
+_DAEMON_CHECK=$(cat <<'SH'
+cd -- "$_iod" 2>/dev/null || exit 0
+[ -f "$_iopf" ] || exit 0
+_iop=$(cat "$_iopf")
+case "$_iop" in ''|*[!0-9]*) exit 0 ;; esac
+_ioa=$(_ioargs "$_iop") || { echo "? $_iop"; exit 0; }
+if _ioours "$_ioa"; then echo "$_iop $_ioa"; fi
+exit 0
+SH
+)
+
 _worker_start_server() {
     local host="$1"
     # If --server-bind is set, the remote shell resolves the substring
     # against its own interface list and passes -B <ip> to iperf -s.
     # Failure is fatal so the operator notices a wrong pattern instead
     # of silently falling back to a 0.0.0.0 listener.
-    ssh_run "$host" "
-        set -e
-        $(_remote_dir_guard "$host" create)
-        BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
-        BIND_FLAG=''
-        if [ -n \"\$BIND_RAW\" ]; then
-            _line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
-            [ -n \"\$_line\" ] || { echo \"ERROR: $(_dqin "$host"): --server-bind: no interface matched '\$BIND_RAW'\" >&2; exit 1; }
-            _ip=\$(echo \"\$_line\" | awk '{print \$4}' | cut -d/ -f1)
-            BIND_FLAG=\"-B \$_ip\"
-            echo \"[server-bind] $(_dqin "$host"): '\$BIND_RAW' -> ip=\$_ip\"
-        fi
-        iperf -p $IPERF_PORT \$BIND_FLAG -s -D
-    "
+    ssh_run "$host" ": iperf-orchestrator start-server
+set -e
+$(_remote_dir_guard "$host" create)cd -- \"\$_iod\"
+$(_daemon_vars "$host")
+BIND_RAW=$(_shq "$IPERF_SERVER_BIND")
+$_DAEMON_FUNCS
+$_DAEMON_START"
 }
 
 cmd_start_servers() {
@@ -2181,6 +2358,10 @@ BIND_ARG=""
 BIND_IP=""
 BIND_IFACE=""
 if [ -n "\$BIND_RAW" ]; then
+    command -v ip >/dev/null 2>&1 || {
+        echo "ERROR: \$SOURCE: --bind needs the 'ip' command, which is not on this host" >&2
+        exit 1
+    }
     _bind_line=\$(ip -o -4 addr show 2>/dev/null | grep -- "\$BIND_RAW" | head -n1)
     [ -n "\$_bind_line" ] || {
         echo "ERROR: \$SOURCE: no interface matched '\$BIND_RAW'" >&2
@@ -2633,6 +2814,10 @@ _run_rolling() {
             BIND_IP=\"\"
             BIND_IFACE=\"\"
             if [ -n \"\$BIND_RAW\" ]; then
+                command -v ip >/dev/null 2>&1 || {
+                    echo \"ERROR: $q_src: --bind needs the 'ip' command, which is not on this host\" >&2
+                    exit 1
+                }
                 _bind_line=\$(ip -o -4 addr show 2>/dev/null | grep -- \"\$BIND_RAW\" | head -n1)
                 [ -n \"\$_bind_line\" ] || {
                     echo \"ERROR: $q_src: no interface matched '\$BIND_RAW'\" >&2
@@ -2899,7 +3084,12 @@ cmd_collect_results() {
 
 #------------------------------------------------------------------------------
 _worker_stop_server() {
-    ssh_run "$1" "pkill -f '^iperf -p $IPERF_PORT ' 2>/dev/null; true"
+    local host="$1"
+    ssh_run "$host" ": iperf-orchestrator stop-server
+$(_remote_dir_guard "$host")
+$(_daemon_vars "$host")
+$_DAEMON_FUNCS
+$_DAEMON_STOP"
 }
 
 cmd_stop_servers() {

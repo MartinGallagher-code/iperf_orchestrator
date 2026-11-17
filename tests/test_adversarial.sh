@@ -309,8 +309,11 @@ test_ssh_gets_bracketed_ipv6_without_brackets() {
     install_fake_ssh
     write_server_list '[fe80::1]' 2001:db8::1 >/dev/null
     orch check-servers
-    assert_contains "$(cut -f2 "$FAKE_SSH_LOG" | sort -u | tr '\n' ' ')" "fe80::1 " || return 1
-    assert_not_contains "$(cut -f2 "$FAKE_SSH_LOG")" "[fe80::1]" "ssh cannot resolve a bracketed name" || return 1
+    # The host of each ssh call (a multi-line remote command continues on
+    # lines of its own, which are not calls).
+    local dsts; dsts=$(awk -F'\t' '$1 == "ssh" {print $2}' "$FAKE_SSH_LOG")
+    assert_contains "$(printf '%s\n' "$dsts" | sort -u | tr '\n' ' ')" "fe80::1 " || return 1
+    assert_not_contains "$dsts" "[fe80::1]" "ssh cannot resolve a bracketed name" || return 1
 }
 
 test_scp_gets_bare_ipv6_in_brackets() {
