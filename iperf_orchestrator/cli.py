@@ -42,7 +42,9 @@ def _default_environment() -> Dict[str, str]:
         local_servers = Path.cwd() / "servers.txt"
         # A plan file supplies its own host list, and the script treats
         # IPERF_SERVERS as an explicit user choice that beats the plan --
-        # so only auto-point at servers.txt when no plan is present.
+        # so only auto-point at servers.txt when no plan is present. The
+        # script itself loads ./iperf_plan.conf and says so on stderr
+        # (shared_tools IO-005); nothing here loads or names a plan.
         local_plan = Path.cwd() / "iperf_plan.conf"
         if local_servers.is_file() and not local_plan.is_file():
             env["IPERF_SERVERS"] = str(local_servers)

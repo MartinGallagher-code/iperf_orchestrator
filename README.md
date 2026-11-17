@@ -233,14 +233,21 @@ them: `ssh_jobs=`, `start_delay=` and `output=` (the results directory). Values
 cannot contain whitespace.
 
 **When a plan is loaded.** Every command loads `./iperf_plan.conf` from the
-current directory whenever that file exists, without saying so, unless
-`--plan FILE` or `$IPERF_PLAN` names another plan. Its settings then apply
-like flags you typed, `remote_dir=` and `ssh_user=` included. So run
-commands in a directory whose plan you know: `clean --yes` in a directory
-that holds someone else's plan deletes that plan's `remote_dir=`, on that
-plan's hosts, as that plan's user (only if it holds nothing but this tool's
-files: see **Shared-FS safety**). `status` prints the plan it
-loaded. `--test-timeout`, `--single-server`, `--python`,
+current directory whenever that file exists, unless `--plan FILE` or
+`$IPERF_PLAN` names another plan. Its settings then apply like flags you
+typed, `remote_dir=` and `ssh_user=` included. Since 2.12.0 a plan picked up
+this way is announced on stderr, by every command but `help` and `version`:
+`Using plan ./iperf_plan.conf from the current directory (--plan FILE or
+IPERF_PLAN picks another)`. `--quiet` hides that line, and a plan you name is
+not announced. Still, run commands in a directory whose plan you know:
+`clean --yes` in a directory that holds someone else's plan deletes that
+plan's `remote_dir=`, on that plan's hosts, as that plan's user (only if it
+holds nothing but this tool's files: see **Shared-FS safety**). So `clean`,
+`cleanup`, `all` and `run` say, before deleting, which of `remote_dir=`,
+`ssh_user=` and the host list came from the plan, and which plan:
+`... (remote_dir=, ssh_user= and the host list from the plan
+./iperf_plan.conf)`. A setting you gave as a flag is not attributed to the
+plan. `status` prints the plan it loaded. `--test-timeout`, `--single-server`, `--python`,
 `--run-id` and the `--overlay-*` flags are per-run choices, not plan
 settings: pass them (or their environment variables) each time.
 
