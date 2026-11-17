@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.1] - 2026-11-17
+
+CI only; the tool is unchanged (shared_tools ticket IO-012).
+
+### Changed
+
+- **The sandbox pass runs in a CI job of its own.** `test (python 3.13)`
+  used to run the plain suite, then the same suite on the sandbox ssh
+  (`./tests/run_tests.sh --sandbox`), then the adversarial tests under
+  `BASH_COMPAT=42`, one after another: about 13 minutes, against 5 to 7
+  for the other matrix jobs. The last two steps now run in a new job,
+  `test (sandbox, python 3.13)`, beside the matrix, and `test (python
+  3.13)` runs the plain suite like the others. Every step still runs
+  once; only the wall time of a run falls.
+
 ## [2.13.0] - 2026-11-17
 
 The tool stops only the iperf daemons it started, and checks that the
