@@ -92,6 +92,52 @@ old pattern). It was 2.12.0 in its pull request: IO-002 merged first, as
 - `test_ssh_gets_bracketed_ipv6_without_brackets` reads hosts only from
   the `ssh` lines of the stand-in's call log: `check-servers` now sends a
   command of several lines, and its later lines are not calls.
+
+## [2.12.0] - 2026-11-17
+
+A plan picked up from the current directory is announced, and the commands
+that delete say which of their settings came from it (shared_tools ticket
+IO-005, found by IO-001's adversarial pass; the owner chose "announce it").
+It was 2.10.0 in its pull request; IO-002 merged first, as 2.11.0, so there
+is no 2.10.0.
+
+### Changed
+
+- **`./iperf_plan.conf` is no longer loaded silently.** Every command still
+  loads it when it exists and neither `--plan` nor `IPERF_PLAN` names a
+  plan. Every command but `help` and `version` now says so on stderr:
+  `Using plan ./iperf_plan.conf from the current directory (--plan FILE or
+  IPERF_PLAN picks another)`. `--quiet` hides the line, and a plan you
+  name is not announced. The plan sets every setting, `remote_dir=` and
+  `ssh_user=` included. IO-001 reproduced a bare `clean`, run in a
+  directory holding someone else's plan, deleting that user's home
+  directory contents on both hosts (before 2.8.0's guards).
+- **`clean`, `cleanup`, `all` and `run` name the plan before deleting.**
+  When any of `remote_dir=`, `ssh_user=` or the host list came from a plan,
+  their messages say which, and which plan:
+  `... (remote_dir=, ssh_user= and the host list from the plan
+  ./iperf_plan.conf)`. This covers `clean`'s prompt and its refusal without
+  `--yes`, `cleanup`'s refusal, both commands' last line before the
+  delete, and the "At the end: delete REMOTE_DIR" line of `all` and `run`.
+  A setting given as a flag is not attributed to the plan.
+- README ("When a plan is loaded"), `--help` and `--help-advanced`
+  (`--plan`), and the PyPI wrapper's comment (`cli.py`, which loads no
+  plan itself) say so.
+
+### Tests
+
+- `tests/test_plan_announce.sh` runs from a directory holding a plan with
+  someone else's `remote_dir=`, `ssh_user=` and hosts. It checks:
+  - the announcement is on stderr, not stdout;
+  - there is none for `--plan` or `IPERF_PLAN`, or with `--quiet`;
+  - `clean`, `cleanup` and `all` name the plan;
+  - a flag is not attributed to it.
+
+  Five of the seven fail on 2.8.4; the other two guard what must stay
+  silent. All pass plain and with `--sandbox`.
+- `tests/test_plan_announce_mutations.sh`: a mutation per test, 7 of 7
+  killed.
+
 ## [2.11.0] - 2026-11-16
 
 Values that can never be valid are refused before any host is contacted
@@ -246,6 +292,7 @@ A run no longer touches another run's files whose run id ends in its own
   fixtures (`<host>_to_peer` is now `<host>_to_<a listed host>`).
   `test_distribute_scripts_removes_only_this_runs_stale_files` checks the
   new selection instead of the old globs.
+
 ## [2.8.3] - 2026-11-16
 
 Ctrl-C now stops the run on the hosts, not only on this machine
@@ -328,6 +375,7 @@ Nothing in the tool itself changed.
   that `rm` without `-f` of a missing name still fails. It includes a
   mutation check: with the fix taken out of a copy of the helper, the race
   test fails.
+
 ## [2.8.1] - 2026-11-16
 
 The analysis steps no longer import Python modules from the directory the

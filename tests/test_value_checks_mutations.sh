@@ -69,8 +69,8 @@ MUTATIONS=$(cat <<'TABLE'
 ---             ''|.|..|*[!A-Za-z0-9._-]*)
 +++             ''|-*|.|..|*[!A-Za-z0-9._-]*)
 ### test_help_and_version_run_whatever_is_set
----     ""|help|-h|--help|help-advanced|--help-advanced|version|--version) ;;
-+++     "") ;;
+---     ""|help|-h|--help|help-advanced|--help-advanced|version|--version) ;;\n    *) _validate_values ;;
++++     "") ;;\n    *) _validate_values ;;
 TABLE
 )
 export MUTATIONS
