@@ -17,6 +17,8 @@ What CI runs on every pull request into `main` and every push to it
 ```bash
 python -m pip install --upgrade pip numpy matplotlib
 ./tests/run_tests.sh                                   # test: Python 3.9-3.13
+./tests/run_tests.sh --sandbox                         # sandbox: Python 3.13, its own job
+BASH_COMPAT=42 bash tests/test_adversarial.sh          # sandbox: bash 4.2 rules
 
 python -m pip install --upgrade vermin                 # python-floor: the 3.6 floor
 ./tests/check_python_compat.sh --extract-to /tmp/pyblocks
